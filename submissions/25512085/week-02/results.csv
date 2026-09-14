@@ -14,3 +14,9 @@ run,harness,success,tokens,iters,interventions,note
 13,plan_exec,X,500,1,0,replans=0
 14,plan_exec,X,74,1,0,replans=0
 15,plan_exec,O,47550,12,0,replans=0
+16,react,X,3638,2,0,
+17,react,O,4223,2,0,
+18,react,O,7533,3,0,
+19,plan_exec,O,19571,9,0,replans=0
+20,plan_exec,X,,,,crash: TypeError: 'NoneType' object is not subscriptable
+21,plan_exec,X,26181,12,0,replans=1
