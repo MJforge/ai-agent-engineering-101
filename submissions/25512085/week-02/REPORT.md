@@ -22,6 +22,19 @@ v2는 v1의 초기 계획 JSON 형식 실패를 근거로 Plan-then-Execute만 �
 | 오류 복구 | Observation을 근거로 다음 행동을 다시 결정한다. | 초기 계획 JSON 오류는 교정 프롬프트로 1회 재시도하고, `OFF_PLAN`은 재계획 최대 1회다. |
 | 사람 개입 | 읽기 전용 도구만 사용하므로 0회다. | 읽기 전용 도구만 사용하므로 0회다. |
 
+```mermaid
+flowchart TB
+    C[공통: 모델 · 태스크 · 도구 · 성공 기준] --> R[ReAct: Observation 후 다음 행동 결정]
+    R --> RA[답변 또는 max_steps 종료]
+    C --> P[Plan: JSON 계획 생성]
+    P -->|비JSON| J[교정 프롬프트 1회]
+    J -->|성공| E[계획 단계 실행]
+    J -->|실패| X[종료]
+    P -->|JSON| E
+    E -->|OFF_PLAN, 1회 이내| RP[재계획]
+    E --> A[최종 답변]
+```
+
 ## 2. v2 측정 결과
 
 v1의 10--15번 실행은 `results.csv`와 `logs/`에 보존했다. v1에서는 ReAct 3/3,
