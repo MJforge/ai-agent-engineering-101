@@ -21,6 +21,13 @@ SYSTEM_EXEC = (
     "line that starts with 'Answer:'."
 )
 
+PLAN_RETRY_PROMPT = (
+    "Your previous response was not a valid JSON array. Return only a valid "
+    "JSON array containing 3 to 5 short step strings. Do not call a tool and "
+    "do not include prose or Markdown fences. Example: [\"Read app.log\", "
+    "\"Count ERROR lines by hour\", \"Return the busiest hour\"]"
+)
+
 
 def parse_plan(text: str):
     """Return a list of step strings, or None if the model did not give JSON."""
@@ -35,7 +42,8 @@ def parse_plan(text: str):
 
 
 def run_plan_execute(task: str, max_replan: int = 1,
-                     max_tool_rounds: int = 3, log=print):
+                     max_tool_rounds: int = 3, max_plan_retries: int = 1,
+                     log=print):
     meter = Meter()
 
     # 1) PLAN: the whole plan in one call, no tools
@@ -44,8 +52,17 @@ def run_plan_execute(task: str, max_replan: int = 1,
                      f"count_pattern(path, pattern).")
     raw = planner.send().text
     plan = parse_plan(raw)
-    if plan is None:                              # a parse failure is one failure mode
+    plan_retries = 0
+    while plan is None and plan_retries < max_plan_retries:
+        plan_retries += 1
         log(f"[plan] not valid JSON: {raw.strip()[:300]!r}")
+        log(f"[plan retry {plan_retries}] requesting a JSON-array-only repair")
+        planner.add_user(PLAN_RETRY_PROMPT)
+        raw = planner.send().text
+        plan = parse_plan(raw)
+
+    if plan is None:                              # retry budget exhausted
+        log(f"[plan] not valid JSON after {plan_retries} retry: {raw.strip()[:300]!r}")
         return "plan parse failed", meter, 0
     log(f"[plan] {plan}")
 
