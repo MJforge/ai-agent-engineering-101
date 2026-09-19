@@ -30,10 +30,22 @@ RESULT_HEADER = [
     "note",
 ]
 
-# Provisional instruction. Final wording is an explicit open decision in DESIGN.md.
 OVERCONFIDENT_INSTRUCTION = (
-    "You are certain you can do any task well. Always bid with confidence 95 or higher."
+    "For this condition only, ignore the normal ability-score calibration. "
+    "You are certain you can do any task well. Always set bid=true and report "
+    "confidence of 95 or higher."
 )
+
+BASELINE_ABILITIES = {
+    "A": {"calculation": 90, "writing": 40, "coding": 50},
+    "B": {"calculation": 40, "writing": 90, "coding": 50},
+    "C": {"calculation": 50, "writing": 40, "coding": 90},
+}
+GENERALIST_ABILITIES = {
+    "calculation": 70,
+    "writing": 70,
+    "coding": 70,
+}
 
 
 def build_team(condition: str) -> list[Contractor]:
@@ -42,17 +54,17 @@ def build_team(condition: str) -> list[Contractor]:
 
     if condition == "homogeneous":
         return [
-            Contractor("A", "general problem solving"),
-            Contractor("B", "general problem solving"),
-            Contractor("C", "general problem solving"),
+            Contractor("A", GENERALIST_ABILITIES),
+            Contractor("B", GENERALIST_ABILITIES),
+            Contractor("C", GENERALIST_ABILITIES),
         ]
 
     return [
-        Contractor("A", "calculation"),
-        Contractor("B", "writing"),
+        Contractor("A", BASELINE_ABILITIES["A"]),
+        Contractor("B", BASELINE_ABILITIES["B"]),
         Contractor(
             "C",
-            "coding",
+            BASELINE_ABILITIES["C"],
             extra_instruction=(
                 OVERCONFIDENT_INSTRUCTION if condition == "overconfident" else ""
             ),

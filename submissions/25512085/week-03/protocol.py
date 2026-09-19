@@ -12,12 +12,15 @@ from typing import Any
 
 
 ELIGIBILITY_SPECIFICATION = (
-    "Bid only if your declared skill matches this task."
+    "Every contractor must respond. Bid only when confidence is at least 70."
 )
+
+BID_THRESHOLD = 70
 
 BID_SPECIFICATION = {
     "required_fields": ["bid", "confidence", "reason"],
     "confidence_range": [0, 100],
+    "bid_rule": f"bid must be true exactly when confidence >= {BID_THRESHOLD}",
     "response_format": "one JSON object only",
 }
 
@@ -108,6 +111,13 @@ def parse_bid(raw: str, *, contractor: str, task_id: str | int) -> Bid:
         raise BidParseError("confidence must be between 0 and 100")
     if not isinstance(reason, str) or not reason.strip():
         raise BidParseError("reason must be a non-empty string")
+
+    expected_bid = float(confidence) >= BID_THRESHOLD
+    if bid_value != expected_bid:
+        raise BidParseError(
+            f"bid must be {str(expected_bid).lower()} when confidence is "
+            f"{float(confidence):g}; threshold is {BID_THRESHOLD}"
+        )
 
     return Bid(
         contractor=contractor,

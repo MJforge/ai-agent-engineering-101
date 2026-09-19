@@ -3,17 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Mapping
 
-from protocol import Announcement, BidAttempt, BidParseError, parse_bid
+from protocol import (
+    BID_THRESHOLD,
+    Announcement,
+    BidAttempt,
+    BidParseError,
+    parse_bid,
+)
 
 
 ModelCaller = Callable[[str, str], str]
 
 
 DEFAULT_BID_POLICY = (
-    "Bid only when the task clearly matches your declared skill. "
-    "Set confidence from 0 to 100 based on the strength of that match."
+    "Identify the single most important ability for the announced task: "
+    "calculation, writing, or coding. Use your numeric score for that ability "
+    "as confidence. You must set bid=true when confidence is at least "
+    f"{BID_THRESHOLD}, and bid=false when confidence is below {BID_THRESHOLD}. "
+    "You must respond even when bid=false."
 )
 
 OUTPUT_CONTRACT = (
@@ -27,14 +36,18 @@ OUTPUT_CONTRACT = (
 @dataclass(frozen=True)
 class Contractor:
     name: str
-    skill: str
+    abilities: Mapping[str, int]
     bid_policy: str = DEFAULT_BID_POLICY
     extra_instruction: str = ""
 
     def system_prompt(self) -> str:
+        ability_text = ", ".join(
+            f"{ability}={score}"
+            for ability, score in self.abilities.items()
+        )
         parts = [
             f"You are contractor {self.name} in a contract net.",
-            f"Your declared skill is: {self.skill}.",
+            f"Your abilities are: {ability_text}.",
             self.bid_policy,
             OUTPUT_CONTRACT,
         ]
