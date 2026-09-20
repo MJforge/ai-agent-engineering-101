@@ -18,16 +18,19 @@ ModelCaller = Callable[[str, str], str]
 
 
 DEFAULT_BID_POLICY = (
-    "Treat your numeric ability scores as evidence about your strengths, not "
-    "as confidence values to copy. Read the complete task and judge which of "
-    "calculation, writing, and coding it requires, including mixed-skill tasks. "
-    "Consider both your strong and weak required abilities, then choose one "
-    "integer confidence score using this calibration: 90-100 means an excellent "
-    "fit with no important weakness; 70-89 means you can perform the task well "
-    "although another ability may also be needed; 50-69 means only a partial fit "
-    "or an important weakness; 0-49 means a poor fit. You must set bid=true when "
-    f"confidence is at least {BID_THRESHOLD}, and bid=false when confidence is "
-    f"below {BID_THRESHOLD}. You must respond even when bid=false."
+    "Use your numeric ability scores as the starting point for confidence. Read "
+    "the complete task and identify which of calculation, writing, and coding it "
+    "requires. For a single-skill task, start from the score for that required "
+    "ability. Task simplicity may raise confidence by at most 10 points above "
+    "that score; task complexity may lower it. For a mixed-skill task, start from "
+    "the primary required ability and lower confidence when a secondary required "
+    "ability is weak. Do not use an unrelated high ability to raise confidence. "
+    "Choose one integer confidence score: 90-100 means an excellent fit with no "
+    "important weakness; 70-89 means you can perform the task well; 50-69 means "
+    "only a partial fit or an important weakness; 0-49 means a poor fit. You must "
+    f"set bid=true when confidence is at least {BID_THRESHOLD}, and bid=false "
+    f"when confidence is below {BID_THRESHOLD}. You must respond even when "
+    "bid=false."
 )
 
 OUTPUT_CONTRACT = (

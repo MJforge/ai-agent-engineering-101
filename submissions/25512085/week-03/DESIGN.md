@@ -60,10 +60,12 @@ a response and is retained in the run log.
 
 ## Ability and confidence policy
 
-Normal contractors use their ability scores as evidence rather than copying a
-score directly into confidence. The LLM reads the complete task, identifies all
-required abilities, considers both strengths and weaknesses in its profile,
-and chooses one integer confidence score.
+Normal contractors use ability scores as the starting point for confidence.
+For a single-skill task, simplicity may raise confidence by at most 10 points
+above the relevant ability score, while complexity may lower it. For a
+mixed-skill task, the LLM starts from the primary ability and lowers confidence
+when a required secondary ability is weak; an unrelated high score cannot raise
+confidence.
 
 | condition | contractor | calculation | writing | coding |
 |---|---|---:|---:|---:|
@@ -78,6 +80,8 @@ and chooses one integer confidence score.
   partial fit or has an important weakness, and 0-49 is a poor fit.
 - Mixed-skill tasks must be judged from all abilities they require, so a high
   score in one area does not automatically imply a high confidence.
+- A simple task cannot lift confidence more than 10 points above its relevant
+  single-skill ability score.
 - All three contractors are called and must respond, including non-bidders.
 - The overconfident condition keeps baseline abilities but instructs C to
   ignore normal calibration, always bid, and report confidence at least 95.
@@ -139,6 +143,8 @@ announcement.
 - Confirm that the local model returns only one JSON object.
 - Confirm `reasoning_output_tokens` remains zero.
 - Confirm bid/confidence consistency and inspect parse failures.
+- Confirm that low relevant ability scores do not become high confidence merely
+  because a task is simple.
 - Keep dry-run artifacts separate from formal `results.csv` and `logs/`.
 
 Do not create formal experimental rows or logs until the dry-run gate passes.

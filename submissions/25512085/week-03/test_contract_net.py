@@ -76,8 +76,11 @@ class ContractNetTests(unittest.TestCase):
 
     def test_normal_prompt_asks_llm_to_judge_confidence(self) -> None:
         prompt = build_team("baseline")[0].system_prompt()
-        self.assertIn("not as confidence values to copy", prompt)
-        self.assertIn("including mixed-skill tasks", prompt)
+        self.assertIn("starting point for confidence", prompt)
+        self.assertIn("Task simplicity may raise confidence by at most 10", prompt)
+        self.assertIn("task complexity may lower it", prompt)
+        self.assertIn("secondary required ability is weak", prompt)
+        self.assertIn("unrelated high ability", prompt)
         self.assertIn("90-100 means an excellent fit", prompt)
         self.assertIn("50-69 means only a partial fit", prompt)
         self.assertIn("confidence is at least 70", prompt)
