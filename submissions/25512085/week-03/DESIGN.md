@@ -96,8 +96,9 @@ confidence.
 4. Highest confidence wins; a tie keeps the earliest contractor.
 5. No valid bid means `unassigned`.
 6. A winner different from `gold` is retained as a `misaward`, not repaired.
-7. Count three announcements per task, one message per accepted bid, and one
-   award when a winner exists.
+7. Count three announcements per task, one message per accepted `bid=true`,
+   and one award when a winner exists. A `bid=false` response is retained in
+   the log but is not counted as an incoming bid message.
 
 ## Condition boundary
 
