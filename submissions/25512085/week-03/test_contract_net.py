@@ -129,6 +129,7 @@ class ContractNetTests(unittest.TestCase):
             settings = ModelSettings.from_env()
         self.assertEqual(settings.server_url, "http://127.0.0.1:1234")
         self.assertEqual(settings.reasoning, "off")
+        self.assertEqual(settings.temperature, 0.2)
 
 
 if __name__ == "__main__":

@@ -70,7 +70,7 @@ class ModelSettings:
         return cls(
             provider="lmstudio",
             model=model,
-            temperature=float(os.environ.get("AGENT_TEMPERATURE", "0")),
+            temperature=float(os.environ.get("AGENT_TEMPERATURE", "0.2")),
             server_url=normalize_server_url(configured_url),
             api_token=(
                 os.environ.get("LMSTUDIO_API_TOKEN")

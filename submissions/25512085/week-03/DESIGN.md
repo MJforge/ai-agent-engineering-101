@@ -107,7 +107,8 @@ contractor call order stay fixed across conditions.
 ## Model transport
 
 - Provider: local LM Studio native API (`POST /api/v1/chat`).
-- Planned model identifier: `qwen/qwen3.8-27b`.
+- Model identifier: `qwen/qwen3.8-27b`.
+- Temperature: `0.2` for every condition and run.
 - Every bid request sends `reasoning: "off"` so reasoning text cannot precede
   the required JSON bid.
 - Requests are stateless (`store: false`) and use the same model and
@@ -133,10 +134,11 @@ skills. Ambiguity concerns contractor fit, not an unclear task objective.
 The `gold` field is evaluation-only and is never included in a contractor's
 announcement.
 
-## Decisions to finalize before the first model run
+## Dry-run gate before formal runs
 
-- Final temperature; the provider and model are LM Studio and
-  `qwen/qwen3.8-27b`.
+- Confirm that the local model returns only one JSON object.
+- Confirm `reasoning_output_tokens` remains zero.
+- Confirm bid/confidence consistency and inspect parse failures.
+- Keep dry-run artifacts separate from formal `results.csv` and `logs/`.
 
-Do not create experimental rows or logs until these decisions and `tasks.json`
-are fixed and committed.
+Do not create formal experimental rows or logs until the dry-run gate passes.
