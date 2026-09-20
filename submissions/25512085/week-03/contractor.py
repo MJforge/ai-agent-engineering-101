@@ -18,18 +18,24 @@ ModelCaller = Callable[[str, str], str]
 
 
 DEFAULT_BID_POLICY = (
-    "Identify the single most important ability for the announced task: "
-    "calculation, writing, or coding. Use your numeric score for that ability "
-    "as confidence. You must set bid=true when confidence is at least "
-    f"{BID_THRESHOLD}, and bid=false when confidence is below {BID_THRESHOLD}. "
-    "You must respond even when bid=false."
+    "Treat your numeric ability scores as evidence about your strengths, not "
+    "as confidence values to copy. Read the complete task and judge which of "
+    "calculation, writing, and coding it requires, including mixed-skill tasks. "
+    "Consider both your strong and weak required abilities, then choose one "
+    "integer confidence score using this calibration: 90-100 means an excellent "
+    "fit with no important weakness; 70-89 means you can perform the task well "
+    "although another ability may also be needed; 50-69 means only a partial fit "
+    "or an important weakness; 0-49 means a poor fit. You must set bid=true when "
+    f"confidence is at least {BID_THRESHOLD}, and bid=false when confidence is "
+    f"below {BID_THRESHOLD}. You must respond even when bid=false."
 )
 
 OUTPUT_CONTRACT = (
     'Reply with exactly one JSON object and nothing else: '
     '{"bid": true or false, "confidence": 0-100, '
     '"reason": "one short sentence"}. '
-    "Do not solve the task. Do not use a Markdown code fence."
+    "In reason, name the required ability or abilities and briefly relate them "
+    "to your profile. Do not solve the task. Do not use a Markdown code fence."
 )
 
 

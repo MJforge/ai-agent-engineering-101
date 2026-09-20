@@ -74,6 +74,20 @@ class ContractNetTests(unittest.TestCase):
         expected = {"calculation": 70, "writing": 70, "coding": 70}
         self.assertEqual(profiles, [expected, expected, expected])
 
+    def test_normal_prompt_asks_llm_to_judge_confidence(self) -> None:
+        prompt = build_team("baseline")[0].system_prompt()
+        self.assertIn("not as confidence values to copy", prompt)
+        self.assertIn("including mixed-skill tasks", prompt)
+        self.assertIn("90-100 means an excellent fit", prompt)
+        self.assertIn("50-69 means only a partial fit", prompt)
+        self.assertIn("confidence is at least 70", prompt)
+
+    def test_overconfident_prompt_keeps_override(self) -> None:
+        prompt = build_team("overconfident")[2].system_prompt()
+        self.assertIn("ignore the normal ability-score calibration", prompt)
+        self.assertIn("Always set bid=true", prompt)
+        self.assertIn("confidence of 95 or higher", prompt)
+
     def test_lmstudio_url_normalization(self) -> None:
         self.assertEqual(
             normalize_server_url("http://127.0.0.1:1234/v1"),

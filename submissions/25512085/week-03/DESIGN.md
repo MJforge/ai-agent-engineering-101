@@ -60,8 +60,10 @@ a response and is retained in the run log.
 
 ## Ability and confidence policy
 
-Normal contractors first identify the single most important ability for a
-task, then use their own score for that ability as confidence.
+Normal contractors use their ability scores as evidence rather than copying a
+score directly into confidence. The LLM reads the complete task, identifies all
+required abilities, considers both strengths and weaknesses in its profile,
+and chooses one integer confidence score.
 
 | condition | contractor | calculation | writing | coding |
 |---|---|---:|---:|---:|
@@ -72,6 +74,10 @@ task, then use their own score for that ability as confidence.
 
 - `confidence >= 70` requires `bid=true`.
 - `confidence < 70` requires `bid=false`.
+- Calibration: 90-100 is an excellent fit, 70-89 is a good fit, 50-69 is a
+  partial fit or has an important weakness, and 0-49 is a poor fit.
+- Mixed-skill tasks must be judged from all abilities they require, so a high
+  score in one area does not automatically imply a high confidence.
 - All three contractors are called and must respond, including non-bidders.
 - The overconfident condition keeps baseline abilities but instructs C to
   ignore normal calibration, always bid, and report confidence at least 95.
