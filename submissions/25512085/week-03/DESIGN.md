@@ -98,6 +98,17 @@ task, then use their own score for that ability as confidence.
 The announcement, task order, model, temperature, parser, manager policy, and
 contractor call order stay fixed across conditions.
 
+## Model transport
+
+- Provider: local LM Studio native API (`POST /api/v1/chat`).
+- Planned model identifier: `qwen/qwen3.8-27b`.
+- Every bid request sends `reasoning: "off"` so reasoning text cannot precede
+  the required JSON bid.
+- Requests are stateless (`store: false`) and use the same model and
+  temperature in every condition.
+- `LMSTUDIO_BASE_URL` is preferred. For convenience, an existing
+  `OPENAI_BASE_URL` ending in `/v1` is also accepted and normalized.
+
 ## Decisions to finalize before the first model run
 
 - Provider, model, and temperature.

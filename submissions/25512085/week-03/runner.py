@@ -14,7 +14,7 @@ from pathlib import Path
 
 from contractor import Contractor
 from manager import run_round
-from model_client import Meter, ModelSettings, OpenAICompatibleCaller
+from model_client import LMStudioCaller, Meter, ModelSettings
 from protocol import Task
 
 
@@ -107,7 +107,7 @@ def run_once(
     log_path = log_dir / f"{run_id}.txt"
     settings = ModelSettings.from_env()
     meter = Meter()
-    caller = OpenAICompatibleCaller(settings, meter)
+    caller = LMStudioCaller(settings, meter)
 
     with log_path.open("x", encoding="utf-8") as log_file:
         def log(message: str) -> None:

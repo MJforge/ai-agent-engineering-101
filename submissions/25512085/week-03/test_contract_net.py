@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
+from unittest.mock import patch
 
 from manager import run_round
+from model_client import (
+    LMStudioCaller,
+    Meter,
+    ModelSettings,
+    extract_message_content,
+    normalize_server_url,
+)
 from protocol import BidParseError, Task, parse_bid
 from runner import build_team
 
@@ -64,6 +73,48 @@ class ContractNetTests(unittest.TestCase):
                     for contractor in build_team("homogeneous")]
         expected = {"calculation": 70, "writing": 70, "coding": 70}
         self.assertEqual(profiles, [expected, expected, expected])
+
+    def test_lmstudio_url_normalization(self) -> None:
+        self.assertEqual(
+            normalize_server_url("http://127.0.0.1:1234/v1"),
+            "http://127.0.0.1:1234",
+        )
+
+    def test_lmstudio_request_disables_reasoning(self) -> None:
+        settings = ModelSettings(
+            provider="lmstudio",
+            model="qwen/qwen3.8-27b",
+            temperature=0,
+            server_url="http://127.0.0.1:1234",
+            api_token=None,
+            timeout_seconds=120,
+        )
+        payload = LMStudioCaller(settings, Meter()).build_payload("system", "user")
+        self.assertEqual(payload["reasoning"], "off")
+        self.assertFalse(payload["store"])
+
+    def test_lmstudio_response_ignores_reasoning_item(self) -> None:
+        payload = {
+            "output": [
+                {"type": "reasoning", "content": "hidden thought"},
+                {"type": "message", "content": response(bid=True, confidence=90)},
+            ]
+        }
+        content = extract_message_content(payload)
+        self.assertEqual(json.loads(content)["confidence"], 90)
+
+    def test_environment_accepts_openai_compatible_url(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "AGENT_MODEL": "qwen/qwen3.8-27b",
+                "OPENAI_BASE_URL": "http://127.0.0.1:1234/v1",
+            },
+            clear=True,
+        ):
+            settings = ModelSettings.from_env()
+        self.assertEqual(settings.server_url, "http://127.0.0.1:1234")
+        self.assertEqual(settings.reasoning, "off")
 
 
 if __name__ == "__main__":
