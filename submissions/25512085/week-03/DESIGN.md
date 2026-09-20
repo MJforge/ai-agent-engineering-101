@@ -115,12 +115,28 @@ contractor call order stay fixed across conditions.
 - `LMSTUDIO_BASE_URL` is preferred. For convenience, an existing
   `OPENAI_BASE_URL` ending in `/v1` is also accepted and normalized.
 
+## Precommitted task set
+
+`tasks.json` contains six English tasks and is fixed before any formal run.
+Three tasks have a clear single-skill fit, and three deliberately require two
+skills. Ambiguity concerns contractor fit, not an unclear task objective.
+
+| task | type | required abilities | gold | gold rationale |
+|---|---|---|---|---|
+| task-01 | clear | calculation | A | The result is a numerical calculation. |
+| task-02 | clear | writing | B | The result is customer-facing prose. |
+| task-03 | clear | coding | C | The result is a Python function. |
+| task-04 | mixed | calculation + writing | A | Correct cost comparison determines the recommendation. |
+| task-05 | mixed | writing + coding | B | The primary result is a beginner-friendly explanation. |
+| task-06 | mixed | coding + calculation | C | The primary result is an executable Python function. |
+
+The `gold` field is evaluation-only and is never included in a contractor's
+announcement.
+
 ## Decisions to finalize before the first model run
 
-- Provider, model, and temperature.
-- The final task set and its precommitted gold labels.
-- Whether mixed-domain tasks are excluded from the first task set or need an
-  additional tie-breaking rule for identifying their primary ability.
+- Final temperature; the provider and model are LM Studio and
+  `qwen/qwen3.8-27b`.
 
 Do not create experimental rows or logs until these decisions and `tasks.json`
 are fixed and committed.
