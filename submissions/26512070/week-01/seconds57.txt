@@ -1,2 +1,0 @@
-time: 56
-time_after_five: 1

@@ -1,7 +1,0 @@
-ok    first_agent.py parses
-ok    TOOLS defines 3 tools
-ok    TOOLS_IMPL maps 3 tools
-ok    TOOLS.md present
-ok    logs/ contains 7 file(s)
-
-all checks passed

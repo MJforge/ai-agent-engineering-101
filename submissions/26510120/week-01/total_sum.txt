@@ -1,1 +1,0 @@
-The sum of all numbers in notes.txt is: 69504
