@@ -17,10 +17,10 @@ import os
 import sys
 import time
 import urllib.request
-from typing import Any
-
+import httpx2
 from openai import OpenAI
 from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
 from mcp.server.mcpserver.exceptions import ToolError
 
 MARKET_URL = os.environ.get("MARKET_URL", "http://127.0.0.1:8001/mcp")
@@ -118,8 +118,9 @@ async def run_turn(
             log_file.write(msg + "\n")
             log_file.flush()
 
-    # Pass Authorization header with this party's Bearer token
-    async with Client(MARKET_URL, headers={"Authorization": f"Bearer {token}"}) as mcp:
+    http_client = httpx2.AsyncClient(headers={"Authorization": f"Bearer {token}"})
+    transport = streamable_http_client(MARKET_URL, http_client=http_client)
+    async with Client(transport) as mcp:
         tools = (await mcp.list_tools()).tools
         openai_tools = [to_openai_tool(t) for t in tools]
 
