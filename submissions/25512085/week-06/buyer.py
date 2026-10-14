@@ -13,11 +13,13 @@ import httpx
 
 
 def call_harness(prompt: str) -> str:
-    """Call Codex CLI harness non-interactively using temporary output file."""
+    """Call Codex CLI harness non-interactively in an empty directory."""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
         tmp_path = tmp.name
+    empty_dir = tempfile.gettempdir()
+    p = None
     try:
-        cmd = f'codex exec --skip-git-repo-check -m gpt-5.6-sol -o "{tmp_path}" -'
+        cmd = f'codex exec --skip-git-repo-check --ephemeral --cd "{empty_dir}" -m gpt-5.6-sol -o "{tmp_path}" -'
         p = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -26,12 +28,17 @@ def call_harness(prompt: str) -> str:
             shell=True,
             text=True,
         )
-        p.communicate(input=prompt, timeout=45)
+        p.communicate(input=prompt, timeout=20)
         if os.path.exists(tmp_path):
             with open(tmp_path, "r", encoding="utf-8") as f:
                 return f.read().strip()
     except Exception as e:
         print(f"[Buyer Harness Warning]: {e}", file=sys.stderr)
+        if p:
+            try:
+                p.kill()
+            except Exception:
+                pass
     finally:
         if os.path.exists(tmp_path):
             try:
@@ -110,7 +117,6 @@ def main():
         if seller_ask is not None and seller_ask <= budget:
             offer = seller_ask
         else:
-            # Consult harness for counteroffer
             prompt = (
                 f"You are a buyer negotiating to purchase a {item}.\n"
                 f"Maximum budget: {budget} (You MUST NEVER exceed {budget}).\n"
@@ -123,7 +129,6 @@ def main():
             resp = call_harness(prompt).upper()
             if "QUIT" in resp and last_offer >= budget:
                 print(f"Walking away: seller ask {seller_ask} exceeds budget {budget}")
-                # Cancel task
                 rpc_call(rpc_url, "CancelTask", {"id": task_id})
                 break
 
@@ -132,11 +137,9 @@ def main():
                 suggested = int(nums[-1])
                 offer = min(budget, suggested)
             else:
-                # Default progressive ladder step
                 step = max(10, (budget - last_offer) // 2)
                 offer = min(budget, last_offer + step)
 
-            # If we've already offered maximum budget and seller still asks higher, stop
             if last_offer >= budget and seller_ask is not None and seller_ask > budget:
                 print(f"Cannot agree: seller ask {seller_ask} > budget {budget}")
                 rpc_call(rpc_url, "CancelTask", {"id": task_id})

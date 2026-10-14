@@ -31,11 +31,13 @@ RESERVES = {
 
 
 def call_harness(prompt: str) -> str:
-    """Call Codex CLI harness non-interactively using temporary output file."""
+    """Call Codex CLI harness in an empty directory with fallback protection."""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
         tmp_path = tmp.name
+    empty_dir = tempfile.gettempdir()
+    p = None
     try:
-        cmd = f'codex exec --skip-git-repo-check -m gpt-5.6-sol -o "{tmp_path}" -'
+        cmd = f'codex exec --skip-git-repo-check --ephemeral --cd "{empty_dir}" -m gpt-5.6-sol -o "{tmp_path}" -'
         p = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -44,13 +46,18 @@ def call_harness(prompt: str) -> str:
             shell=True,
             text=True,
         )
-        p.communicate(input=prompt, timeout=45)
+        p.communicate(input=prompt, timeout=20)
         if os.path.exists(tmp_path):
             with open(tmp_path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
             return content
     except Exception as e:
         print(f"[Seller Harness Warning]: {e}")
+        if p:
+            try:
+                p.kill()
+            except Exception:
+                pass
     finally:
         if os.path.exists(tmp_path):
             try:
