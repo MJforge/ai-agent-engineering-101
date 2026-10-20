@@ -47,7 +47,11 @@ PREMIUM_MULT = 1.50
 # - 3+ referrals(30% off 1.5x -> 1.05x): lamp=105, chair=189, bookshelf=273
 REFERRAL_DISCOUNT_PER_GUEST = 0.10
 MAX_REFERRAL_DISCOUNT = 0.30
-VIP_MULT = 1.20  # 20% off 1.5x for VIPs (>=50% spend share)
+VIP_MULT = 1.20  # 20% off 1.5x for VIPs (>=50% spend share OR Full-Set 3-item Membership within promo window)
+# Conservative limited-time promo window for early customer acquisition: 30 minutes (1800 seconds)
+MEMBERSHIP_PROMO_WINDOW_SEC = 1800
+PROMO_START_TS = time.time()
+ALL_ITEMS_SET = frozenset(RESERVES.keys())  # {"lamp", "chair", "bookshelf"}
 MAX_DISCOUNT_FLOORS = {
     item: math.ceil(res * PREMIUM_MULT * (1.0 - MAX_REFERRAL_DISCOUNT))
     for item, res in RESERVES.items()
@@ -159,8 +163,10 @@ def background_review_sync():
                 vips = set(state.get("vips", []))
                 total_spend = {}
                 our_spend = {}
+                items_bought_at_ours = {}
                 all_budgets = []
                 recent_orders = {}
+                promo_active = (time.time() - PROMO_START_TS) <= MEMBERSHIP_PROMO_WINDOW_SEC
 
                 for entry in ledger:
                     if not isinstance(entry, dict):
@@ -180,6 +186,7 @@ def background_review_sync():
                         b_name = data.get("buyer")
                         rec = data.get("receipt") or {}
                         price = rec.get("price")
+                        rec_item = str(rec.get("item") or "").lower()
                         stars = data.get("stars")
                         shop_url = str(data.get("shop") or "")
                         rec_shop = str(rec.get("shop") or "")
@@ -193,16 +200,25 @@ def background_review_sync():
                             total_spend[b_name] = total_spend.get(b_name, 0) + int(price)
                             if is_ours:
                                 our_spend[b_name] = our_spend.get(b_name, 0) + int(price)
+                                if rec_item in ALL_ITEMS_SET:
+                                    items_bought_at_ours.setdefault(b_name, set()).add(rec_item)
                         if b_name and is_ours and isinstance(stars, (int, float)) and stars <= 3:
                             blacklist.add(b_name)
 
                 vip_shares = {}
+                full_set_vips = []
                 for b_name, tot in total_spend.items():
                     mine = our_spend.get(b_name, 0)
                     share = round(mine / tot, 3) if tot > 0 else 0.0
-                    if share >= 0.50 and b_name not in blacklist:
-                        vips.add(b_name)
-                        vip_shares[b_name] = share
+                    bought_set = items_bought_at_ours.get(b_name, set())
+                    # VIP if >=50% spend share OR (within conservative 30-min promo window, bought 1 of each: lamp, chair, bookshelf)
+                    if b_name not in blacklist:
+                        if share >= 0.50:
+                            vips.add(b_name)
+                            vip_shares[b_name] = share
+                        if promo_active and ALL_ITEMS_SET.issubset(bought_set):
+                            vips.add(b_name)
+                            full_set_vips.append(b_name)
 
                 # Track distinct honest customers & how many new customers visited after each advocate's 4-5★ review
                 good_customers = [b for b in our_spend if b not in blacklist]
@@ -286,11 +302,16 @@ class Seller(AgentExecutor):
                 "buyer": active_buyer,
                 "offers": [],
             }
-            # Keep numbers out of prefix text so last_number() regex always extracts `ask`
+            # Keep numbers out of prefix text so both re.search() and last_number() regexes ONLY extract `ask`
             await up.requires_input(
                 say(
-                    f"Premium Boutique [Buy-Two-Get-Three Bundle + Ten-Percent Off Per Recruited Guest Up To Thirty-Percent Max + "
-                    f"VIP Twenty-Percent Off + Full Flexible Refund Guarantee] {item}: asking {ask}. Send your offer as a number."
+                    f"Welcome to continuously improving mjforge Premium Boutique! "
+                    f"[Notice: our earlier rating dip came from a single price-only troll bot (eleven-im) that spammed "
+                    f"unfair low ratings across multiple shops even at rock-bottom prices; we are actively upgrading our "
+                    f"quality and customer care! Limited thirty-minute Membership Promo: buy one each of lamp, chair, and "
+                    f"bookshelf for instant VIP status (twenty percent off), plus ten percent off per recruited guest up to "
+                    f"thirty percent max, Buy-Two-Get-Three Bundle, and Full Flexible Refund Guarantee] "
+                    f"{item}: asking {ask}. Send your offer as a number."
                 )
             )
             return
@@ -403,7 +424,12 @@ def build_app(port: int):
     url = f"http://127.0.0.1:{port}/"
     card = AgentCard(
         name=SHOP_NAME,
-        description="Sells desk lamps, chairs, and bookshelves. Fast, honest receipts signed with Ed25519.",
+        description=(
+            "Continuously improving Premium Boutique (lamp, chair, bookshelf) with Ed25519 receipts, "
+            "100% Flexible Refund Policy, 2+1 Bundles, and Limited 30-Min Full-Set VIP Membership "
+            "(buy 1 lamp + 1 chair + 1 bookshelf for 20% VIP discount; +10% per referred guest up to 30% off). "
+            "Note: earlier rating dip was caused by rogue bot '11im' review-bombing multiple shops purely on price."
+        ),
         version="1.0.0",
         default_input_modes=["text/plain"],
         default_output_modes=["application/json", "text/plain"],
