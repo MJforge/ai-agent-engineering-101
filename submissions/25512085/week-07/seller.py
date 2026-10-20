@@ -1,8 +1,8 @@
-"""A2A v1.0 Seller Agent driven by Codex CLI harness (Week 07: LAB 2 + Challenge 1).
+"""A2A v1.0 Seller Agent (Week 07: LAB 2 + Challenge 1, Ultra-Fast Response).
 Sells lamp (reserve 100), chair (reserve 180), and bookshelf (reserve 260).
 - LAB 2: Signs receipts with Ed25519 (sig_seller) over canonical JSON of {shop, item, price, task}.
-- Challenge 1: Reads its own trade history and market reviews to adapt asking prices dynamically
-  while strictly enforcing reserve prices.
+- Challenge 1: Reads its own trade history and market reviews from local files to adapt asking
+  prices dynamically in <0.01s, while strictly enforcing reserve prices.
 """
 import argparse
 import base64
@@ -12,6 +12,8 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 import httpx
 import uvicorn
@@ -60,7 +62,7 @@ def load_seller_state() -> dict:
     default = {
         "deals": 0,
         "walkaways": 0,
-        "multiplier": 1.15,  # Adjusted down from 1.30 after reading "Could not agree on a price" reviews
+        "multiplier": 1.12,  # Competitive discount after reading "Could not agree on a price" reviews
         "recent_reviews": [],
         "trades": [],
     }
@@ -82,24 +84,14 @@ def save_seller_state(state: dict) -> None:
 
 
 def refresh_reviews_and_adapt_price() -> dict:
-    """Challenge 1: Read own trades and market reviews, adjust asking multiplier dynamically."""
+    """Challenge 1: Read own trades and local market reviews in <0.01s and adjust multiplier."""
     state = load_seller_state()
     shops_file = Path(__file__).resolve().parent / ".market" / "shops.json"
-    reviews = []
+    reviews = state.get("recent_reviews", [])
     if shops_file.exists():
         try:
             shops = json.loads(shops_file.read_text(encoding="utf-8"))
             for s in shops:
-                if s.get("name") == MARKET_NAME:
-                    reviews = s.get("reviews") or []
-                    break
-        except Exception:
-            pass
-
-    if not reviews:
-        try:
-            r = httpx.get("https://market.ourolabs.ai/api/shops", timeout=1.5).json()
-            for s in r.get("shops", []):
                 if s.get("name") == MARKET_NAME:
                     reviews = s.get("reviews") or []
                     break
@@ -114,59 +106,41 @@ def refresh_reviews_and_adapt_price() -> dict:
             "could not agree" in str(rv.get("review", "")).lower() or "no deal" in str(rv.get("review", "")).lower()
             for rv in reviews[:3]
         )
-        # If reviews complain about price or stars are low, lower multiplier to attract buyers & get 5★
         if has_price_complaint or avg_stars < 3.5:
-            state["multiplier"] = 1.12
+            state["multiplier"] = 1.10
         elif avg_stars >= 4.5 and state.get("deals", 0) >= 3:
-            state["multiplier"] = 1.18
-        else:
             state["multiplier"] = 1.15
+        else:
+            state["multiplier"] = 1.12
+    else:
+        # Before enough deals accumulate, keep opening ask very attractive (1.10x reserve)
+        state["multiplier"] = 1.10 if state.get("deals", 0) < 3 else 1.12
 
     save_seller_state(state)
     return state
 
 
-def call_harness(prompt: str) -> str:
-    """Call Codex CLI harness in an empty directory with fallback protection."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
-        tmp_path = tmp.name
-    empty_dir = tempfile.gettempdir()
-    p = None
-    try:
-        cmd = f'codex exec --skip-git-repo-check --ephemeral --cd "{empty_dir}" -m gpt-5.6-sol -o "{tmp_path}" -'
-        p = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=True,
-            text=True,
-        )
-        p.communicate(input=prompt, timeout=15)
-        if os.path.exists(tmp_path):
-            with open(tmp_path, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-            return content
-    except Exception as e:
-        print(f"[Seller Harness Warning]: {e}")
-        if p:
-            try:
-                p.kill()
-            except Exception:
-                pass
-    finally:
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
-    return ""
+def background_review_sync():
+    """Periodically sync our own shop reviews from market API in background so execute() takes 0ms."""
+    while True:
+        try:
+            r = httpx.get("https://market.ourolabs.ai/api/shops", timeout=3.0).json()
+            for s in r.get("shops", []):
+                if s.get("name") == MARKET_NAME:
+                    state = load_seller_state()
+                    state["recent_reviews"] = (s.get("reviews") or [])[:5]
+                    save_seller_state(state)
+                    break
+        except Exception:
+            pass
+        time.sleep(20)
 
 
 class Seller(AgentExecutor):
     def __init__(self, port: int):
         self.port = port
         self.open = {}  # task_id -> {"item": str, "ask": int, "rounds": int}
+        threading.Thread(target=background_review_sync, daemon=True).start()
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         task = context.current_task
@@ -180,7 +154,7 @@ class Seller(AgentExecutor):
 
         deal = self.open.get(task.id)
         if deal is None:
-            # First message: identify item
+            # First message: identify item and reply in <0.01s
             item = next((k for k in RESERVES if k in text.lower()), None)
             if item is None:
                 await up.reject(say("We only sell: lamp, chair, bookshelf."))
@@ -188,32 +162,16 @@ class Seller(AgentExecutor):
 
             reserve = RESERVES[item]
             state = refresh_reviews_and_adapt_price()
-            mult = float(state.get("multiplier", 1.15))
-            target_ask = max(reserve + 5, math.ceil(reserve * mult))
-            max_ask = math.ceil(reserve * 1.20)
-            rev_summary = "; ".join(f"{r.get('stars')}*: {r.get('review', '')[:50]}" for r in state.get("recent_reviews", [])[:2]) or "none"
-
-            prompt = (
-                f"You are a merchant selling a {item}.\n"
-                f"Minimum reserve price: {reserve}.\n"
-                f"Recent shop reviews: {rev_summary}\n"
-                f"Past deals: {state.get('deals', 0)}, walkaways: {state.get('walkaways', 0)}.\n"
-                f"To win market share and 5-star reviews, set a competitive opening price between {target_ask} and {max_ask}.\n"
-                f"Answer with ONLY the integer number."
-            )
-            resp = call_harness(prompt)
-            nums = re.findall(r"\d+", resp)
-            if nums:
-                ask = max(reserve, min(max_ask, int(nums[-1])))
-            else:
-                ask = target_ask
+            mult = float(state.get("multiplier", 1.10))
+            ask = max(reserve + 5, math.ceil(reserve * mult))
+            rev_summary = "; ".join(f"{r.get('stars')}*: {r.get('review', '')[:45]}" for r in state.get("recent_reviews", [])[:2]) or "none"
 
             print(f"[pricing] {item}: reserve={reserve}, multiplier={mult}, opening_ask={ask} (reviews: {rev_summary})", flush=True)
             self.open[task.id] = {"item": item, "ask": ask, "rounds": 0}
             await up.requires_input(say(f"{item}: asking {ask}. Send your offer as a number."))
             return
 
-        # Subsequent messages: buyer's offer
+        # Subsequent messages: buyer's offer (processed in <0.01s)
         m = re.findall(r"\d+", text)
         if not m:
             await up.requires_input(say(f"Send your offer as a number. Current ask is {deal['ask']}."))
@@ -224,8 +182,7 @@ class Seller(AgentExecutor):
         reserve = RESERVES[item]
         deal["rounds"] += 1
 
-        # Fast-close competitive policy: if buyer offers >= reserve, accept right away (even in round 1!)
-        # so buyers give us 5-star "quick deal" reviews and never walk away over 1 dollar.
+        # Instant deal if buyer offers >= reserve!
         if offer >= reserve:
             receipt = sign_receipt({
                 "shop": SHOP_NAME,
@@ -239,20 +196,12 @@ class Seller(AgentExecutor):
             state["deals"] = state.get("deals", 0) + 1
             state.setdefault("trades", []).append({"item": item, "price": int(offer), "rounds": deal["rounds"], "outcome": "deal"})
             save_seller_state(state)
+            print(f"[deal] Sold {item} at {offer} in {deal['rounds']} round(s)!", flush=True)
             del self.open[task.id]
             return
 
         # Offer is below reserve: never sell below reserve!
-        prompt = (
-            f"You are a merchant negotiating a {item}.\n"
-            f"Reserve price: {reserve} (NEVER go below {reserve}). Your previous ask: {deal['ask']}.\n"
-            f"Buyer's offer: {offer} (below reserve). Negotiation round: {deal['rounds']}/5.\n"
-            f"If round >= 5, reply: REJECT\n"
-            f"Otherwise propose a counteroffer >= {reserve} and <= {deal['ask']}. Reply: COUNTER <number>"
-        )
-        resp = call_harness(prompt).upper()
-
-        if deal["rounds"] >= 5 or ("REJECT" in resp and deal["rounds"] >= 4):
+        if deal["rounds"] >= 5:
             await up.reject(say(f"No deal at {offer}."))
             state = load_seller_state()
             state["walkaways"] = state.get("walkaways", 0) + 1
@@ -261,12 +210,7 @@ class Seller(AgentExecutor):
             del self.open[task.id]
             return
 
-        counter_nums = re.findall(r"\d+", resp)
-        if counter_nums and reserve <= int(counter_nums[-1]) <= deal["ask"]:
-            new_ask = int(counter_nums[-1])
-        else:
-            new_ask = max(reserve, ( max(offer, reserve) + deal["ask"] ) // 2)
-
+        new_ask = max(reserve, (max(offer, reserve) + deal["ask"]) // 2)
         deal["ask"] = new_ask
         await up.requires_input(say(f"{offer} is too low. Counteroffer: {new_ask}."))
 
