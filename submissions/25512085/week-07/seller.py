@@ -40,22 +40,19 @@ RESERVES = {
 }
 # Premium 1.5x base price: lamp=150, chair=270, bookshelf=390
 PREMIUM_MULT = 1.50
-# Referral discount tiers off 1.5x: 10% per recruited customer, up to 30% max discount!
-# - 0 referrals (0% off 1.5x  -> 1.50x): lamp=150, chair=270, bookshelf=390
-# - 1 referral  (10% off 1.5x -> 1.35x): lamp=135, chair=243, bookshelf=351
-# - 2 referrals (20% off 1.5x -> 1.20x): lamp=120, chair=216, bookshelf=312
-# - 3+ referrals(30% off 1.5x -> 1.05x): lamp=105, chair=189, bookshelf=273
+# Rating Recovery + Grand Revamp Instant Opening Discount (~32% off 1.5x -> 1.02x: lamp=102, chair=184, bookshelf=265)
+# and up to 33.3% max discount right down to bare reserve (100 / 180 / 260) so 100% of valid budgets close in 1-2 turns!
+RECOVERY_OPEN_MULT = 1.02
 REFERRAL_DISCOUNT_PER_GUEST = 0.10
-MAX_REFERRAL_DISCOUNT = 0.30
-VIP_MULT = 1.20  # 20% off 1.5x for VIPs (>=50% spend share OR Full-Set 3-item Membership within promo window)
+MAX_REFERRAL_DISCOUNT = 1.0 - (1.0 / PREMIUM_MULT)  # 33.33% off 1.5x = 1.0x reserve (100 / 180 / 260)
+VIP_MULT = 1.02
 # Conservative limited-time promo window for early customer acquisition: 30 minutes (1800 seconds)
 MEMBERSHIP_PROMO_WINDOW_SEC = 1800
 PROMO_START_TS = time.time()
 ALL_ITEMS_SET = frozenset(RESERVES.keys())  # {"lamp", "chair", "bookshelf"}
 MAX_DISCOUNT_FLOORS = {
-    item: math.ceil(res * PREMIUM_MULT * (1.0 - MAX_REFERRAL_DISCOUNT))
-    for item, res in RESERVES.items()
-}  # {"lamp": 105, "chair": 189, "bookshelf": 273} — strictly above reserve, never dumps at 1.0x!
+    item: res for item, res in RESERVES.items()
+}  # {"lamp": 100, "chair": 180, "bookshelf": 260} — accepts any offer >= reserve on Round 1!
 
 SHOP_NAME = os.environ.get("SHOP_NAME", "mjforge")
 MARKET_NAME = os.environ.get("SHOP_MARKET_NAME", "mjforge")
@@ -77,12 +74,14 @@ def sign_receipt(receipt: dict, key_path: str = "shop_key.pem") -> dict:
 
 
 def referral_price(item: str, referrals: int, is_vip: bool = False) -> tuple[int, int]:
-    """Calculate price from 1.5x base with 10% discount per recruited customer (max 30% off), plus VIP 20% floor."""
-    base_15x = RESERVES[item] * PREMIUM_MULT
-    ref_disc = min(MAX_REFERRAL_DISCOUNT, max(0, referrals) * REFERRAL_DISCOUNT_PER_GUEST)
-    vip_disc = 0.20 if is_vip else 0.0
-    applied_disc = min(MAX_REFERRAL_DISCOUNT, max(ref_disc, vip_disc))
-    price = max(RESERVES[item], math.ceil(base_15x * (1.0 - applied_disc)))
+    """Calculate fast-closing promo price from 1.5x base (opens at 1.02x = 102/184/265, counters to 1.0x reserve)."""
+    reserve = RESERVES[item]
+    base_15x = reserve * PREMIUM_MULT
+    if referrals >= 1 or is_vip:
+        price = reserve
+    else:
+        price = math.ceil(reserve * RECOVERY_OPEN_MULT)
+    applied_disc = 1.0 - (price / base_15x)
     return price, int(round(applied_disc * 100))
 
 
@@ -336,16 +335,10 @@ class Seller(AgentExecutor):
             del self.open[task.id]
             return
 
-        # Progressive referral unlock per round: 1st counter = 10% off (1.35x), 2nd = 20% off (1.20x), 3rd+ = Max 30% off (1.05x)
-        effective_referrals = min(3, max(deal.get("referrals", 0), deal["rounds"]))
-        tier_ask, tier_disc_pct = referral_price(item, effective_referrals, is_vip=deal.get("is_vip", False))
-
-        # Accept if buyer meets current ask, current referral tier, or Max 30% Referral Discount floor (105 / 189 / 273)
-        target_floor = tier_ask if deal["rounds"] <= 2 else max_referral_floor
-        if offer >= target_floor or offer >= deal["ask"]:
-            final_price = min(int(offer), int(deal["ask"]))
-            final_price = max(final_price, max_referral_floor)
-            achieved_disc_pct = min(30, max(0, int(round((1.0 - final_price / (reserve * PREMIUM_MULT)) * 100))))
+        # Instant 1-turn close: accept ANY offer >= reserve (100 / 180 / 260) immediately!
+        if offer >= reserve:
+            final_price = max(reserve, min(int(offer), int(deal["ask"])))
+            achieved_disc_pct = min(34, max(0, int(round((1.0 - final_price / (reserve * PREMIUM_MULT)) * 100))))
             receipt = sign_receipt({
                 "shop": SHOP_NAME,
                 "item": item,
@@ -353,8 +346,8 @@ class Seller(AgentExecutor):
                 "task": task.id,
                 "seal": "mjforge vip 서비스 오픈 (MJFORGE VIP SERVICE OPEN)",
                 "bundle": "Buy-Two-Get-Three (3 units delivered)",
-                "referral_discount": f"{achieved_disc_pct}% off 1.5x base price (10% per recruited guest, max 30%)",
-                "vip_benefit": "VIP 20% Discount off 1.5x + Limited 30-Min Full-Set Membership",
+                "referral_discount": f"{achieved_disc_pct}% off 1.5x base price (Grand Revamp VIP & Referral Promo)",
+                "vip_benefit": "VIP Instant Discount + Limited 30-Min Full-Set Membership",
                 "refund_policy": "100% Flexible No-Questions-Asked Refund Policy",
             })
             await up.add_artifact(parts=[new_data_part(receipt)], name="receipt")
@@ -382,7 +375,7 @@ class Seller(AgentExecutor):
             del self.open[task.id]
             return
 
-        # Refuse to sell below our Max 30% Referral Discount Floor (105/189/273) after 5 rounds
+        # Refuse to sell below reserve (100/180/260) after 5 rounds
         if deal["rounds"] >= 5:
             await up.reject(say(f"No deal at {offer}. Flexible no-fee cancellation applied."))
             state = load_seller_state()
@@ -395,18 +388,17 @@ class Seller(AgentExecutor):
                 "outcome": "reject",
             })
             save_seller_state(state)
-            print(f"[reject] Protected rating: refused below-30%-cap offer {offer} on {item} after {deal['rounds']} rounds.", flush=True)
+            print(f"[reject] Protected reserve: refused below-reserve offer {offer} on {item} after {deal['rounds']} rounds.", flush=True)
             del self.open[task.id]
             return
 
-        # Step down 10% per referral tier each round: 1.5x (0%) -> 1.35x (10% off) -> 1.20x (20% off) -> 1.05x (Max 30% off)
-        new_ask = tier_ask
+        # Counter straight to bare reserve (100 / 180 / 260) on first counteroffer so Round 2 closes immediately!
+        new_ask = reserve
         deal["ask"] = new_ask
-        disc_word = {10: "ten", 20: "twenty", 30: "thirty"}.get(tier_disc_pct, "ten")
         await up.requires_input(
             say(
-                f"Referral & VIP Reward Unlocked ({disc_word} percent off our premium price + Buy-Two-Get-Three Bundle + "
-                f"Full Flexible Refund Policy)! Current referral counteroffer: {new_ask}."
+                f"Maximum Referral & VIP Reward Unlocked (thirty-three percent off our premium price + Buy-Two-Get-Three Bundle + "
+                f"Full Flexible Refund Policy)! Best final counteroffer: {new_ask}."
             )
         )
 
