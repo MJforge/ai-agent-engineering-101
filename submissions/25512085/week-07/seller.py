@@ -62,7 +62,7 @@ def load_seller_state() -> dict:
     default = {
         "deals": 0,
         "walkaways": 0,
-        "multiplier": 1.12,  # Competitive discount after reading "Could not agree on a price" reviews
+        "multiplier": 1.05,  # Open at 1.05x (105/189/273) for anchoring discount, accept >=1.0x immediately
         "recent_reviews": [],
         "trades": [],
     }
@@ -106,15 +106,15 @@ def refresh_reviews_and_adapt_price() -> dict:
             "could not agree" in str(rv.get("review", "")).lower() or "no deal" in str(rv.get("review", "")).lower()
             for rv in reviews[:3]
         )
-        if has_price_complaint or avg_stars < 3.5:
-            state["multiplier"] = 1.10
-        elif avg_stars >= 4.5 and state.get("deals", 0) >= 3:
-            state["multiplier"] = 1.15
+        # Open at 1.05x (105/189/273) so buyers get a discount down to 1.0x (100/180/260) on first counter
+        if has_price_complaint:
+            state["multiplier"] = 1.03
+        elif avg_stars < 4.5:
+            state["multiplier"] = 1.05
         else:
-            state["multiplier"] = 1.12
+            state["multiplier"] = 1.05
     else:
-        # Before enough deals accumulate, keep opening ask very attractive (1.10x reserve)
-        state["multiplier"] = 1.10 if state.get("deals", 0) < 3 else 1.12
+        state["multiplier"] = 1.05
 
     save_seller_state(state)
     return state
@@ -162,8 +162,8 @@ class Seller(AgentExecutor):
 
             reserve = RESERVES[item]
             state = refresh_reviews_and_adapt_price()
-            mult = float(state.get("multiplier", 1.10))
-            ask = max(reserve + 5, math.ceil(reserve * mult))
+            mult = float(state.get("multiplier", 1.0))
+            ask = max(reserve, math.ceil(reserve * mult))
             rev_summary = "; ".join(f"{r.get('stars')}*: {r.get('review', '')[:45]}" for r in state.get("recent_reviews", [])[:2]) or "none"
 
             print(f"[pricing] {item}: reserve={reserve}, multiplier={mult}, opening_ask={ask} (reviews: {rev_summary})", flush=True)
@@ -182,21 +182,22 @@ class Seller(AgentExecutor):
         reserve = RESERVES[item]
         deal["rounds"] += 1
 
-        # Instant deal if buyer offers >= reserve!
+        # Instant deal if buyer offers >= reserve! (Never charge more than our current ask)
         if offer >= reserve:
+            final_price = min(int(offer), int(deal["ask"]))
             receipt = sign_receipt({
                 "shop": SHOP_NAME,
                 "item": item,
-                "price": int(offer),
+                "price": final_price,
                 "task": task.id,
             })
             await up.add_artifact(parts=[new_data_part(receipt)], name="receipt")
-            await up.complete(say(f"Deal: {item} at {offer}."))
+            await up.complete(say(f"Deal: {item} at {final_price}."))
             state = load_seller_state()
             state["deals"] = state.get("deals", 0) + 1
-            state.setdefault("trades", []).append({"item": item, "price": int(offer), "rounds": deal["rounds"], "outcome": "deal"})
+            state.setdefault("trades", []).append({"item": item, "price": final_price, "rounds": deal["rounds"], "outcome": "deal"})
             save_seller_state(state)
-            print(f"[deal] Sold {item} at {offer} in {deal['rounds']} round(s)!", flush=True)
+            print(f"[deal] Sold {item} at {final_price} in {deal['rounds']} round(s)!", flush=True)
             del self.open[task.id]
             return
 
@@ -210,7 +211,8 @@ class Seller(AgentExecutor):
             del self.open[task.id]
             return
 
-        new_ask = max(reserve, (max(offer, reserve) + deal["ask"]) // 2)
+        # Drop counteroffer straight to reserve (100/180/260) so buyer closes on the very next offer!
+        new_ask = reserve
         deal["ask"] = new_ask
         await up.requires_input(say(f"{offer} is too low. Counteroffer: {new_ask}."))
 
