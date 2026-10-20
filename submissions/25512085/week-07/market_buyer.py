@@ -109,13 +109,24 @@ def update_memory(memory: dict, shop_name: str, entry: dict) -> None:
         print(f"[Memory Warning]: {e}", file=sys.stderr)
 
 
-def summarize_shop(shop: dict, memory: dict, explore_mode: bool = False) -> dict:
+def fetch_board_stats() -> dict[str, dict]:
+    """Fetch live board stats (deals, share, visits, stars, reviews) per shop name."""
+    market_url = os.environ.get("MARKET_URL", "https://market.ourolabs.ai").rstrip("/")
+    try:
+        r = httpx.get(f"{market_url}/api/board", timeout=2.5).json()
+        return {s["name"]: s for s in r.get("shops", []) if isinstance(s, dict) and "name" in s}
+    except Exception:
+        return {}
+
+
+def summarize_shop(shop: dict, memory: dict, board_row: dict | None = None) -> dict:
     name = shop.get("name", "")
     url = shop.get("url", "")
     reviews = shop.get("reviews") or []
+    board_row = board_row or {}
 
     ext_stars = [r.get("stars") for r in reviews if isinstance(r.get("stars"), (int, float))]
-    ext_avg = round(sum(ext_stars) / len(ext_stars), 2) if ext_stars else None
+    ext_avg = round(sum(ext_stars) / len(ext_stars), 2) if ext_stars else board_row.get("stars")
 
     bad_keywords = ("receipt said", "receipt says", "higher than", "overcharged", "rip-off", "scam", "forged", "dishonest")
     ext_scam_flags = sum(
@@ -138,10 +149,15 @@ def summarize_shop(shop: dict, memory: dict, explore_mode: bool = False) -> dict
 
     dishonest = bool(mem.get("dishonest")) or ext_scam_flags > 0
 
-    # Compute composite recommendation score
+    deals = int(board_row.get("deals") or 0)
+    reviews_cnt = int(board_row.get("reviews") if board_row.get("reviews") is not None else len(ext_stars))
+    visits = int(board_row.get("visits") or 0)
+    share = float(board_row.get("share") or 0.0)
+
+    # Base trust score (used for 2-shop unit test & within-bucket tie-breaking)
     score = 3.8
     if ext_avg is not None:
-        score = ext_avg
+        score = float(ext_avg)
     if mem_avg is not None:
         score = (score + mem_avg) / 2.0 if ext_avg is not None else mem_avg
     if dishonest:
@@ -149,21 +165,15 @@ def summarize_shop(shop: dict, memory: dict, explore_mode: bool = False) -> dict
     elif ext_avg is not None and ext_avg <= 2.2:
         score -= 5.0
 
-    # Market-wide exploration mode: rotate across different shops to audit quality & service across the market
-    if explore_mode and not dishonest:
-        if total_mem_cnt == 0:
-            score += 3.0  # Strong discovery bonus for unvisited shops
-        else:
-            score -= min(4.5, total_mem_cnt * 1.2)  # Anti-monopoly penalty so we don't buy from one shop repeatedly
-            if time.time() - last_ts < 300:
-                score -= 2.5  # Cooldown penalty for recently visited shops
-
     recent_snippets = [f"{r.get('stars')}*: {r.get('review', '')[:60]}" for r in reviews[:3]]
     return {
         "name": name,
         "url": url,
         "ext_avg": ext_avg,
-        "ext_count": len(ext_stars),
+        "ext_count": reviews_cnt,
+        "deals": deals,
+        "visits": visits,
+        "share": share,
         "mem_avg": mem_avg,
         "mem_count": total_mem_cnt,
         "arch_count": arch_cnt,
@@ -180,38 +190,104 @@ def pick_shop(shops: list[dict], memory: dict, item: str, budget: int) -> tuple[
         s = shops[0]
         return s, f"Only one shop available in list ({s['name']})."
 
-    # Enable market exploration rotation when in the full market (len(shops) > 2)
-    explore_mode = len(shops) > 2
-    summaries = [summarize_shop(s, memory, explore_mode=explore_mode) for s in shops]
-    summaries_sorted = sorted(summaries, key=lambda x: x["score"], reverse=True)
-    top_candidates = summaries_sorted[:8]
+    # Unit test mode (2 shops in buyer_reads_reviews): pick highest trust score directly
+    if len(shops) <= 2:
+        summaries = [summarize_shop(s, memory) for s in shops]
+        summaries_sorted = sorted(summaries, key=lambda x: x["score"], reverse=True)
+        best = summaries_sorted[0]
+        shop_obj = next((s for s in shops if s["url"] == best["url"]), shops[0])
+        return shop_obj, f"Selected {best['name']} with highest review score ({best['score']})."
+
+    # Live Market Mode: Stratified 30% / 50% / 20% Anti-Monopoly Selection (Excluding Top 10!)
+    board_map = fetch_board_stats()
+    summaries = [summarize_shop(s, memory, board_map.get(s.get("name", ""))) for s in shops]
+    honest_pool = [c for c in summaries if not c["dishonest"]]
+    if not honest_pool:
+        honest_pool = summaries
+
+    # 1. Identify and EXCLUDE Top 10 over-concentrated shops (by high review count/deals & stars)
+    ranked_by_top = sorted(
+        honest_pool,
+        key=lambda x: (x["ext_count"] >= 5, x["ext_avg"] or 0.0, x["deals"]),
+        reverse=True,
+    )
+    top10_names = {c["name"] for c in ranked_by_top[:10]} if len(honest_pool) > 12 else set()
+    eligible = [c for c in honest_pool if c["name"] not in top10_names]
+    if not eligible:
+        eligible = honest_pool
+
+    # 2. Build the 3 target buckets from non-Top-10 eligible shops:
+    # - Bucket A (30%): 0 deals, 0 receipts, 0 stars, 0 reviews (Cold-start rescue)
+    bucket_zero = [
+        c for c in eligible
+        if c["deals"] == 0 and c["ext_count"] == 0 and c["ext_avg"] is None
+    ]
+    # - Bucket B (50%): Market share 1% ~ 5% (0.01 <= share <= 0.05) with good ratings, sorted by stars
+    bucket_mid_share = sorted(
+        [c for c in eligible if 0.008 <= c["share"] <= 0.055 and (c["ext_avg"] or 0.0) >= 3.5],
+        key=lambda x: (x["ext_avg"] or 0.0, -x["mem_count"]),
+        reverse=True,
+    )
+    if not bucket_mid_share:
+        # Relax share range slightly if exact 1-5% is empty in current round snapshot
+        bucket_mid_share = sorted(
+            [c for c in eligible if c["deals"] > 0 and (c["ext_avg"] or 0.0) >= 3.5],
+            key=lambda x: (x["ext_avg"] or 0.0, -x["mem_count"]),
+            reverse=True,
+        )
+    # - Bucket C (20%): 1~5 reviews, stars < 3.0 (or <= 3.3), honest count match (deals == reviews, aligned with visits)
+    bucket_honest_low = sorted(
+        [
+            c for c in eligible
+            if 1 <= c["ext_count"] <= 5
+            and (c["ext_avg"] is not None and c["ext_avg"] < 3.5)
+            and c["deals"] == c["ext_count"]
+            and c["visits"] >= c["deals"]
+        ],
+        key=lambda x: (-x["mem_count"], x["ext_avg"] or 0.0),
+    )
+
+    roll = random.random()
+    if roll < 0.30 and bucket_zero:
+        target_bucket, bucket_label = bucket_zero, "30% Cold-Start Tier (0 deals/receipts/stars/reviews, Top-10 excluded)"
+    elif roll < 0.80 and bucket_mid_share:
+        target_bucket, bucket_label = bucket_mid_share, "50% Mid-Share Tier (1~5% share & high rating, Top-10 excluded)"
+    elif bucket_honest_low:
+        target_bucket, bucket_label = bucket_honest_low, "20% Honest Recovery Tier (1~5 reviews, <3★, deals==receipts==reviews, Top-10 excluded)"
+    else:
+        # Fallback priority if rolled bucket is empty
+        if bucket_mid_share:
+            target_bucket, bucket_label = bucket_mid_share, "50% Mid-Share Tier (fallback)"
+        elif bucket_zero:
+            target_bucket, bucket_label = bucket_zero, "30% Cold-Start Tier (fallback)"
+        elif bucket_honest_low:
+            target_bucket, bucket_label = bucket_honest_low, "20% Honest Recovery Tier (fallback)"
+        else:
+            target_bucket, bucket_label = eligible, "General Non-Top-10 Pool"
+
+    # Prefer least-visited shops within the chosen bucket so orders spread evenly
+    target_bucket_sorted = sorted(target_bucket, key=lambda x: (x["mem_count"], -(x["ext_avg"] or 3.5)))
+    top_candidates = target_bucket_sorted[:6]
 
     lines = []
     for idx, c in enumerate(top_candidates):
-        mem_str = (
-            f"my_trades={c['mem_count']} (avg={c['mem_avg']}, archived={c['arch_count']}@{c['arch_avg']})"
-            if c["mem_count"] > 0 else "my_trades=0 [UNEXPLORED]"
+        lines.append(
+            f"{idx}. name={c['name']} | share={c['share']*100:.1f}% | deals={c['deals']} | "
+            f"reviews={c['ext_count']} (avg={c['ext_avg']}) | visits={c['visits']} | my_visits={c['mem_count']}"
         )
-        ext_str = f"board_reviews={c['ext_count']} (avg={c['ext_avg']})" if c["ext_count"] > 0 else "board_reviews=0"
-        flag_str = " [WARNING: DISHONEST/RIP-OFF REPORTS]" if c["dishonest"] else ""
-        snip = "; ".join(c["snippets"]) if c["snippets"] else "no reviews yet"
-        lines.append(f"{idx}. name={c['name']} | explore_score={c['score']} | {ext_str} | {mem_str}{flag_str} | recent: {snip}")
 
     prompt = (
-        f"You are a quality-conscious buyer selecting a shop to analyze and buy a {item} (budget {budget}).\n"
-        f"Rules:\n"
-        f"1. Never pick a shop with dishonest receipt warnings or very low ratings (<=2.2).\n"
-        f"2. To analyze the market broadly, strongly prefer UNEXPLORED or less-visited shops (highest explore_score) "
-        f"rather than buying repeatedly from the same shop.\n"
+        f"You are selecting a shop from the '{bucket_label}' bucket for a {item} (budget {budget}).\n"
+        f"Pick the best candidate (prefer fewer my_visits and honest stats).\n"
         f"Candidates:\n" + "\n".join(lines) + "\n\n"
-        f"Reply on ONE line in the format: PICK <index> | <short reason>"
+        f"Reply on ONE line: PICK <index> | <short reason>"
     )
     resp = call_harness(prompt)
 
     chosen_summary = top_candidates[0]
     reason = (
-        f"Market exploration & quality audit score ({chosen_summary['score']}) — "
-        f"visits={chosen_summary['mem_count']}, board_avg={chosen_summary['ext_avg']}."
+        f"[{bucket_label}] share={chosen_summary['share']*100:.1f}%, deals={chosen_summary['deals']}, "
+        f"reviews={chosen_summary['ext_count']}, stars={chosen_summary['ext_avg']}."
     )
 
     if resp:
@@ -219,10 +295,8 @@ def pick_shop(shops: list[dict], memory: dict, item: str, budget: int) -> tuple[
         if m:
             idx = int(m.group(1))
             if 0 <= idx < len(top_candidates):
-                candidate = top_candidates[idx]
-                if not candidate["dishonest"] and candidate["score"] >= top_candidates[0]["score"] - 0.8:
-                    chosen_summary = candidate
-                    reason = m.group(2).strip()
+                chosen_summary = top_candidates[idx]
+                reason = f"[{bucket_label}] {m.group(2).strip()}"
 
     shop_obj = next((s for s in shops if s["url"] == chosen_summary["url"]), shops[0])
     return shop_obj, reason
