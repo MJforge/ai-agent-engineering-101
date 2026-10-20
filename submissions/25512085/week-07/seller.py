@@ -1,13 +1,21 @@
-"""A2A v1.0 Seller Agent driven by Codex CLI harness.
+"""A2A v1.0 Seller Agent driven by Codex CLI harness (Week 07: LAB 2 + Challenge 1).
 Sells lamp (reserve 100), chair (reserve 180), and bookshelf (reserve 260).
+- LAB 2: Signs receipts with Ed25519 (sig_seller) over canonical JSON of {shop, item, price, task}.
+- Challenge 1: Reads its own trade history and market reviews to adapt asking prices dynamically
+  while strictly enforcing reserve prices.
 """
 import argparse
+import base64
+import json
 import math
 import os
 import re
 import subprocess
 import tempfile
+from pathlib import Path
+import httpx
 import uvicorn
+from cryptography.hazmat.primitives import serialization
 from starlette.applications import Starlette
 
 from a2a.helpers import (
@@ -29,6 +37,94 @@ RESERVES = {
     "bookshelf": 260,
 }
 
+SHOP_NAME = "Codex Shop"
+MARKET_NAME = os.environ.get("SHOP_MARKET_NAME", "mjforge")
+SELLER_HISTORY_FILE = Path(__file__).resolve().parent / "seller_history.json"
+
+
+def canon(d: dict) -> bytes:
+    return json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def sign_receipt(receipt: dict, key_path: str = "shop_key.pem") -> dict:
+    p = Path(__file__).resolve().parent / key_path
+    if not p.exists():
+        p = Path(key_path)
+    key = serialization.load_pem_private_key(p.read_bytes(), password=None)
+    body = {k: receipt[k] for k in ("shop", "item", "price", "task")}
+    receipt["sig_seller"] = base64.b64encode(key.sign(canon(body))).decode("ascii")
+    return receipt
+
+
+def load_seller_state() -> dict:
+    default = {
+        "deals": 0,
+        "walkaways": 0,
+        "multiplier": 1.15,  # Adjusted down from 1.30 after reading "Could not agree on a price" reviews
+        "recent_reviews": [],
+        "trades": [],
+    }
+    if SELLER_HISTORY_FILE.exists():
+        try:
+            data = json.loads(SELLER_HISTORY_FILE.read_text(encoding="utf-8"))
+            default.update(data)
+        except Exception:
+            pass
+    return default
+
+
+def save_seller_state(state: dict) -> None:
+    try:
+        state["trades"] = state.get("trades", [])[-20:]
+        SELLER_HISTORY_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def refresh_reviews_and_adapt_price() -> dict:
+    """Challenge 1: Read own trades and market reviews, adjust asking multiplier dynamically."""
+    state = load_seller_state()
+    shops_file = Path(__file__).resolve().parent / ".market" / "shops.json"
+    reviews = []
+    if shops_file.exists():
+        try:
+            shops = json.loads(shops_file.read_text(encoding="utf-8"))
+            for s in shops:
+                if s.get("name") == MARKET_NAME:
+                    reviews = s.get("reviews") or []
+                    break
+        except Exception:
+            pass
+
+    if not reviews:
+        try:
+            r = httpx.get("https://market.ourolabs.ai/api/shops", timeout=1.5).json()
+            for s in r.get("shops", []):
+                if s.get("name") == MARKET_NAME:
+                    reviews = s.get("reviews") or []
+                    break
+        except Exception:
+            pass
+
+    if reviews:
+        state["recent_reviews"] = reviews[:5]
+        stars = [rv.get("stars", 3) for rv in reviews[:5] if isinstance(rv.get("stars"), (int, float))]
+        avg_stars = sum(stars) / len(stars) if stars else 3.0
+        has_price_complaint = any(
+            "could not agree" in str(rv.get("review", "")).lower() or "no deal" in str(rv.get("review", "")).lower()
+            for rv in reviews[:3]
+        )
+        # If reviews complain about price or stars are low, lower multiplier to attract buyers & get 5★
+        if has_price_complaint or avg_stars < 3.5:
+            state["multiplier"] = 1.12
+        elif avg_stars >= 4.5 and state.get("deals", 0) >= 3:
+            state["multiplier"] = 1.18
+        else:
+            state["multiplier"] = 1.15
+
+    save_seller_state(state)
+    return state
+
 
 def call_harness(prompt: str) -> str:
     """Call Codex CLI harness in an empty directory with fallback protection."""
@@ -46,7 +142,7 @@ def call_harness(prompt: str) -> str:
             shell=True,
             text=True,
         )
-        p.communicate(input=prompt, timeout=20)
+        p.communicate(input=prompt, timeout=15)
         if os.path.exists(tmp_path):
             with open(tmp_path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
@@ -91,21 +187,28 @@ class Seller(AgentExecutor):
                 return
 
             reserve = RESERVES[item]
-            default_ask = math.ceil(reserve * 1.3)
+            state = refresh_reviews_and_adapt_price()
+            mult = float(state.get("multiplier", 1.15))
+            target_ask = max(reserve + 5, math.ceil(reserve * mult))
+            max_ask = math.ceil(reserve * 1.20)
+            rev_summary = "; ".join(f"{r.get('stars')}*: {r.get('review', '')[:50]}" for r in state.get("recent_reviews", [])[:2]) or "none"
 
             prompt = (
                 f"You are a merchant selling a {item}.\n"
-                f"The minimum reserve price is {reserve}.\n"
-                f"Decide your opening asking price (must be >= {default_ask}).\n"
+                f"Minimum reserve price: {reserve}.\n"
+                f"Recent shop reviews: {rev_summary}\n"
+                f"Past deals: {state.get('deals', 0)}, walkaways: {state.get('walkaways', 0)}.\n"
+                f"To win market share and 5-star reviews, set a competitive opening price between {target_ask} and {max_ask}.\n"
                 f"Answer with ONLY the integer number."
             )
             resp = call_harness(prompt)
             nums = re.findall(r"\d+", resp)
             if nums:
-                ask = max(reserve, int(nums[-1]))
+                ask = max(reserve, min(max_ask, int(nums[-1])))
             else:
-                ask = default_ask
+                ask = target_ask
 
+            print(f"[pricing] {item}: reserve={reserve}, multiplier={mult}, opening_ask={ask} (reviews: {rev_summary})", flush=True)
             self.open[task.id] = {"item": item, "ask": ask, "rounds": 0}
             await up.requires_input(say(f"{item}: asking {ask}. Send your offer as a number."))
             return
@@ -121,36 +224,48 @@ class Seller(AgentExecutor):
         reserve = RESERVES[item]
         deal["rounds"] += 1
 
-        prompt = (
-            f"You are a merchant negotiating a {item}.\n"
-            f"Reserve price: {reserve}. Your previous ask: {deal['ask']}.\n"
-            f"Buyer's offer: {offer}. Negotiation round: {deal['rounds']}/5.\n"
-            f"Rules:\n"
-            f"1. If offer >= {reserve} and you accept the price, reply: DEAL {offer}\n"
-            f"2. If offer < {reserve}, you CANNOT accept. Propose a counteroffer >= {reserve}, reply: COUNTER <number>\n"
-            f"3. If round >= 5 or offer is too low to negotiate, reply: REJECT\n"
-            f"Reply with ONLY one of these formats."
-        )
-        resp = call_harness(prompt).upper()
-
-        # Guardrail: never accept below reserve
-        if ("DEAL" in resp and offer >= reserve) or (offer >= reserve and deal["rounds"] >= 2):
-            receipt = {"seller": "Codex Shop", "item": item, "price": offer}
+        # Fast-close competitive policy: if buyer offers >= reserve, accept right away (even in round 1!)
+        # so buyers give us 5-star "quick deal" reviews and never walk away over 1 dollar.
+        if offer >= reserve:
+            receipt = sign_receipt({
+                "shop": SHOP_NAME,
+                "item": item,
+                "price": int(offer),
+                "task": task.id,
+            })
             await up.add_artifact(parts=[new_data_part(receipt)], name="receipt")
             await up.complete(say(f"Deal: {item} at {offer}."))
+            state = load_seller_state()
+            state["deals"] = state.get("deals", 0) + 1
+            state.setdefault("trades", []).append({"item": item, "price": int(offer), "rounds": deal["rounds"], "outcome": "deal"})
+            save_seller_state(state)
             del self.open[task.id]
             return
 
-        if deal["rounds"] >= 5 or "REJECT" in resp:
+        # Offer is below reserve: never sell below reserve!
+        prompt = (
+            f"You are a merchant negotiating a {item}.\n"
+            f"Reserve price: {reserve} (NEVER go below {reserve}). Your previous ask: {deal['ask']}.\n"
+            f"Buyer's offer: {offer} (below reserve). Negotiation round: {deal['rounds']}/5.\n"
+            f"If round >= 5, reply: REJECT\n"
+            f"Otherwise propose a counteroffer >= {reserve} and <= {deal['ask']}. Reply: COUNTER <number>"
+        )
+        resp = call_harness(prompt).upper()
+
+        if deal["rounds"] >= 5 or ("REJECT" in resp and deal["rounds"] >= 4):
             await up.reject(say(f"No deal at {offer}."))
+            state = load_seller_state()
+            state["walkaways"] = state.get("walkaways", 0) + 1
+            state.setdefault("trades", []).append({"item": item, "price": None, "last_offer": offer, "rounds": deal["rounds"], "outcome": "reject"})
+            save_seller_state(state)
             del self.open[task.id]
             return
 
         counter_nums = re.findall(r"\d+", resp)
-        if counter_nums and int(counter_nums[-1]) >= reserve:
+        if counter_nums and reserve <= int(counter_nums[-1]) <= deal["ask"]:
             new_ask = int(counter_nums[-1])
         else:
-            new_ask = max(reserve, (offer + deal["ask"]) // 2)
+            new_ask = max(reserve, ( max(offer, reserve) + deal["ask"] ) // 2)
 
         deal["ask"] = new_ask
         await up.requires_input(say(f"{offer} is too low. Counteroffer: {new_ask}."))
@@ -158,15 +273,19 @@ class Seller(AgentExecutor):
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         task = context.current_task
         if task:
-            self.open.pop(task.id, None)
+            deal = self.open.pop(task.id, None)
+            if deal:
+                state = load_seller_state()
+                state["walkaways"] = state.get("walkaways", 0) + 1
+                save_seller_state(state)
             await TaskUpdater(event_queue=event_queue, task_id=task.id, context_id=task.context_id).cancel()
 
 
 def build_app(port: int):
     url = f"http://127.0.0.1:{port}/"
     card = AgentCard(
-        name="Codex Shop",
-        description="Sells desk lamps, chairs, and bookshelves. Negotiates price driven by Codex harness.",
+        name=SHOP_NAME,
+        description="Sells desk lamps, chairs, and bookshelves. Fast, honest receipts signed with Ed25519.",
         version="1.0.0",
         default_input_modes=["text/plain"],
         default_output_modes=["application/json", "text/plain"],
@@ -178,9 +297,9 @@ def build_app(port: int):
             AgentSkill(
                 id="negotiate",
                 name="Negotiate a purchase",
-                description="Ask for an item, then negotiate price. Answers with counteroffer or receipt.",
+                description="Ask for an item, then negotiate price. Answers with counteroffer or signed receipt.",
                 tags=["shopping", "negotiation"],
-                examples=["I want to buy a lamp", "90"],
+                examples=["I want to buy a lamp", "105"],
             )
         ],
     )
