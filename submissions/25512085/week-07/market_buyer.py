@@ -19,11 +19,17 @@ import httpx
 
 MEMORY_FILE = Path("memory.json")
 MAX_RECENT_HISTORY = 5
+RESERVES = {"lamp": 100, "chair": 180, "bookshelf": 260}
+SERVICE_KEYWORDS = (
+    "warranty", "service", "refund", "guarantee", "quality", "support",
+    "vip", "bundle", "care", "return", "assurance", "policy", "replacement",
+    "member", "welcome", "discount", "benefit",
+)
 
 FUNNY_NO_DEAL_REVIEWS = [
-    "No deal after {rounds} round(s): seller clung to {ask} like a dragon hoarding gold while my budget was {budget}!",
-    "No deal in {rounds} round(s): seller wanted {ask} (my wallet tapped out at {budget}), must be made of solid gold!",
-    "No deal after {rounds} round(s): tried to meet at {budget} but seller stayed up in the clouds at {ask}!",
+    "No deal after {rounds} round(s): seller clung to {ask} with no flexible service while my budget was {budget}!",
+    "No deal in {rounds} round(s): seller wanted {ask} (budget {budget}) and offered zero service guarantee!",
+    "No deal after {rounds} round(s): tried to meet at {budget} with service assurance, but seller stayed at {ask}!",
 ]
 
 
@@ -95,6 +101,7 @@ def update_memory(memory: dict, shop_name: str, entry: dict) -> None:
         rec["archived_avg_stars"] = round((old_avg * old_cnt + old_stars) / new_cnt, 2)
 
     rec["recent"] = recent
+    rec["last_visited_ts"] = time.time()
     memory[shop_name] = rec
     try:
         MEMORY_FILE.write_text(json.dumps(memory, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -102,7 +109,7 @@ def update_memory(memory: dict, shop_name: str, entry: dict) -> None:
         print(f"[Memory Warning]: {e}", file=sys.stderr)
 
 
-def summarize_shop(shop: dict, memory: dict) -> dict:
+def summarize_shop(shop: dict, memory: dict, explore_mode: bool = False) -> dict:
     name = shop.get("name", "")
     url = shop.get("url", "")
     reviews = shop.get("reviews") or []
@@ -120,6 +127,7 @@ def summarize_shop(shop: dict, memory: dict) -> dict:
     recent = mem.get("recent", [])
     arch_cnt = mem.get("archived_count", 0)
     arch_avg = mem.get("archived_avg_stars", 0.0)
+    last_ts = float(mem.get("last_visited_ts", 0.0))
 
     total_mem_cnt = arch_cnt + len(recent)
     if total_mem_cnt > 0:
@@ -130,8 +138,8 @@ def summarize_shop(shop: dict, memory: dict) -> dict:
 
     dishonest = bool(mem.get("dishonest")) or ext_scam_flags > 0
 
-    # Compute composite recommendation score for fallback & ranking
-    score = 3.5
+    # Compute composite recommendation score
+    score = 3.8
     if ext_avg is not None:
         score = ext_avg
     if mem_avg is not None:
@@ -140,6 +148,15 @@ def summarize_shop(shop: dict, memory: dict) -> dict:
         score -= 10.0
     elif ext_avg is not None and ext_avg <= 2.2:
         score -= 5.0
+
+    # Market-wide exploration mode: rotate across different shops to audit quality & service across the market
+    if explore_mode and not dishonest:
+        if total_mem_cnt == 0:
+            score += 3.0  # Strong discovery bonus for unvisited shops
+        else:
+            score -= min(4.5, total_mem_cnt * 1.2)  # Anti-monopoly penalty so we don't buy from one shop repeatedly
+            if time.time() - last_ts < 300:
+                score -= 2.5  # Cooldown penalty for recently visited shops
 
     recent_snippets = [f"{r.get('stars')}*: {r.get('review', '')[:60]}" for r in reviews[:3]]
     return {
@@ -151,6 +168,7 @@ def summarize_shop(shop: dict, memory: dict) -> dict:
         "mem_count": total_mem_cnt,
         "arch_count": arch_cnt,
         "arch_avg": arch_avg,
+        "last_ts": last_ts,
         "dishonest": dishonest,
         "score": round(score, 2),
         "snippets": recent_snippets,
@@ -162,7 +180,9 @@ def pick_shop(shops: list[dict], memory: dict, item: str, budget: int) -> tuple[
         s = shops[0]
         return s, f"Only one shop available in list ({s['name']})."
 
-    summaries = [summarize_shop(s, memory) for s in shops]
+    # Enable market exploration rotation when in the full market (len(shops) > 2)
+    explore_mode = len(shops) > 2
+    summaries = [summarize_shop(s, memory, explore_mode=explore_mode) for s in shops]
     summaries_sorted = sorted(summaries, key=lambda x: x["score"], reverse=True)
     top_candidates = summaries_sorted[:8]
 
@@ -170,24 +190,29 @@ def pick_shop(shops: list[dict], memory: dict, item: str, budget: int) -> tuple[
     for idx, c in enumerate(top_candidates):
         mem_str = (
             f"my_trades={c['mem_count']} (avg={c['mem_avg']}, archived={c['arch_count']}@{c['arch_avg']})"
-            if c["mem_count"] > 0 else "my_trades=0"
+            if c["mem_count"] > 0 else "my_trades=0 [UNEXPLORED]"
         )
         ext_str = f"board_reviews={c['ext_count']} (avg={c['ext_avg']})" if c["ext_count"] > 0 else "board_reviews=0"
         flag_str = " [WARNING: DISHONEST/RIP-OFF REPORTS]" if c["dishonest"] else ""
         snip = "; ".join(c["snippets"]) if c["snippets"] else "no reviews yet"
-        lines.append(f"{idx}. name={c['name']} | {ext_str} | {mem_str}{flag_str} | recent: {snip}")
+        lines.append(f"{idx}. name={c['name']} | explore_score={c['score']} | {ext_str} | {mem_str}{flag_str} | recent: {snip}")
 
     prompt = (
-        f"You are a buyer selecting the most trustworthy shop to buy a {item} (budget {budget}).\n"
-        f"Avoid any shop with low star ratings (<=2.5) or dishonest receipt warnings.\n"
-        f"Prefer shops with high review ratings (4-5 stars) or honest past trades.\n"
+        f"You are a quality-conscious buyer selecting a shop to analyze and buy a {item} (budget {budget}).\n"
+        f"Rules:\n"
+        f"1. Never pick a shop with dishonest receipt warnings or very low ratings (<=2.2).\n"
+        f"2. To analyze the market broadly, strongly prefer UNEXPLORED or less-visited shops (highest explore_score) "
+        f"rather than buying repeatedly from the same shop.\n"
         f"Candidates:\n" + "\n".join(lines) + "\n\n"
         f"Reply on ONE line in the format: PICK <index> | <short reason>"
     )
     resp = call_harness(prompt)
 
     chosen_summary = top_candidates[0]
-    reason = f"Highest trust score ({chosen_summary['score']}) based on board reviews ({chosen_summary['ext_avg']}) and memory ({chosen_summary['mem_avg']})."
+    reason = (
+        f"Market exploration & quality audit score ({chosen_summary['score']}) — "
+        f"visits={chosen_summary['mem_count']}, board_avg={chosen_summary['ext_avg']}."
+    )
 
     if resp:
         m = re.search(r"PICK\s+(\d+)\s*\|\s*(.+)", resp, re.IGNORECASE)
@@ -195,8 +220,7 @@ def pick_shop(shops: list[dict], memory: dict, item: str, budget: int) -> tuple[
             idx = int(m.group(1))
             if 0 <= idx < len(top_candidates):
                 candidate = top_candidates[idx]
-                # Guardrail: never let LLM accidentally pick a flagged/bad shop when a better one exists
-                if not candidate["dishonest"] and candidate["score"] >= top_candidates[0]["score"] - 1.0:
+                if not candidate["dishonest"] and candidate["score"] >= top_candidates[0]["score"] - 0.8:
                     chosen_summary = candidate
                     reason = m.group(2).strip()
 
@@ -271,16 +295,21 @@ def main():
         print(json.dumps({"shop": chosen_shop["url"], "receipt": None, "stars": 2, "review": review}, ensure_ascii=False), flush=True)
         return
 
-    # 2. First message: open inquiry
+    # 2. First message: open inquiry + pre-purchase service/warranty/quality check
     msg = {
         "role": "ROLE_USER",
         "messageId": str(uuid.uuid4()),
-        "parts": [{"text": f"I want to buy a {item}"}],
+        "parts": [{
+            "text": (
+                f"I want to buy a {item}. Quality and trouble-free use matter more than rock-bottom price: "
+                f"do you provide after-sales service, a quality warranty, or a flexible refund policy?"
+            )
+        }],
     }
     try:
         res = rpc_call(rpc_url, "SendMessage", {"message": msg})
     except Exception as e:
-        review = f"No deal in 0 rounds: shop vanished mid-greeting ({type(e).__name__})!"
+        review = f"No deal in 0 rounds: shop vanished mid-greeting ({type(e).__name__}) when asked about service!"
         update_memory(memory, shop_name, {
             "item": item, "budget": budget, "price": None, "rounds": 0, "stars": 2, "outcome": "no-deal"
         })
@@ -300,6 +329,10 @@ def main():
     task_status = task.get("status", {})
     task_state = task_status.get("state")
     seller_ask = extract_last_number(task)
+    seller_texts = [
+        " ".join(p.get("text", "") for p in task_status.get("message", {}).get("parts", []))
+    ]
+    card_desc = str(card.get("description", ""))
 
     last_offer = 0
     rounds = 0
@@ -320,7 +353,7 @@ def main():
                 break
 
             prompt = (
-                f"You are a buyer negotiating to purchase a {item}.\n"
+                f"You are a quality-focused buyer negotiating to purchase a {item}.\n"
                 f"Maximum budget: {budget} (You MUST NEVER exceed {budget}).\n"
                 f"Seller's current ask: {seller_ask}.\n"
                 f"Your last offer: {last_offer}.\n"
@@ -355,11 +388,12 @@ def main():
         offer = min(budget, offer)
         last_offer = offer
 
+        # Send offer with service/warranty inquiry (keep `offer` as the only number in the text)
         follow_up = {
             "role": "ROLE_USER",
             "messageId": str(uuid.uuid4()),
             "taskId": task_id,
-            "parts": [{"text": str(offer)}],
+            "parts": [{"text": f"I offer {offer} if you guarantee product quality and after-sales service support."}],
         }
         try:
             res = rpc_call(rpc_url, "SendMessage", {"message": follow_up})
@@ -369,14 +403,21 @@ def main():
             break
 
         task = res.get("task", res)
-        task_state = task.get("status", {}).get("state")
+        task_status = task.get("status", {})
+        task_state = task_status.get("state")
         seller_ask = extract_last_number(task)
+        seller_texts.append(
+            " ".join(p.get("text", "") for p in task_status.get("message", {}).get("parts", []))
+        )
 
         if task_state in ("TASK_STATE_COMPLETED", "TASK_STATE_REJECTED", "TASK_STATE_CANCELED"):
             break
 
-    # 3. Inspect result & receipt, build stars & review
+    # 3. Inspect result & receipt, evaluate service & quality vs rock-bottom dumping
     raw_receipt = extract_receipt_data(task) if task_state == "TASK_STATE_COMPLETED" else None
+    combined_service_text = (" ".join(seller_texts) + " " + card_desc + " " + json.dumps(raw_receipt or {})).lower()
+    has_service = any(kw in combined_service_text for kw in SERVICE_KEYWORDS)
+    reserve_floor = RESERVES.get(item, 100)
 
     if raw_receipt is not None:
         rec_price_raw = raw_receipt.get("price")
@@ -393,20 +434,46 @@ def main():
         else:
             final_receipt = raw_receipt
             recorded_price = int(rec_price)
-            # Cheap vs near budget
-            if recorded_price <= budget * 0.92 or (budget - recorded_price) >= 10:
+            is_dumping_price = recorded_price <= reserve_floor + 1
+
+            if is_dumping_price and not has_service:
+                # Penalty for rock-bottom price dumping with zero service/quality assurance
+                stars = 2
+                review = (
+                    f"Quality concern: {item} sold at rock-bottom dumping price {recorded_price} (budget {budget}) "
+                    f"with zero warranty, refund policy, or after-sales service response! Suspiciously cheap — "
+                    f"raises serious doubts about durability and trouble-free use."
+                )
+                outcome = "dumping-suspect-quality"
+            elif has_service and not is_dumping_price:
+                # High rating ONLY when appropriate price is paired with clear service/warranty/quality support
                 stars = 5
-                review = f"Closed at {recorded_price} (budget {budget}) in {rounds} round(s) — Go to this shop, highly recommended!"
-                outcome = "great-deal"
-            else:
+                review = (
+                    f"Verified quality and attentive customer service! Closed {item} at a fair price of "
+                    f"{recorded_price} (budget {budget}) in {rounds} round(s) with service assurance — "
+                    f"Go to this shop, highly recommended!"
+                )
+                outcome = "great-service-deal"
+            elif has_service and is_dumping_price:
                 stars = 4
-                review = f"Good deal at {recorded_price} (budget {budget}) after {rounds} round(s) of negotiation."
+                review = (
+                    f"Closed {item} at {recorded_price} (budget {budget}) in {rounds} round(s); seller mentioned "
+                    f"service terms, though the rock-bottom price still warrants a quality check."
+                )
                 outcome = "good-deal"
+            else:
+                # Fair price (> reserve), but no explicit service/warranty guarantee provided when asked
+                stars = 3
+                review = (
+                    f"Bought {item} at a reasonable price of {recorded_price} (budget {budget}) in {rounds} round(s), "
+                    f"receipt matched, but seller provided no after-sales service or warranty guarantee when asked."
+                )
+                outcome = "no-service-deal"
     else:
         final_receipt = None
         recorded_price = None
         outcome = "no-deal"
-        stars = 3 if (seller_ask and seller_ask <= budget + 40) else 2
+        stars = 3 if (seller_ask and seller_ask <= budget + 40 and has_service) else 2
         template = random.choice(FUNNY_NO_DEAL_REVIEWS)
         review = template.format(rounds=rounds, ask=seller_ask or "sky-high", budget=budget)
 
