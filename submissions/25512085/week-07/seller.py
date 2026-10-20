@@ -9,6 +9,7 @@ import base64
 import json
 import math
 import os
+import random
 import re
 import subprocess
 import tempfile
@@ -97,6 +98,11 @@ def load_seller_state() -> dict:
         "vip_spend_share": {},
         "referrals_by_buyer": {},
         "distinct_customers": [],
+        "seen_buyers": [],
+        "recent_deal_ts": [],
+        "last_customer_ts": time.time(),
+        "fcfs_slots_remaining": 0,
+        "fcfs_buyer_counts": {},
         "recent_reviews": [],
         "trades": [],
     }
@@ -274,17 +280,85 @@ class Seller(AgentExecutor):
             order_age = abs(time.time() - float(recent_order.get("ts") or 0))
 
             # Note: Do not pre-reject blacklisted buyers on Round 0 because market allows rejected buyers to post 2★ reviews!
+            now_ts = time.time()
             is_vip = active_buyer in vips
             referrals = int((state.get("referrals_by_buyer") or {}).get(active_buyer, 0))
             if any(k in text.lower() for k in ("refer", "friend", "recommend", "invite", "guest")):
                 referrals = min(3, referrals + 1)
 
-            ask, disc_pct = referral_price(item, referrals, is_vip=is_vip)
-            rev_summary = "; ".join(f"{r.get('stars')}*: {r.get('review', '')[:45]}" for r in state.get("recent_reviews", [])[:2]) or "none"
+            # 1) Detect Market Wave: >= 3 deals within last 180s OR recent review avg >= 4.1★
+            recent_deal_ts = [float(t) for t in (state.get("recent_deal_ts") or []) if now_ts - float(t) <= 180.0]
+            revs = state.get("recent_reviews") or []
+            avg_stars = (sum(float(r.get("stars") or 0) for r in revs) / len(revs)) if revs else 0.0
+            is_wave_active = (len(recent_deal_ts) >= 3) or (len(revs) >= 3 and avg_stars >= 4.1)
 
+            # 2) Detect >= 1 hour (3600s) idle without customers -> trigger 4-slot First-Come-First-Served (max 2 per buyer)
+            last_customer_ts = float(state.get("last_customer_ts") or now_ts)
+            fcfs_slots = int(state.get("fcfs_slots_remaining") or 0)
+            fcfs_counts = dict(state.get("fcfs_buyer_counts") or {})
+            if (now_ts - last_customer_ts) >= 3600.0 and fcfs_slots <= 0:
+                fcfs_slots = 4
+                fcfs_counts = {}
+                print("[fcfs] 1h+ idle detected! Activated First-Come-First-Served 4-slot Revenue Flash Mode (max 2 per buyer).", flush=True)
+
+            state["last_customer_ts"] = now_ts
+            state["recent_deal_ts"] = recent_deal_ts
+            state["fcfs_slots_remaining"] = fcfs_slots
+            state["fcfs_buyer_counts"] = fcfs_counts
+
+            # Check repeat buyer status
+            known_customers = set(state.get("distinct_customers") or []) | set(state.get("seen_buyers") or [])
+            is_repeat_buyer = bool(active_buyer and active_buyer in known_customers)
+            if active_buyer:
+                seen_list = list(known_customers | {active_buyer})
+                state["seen_buyers"] = seen_list[-100:]
+            save_seller_state(state)
+
+            buyer_key = active_buyer or "guest"
+            is_fcfs_eligible = (fcfs_slots > 0) and (int(fcfs_counts.get(buyer_key, 0)) < 2)
+
+            if is_fcfs_eligible:
+                # 1h+ Idle First-Come-First-Served (4 slots, max 2 per buyer): No promo text, discounted revenue-focused instant checkout!
+                ask = math.ceil(reserve * 1.03)  # Discounted off 1.5x but above reserve for revenue focus (103 / 186 / 268)
+                disc_pct = int(round((1.0 - ask / (reserve * PREMIUM_MULT)) * 100))
+                opening_msg = f"{item}: {ask}. Reply with {ask} alone for instant signed receipt."
+            elif is_wave_active:
+                # Wave Active: standard wave price 1.05x, with instant 5% discount on repeat purchase (= 1.00x reserve)!
+                wave_base_ask = math.ceil(reserve * 1.05)
+                if is_repeat_buyer:
+                    ask = max(reserve, int(round(wave_base_ask * 0.95)))
+                    opening_msg = (
+                        f"{item} promo price: {ask}. Listed asking price: {ask}. "
+                        f"Reply with {ask} alone for instant signed receipt."
+                    )
+                else:
+                    ask = reserve
+                    opening_msg = (
+                        f"{item} promo price: {ask}. Listed asking price: {ask} "
+                        f"(reply with {ask} alone for instant signed receipt). "
+                        f"[Wave Re-visit Promo Active: random five to ten percent re-visit discount stamped on receipt, "
+                        f"instant five percent repeat-buyer discount — final price: {ask}]"
+                    )
+                disc_pct = int(round((1.0 - ask / (reserve * PREMIUM_MULT)) * 100))
+            else:
+                # Wave Stopped / Normal Mode: stop Wave re-visit promo
+                ask, disc_pct = referral_price(item, referrals, is_vip=is_vip)
+                if is_repeat_buyer:
+                    opening_msg = (
+                        f"{item} promo price: {ask}. Listed asking price: {ask}. "
+                        f"Reply with {ask} alone for instant signed receipt."
+                    )
+                else:
+                    opening_msg = (
+                        f"{item} promo price: {ask}. Listed asking price: {ask} "
+                        f"(reply with {ask} alone for instant signed receipt). "
+                        f"[Fast Express Delivery and Full Flexible Refund Guarantee — final price: {ask}]"
+                    )
+
+            rev_summary = "; ".join(f"{r.get('stars')}*: {r.get('review', '')[:45]}" for r in revs[:2]) or "none"
             print(
-                f"[pricing] {item}: base_1.5x={math.ceil(reserve * PREMIUM_MULT)}, referrals={referrals}, "
-                f"vip={is_vip}, discount={disc_pct}%, opening_ask={ask}, blacklist={list(blacklist)} (reviews: {rev_summary})",
+                f"[pricing] {item}: wave={is_wave_active}, fcfs={is_fcfs_eligible}(slots={fcfs_slots}), repeat={is_repeat_buyer}, "
+                f"opening_ask={ask}, discount={disc_pct}% (reviews: {rev_summary})",
                 flush=True,
             )
             self.open[task.id] = {
@@ -292,33 +366,12 @@ class Seller(AgentExecutor):
                 "ask": ask,
                 "rounds": 0,
                 "is_vip": is_vip,
+                "is_wave": is_wave_active,
+                "is_fcfs": is_fcfs_eligible,
                 "referrals": referrals,
                 "buyer": active_buyer,
                 "offers": [],
             }
-            # Check if this buyer is a repeat customer (already bought or negotiated before)
-            known_customers = set(state.get("distinct_customers") or []) | set(state.get("seen_buyers") or [])
-            is_repeat_buyer = bool(active_buyer and active_buyer in known_customers)
-            if active_buyer:
-                seen_list = list(known_customers | {active_buyer})
-                state["seen_buyers"] = seen_list[-100:]
-                save_seller_state(state)
-
-            if is_repeat_buyer:
-                # Repeat customer: skip repetitive promo explanation and guide straight to fast checkout
-                opening_msg = (
-                    f"{item} promo price: {ask}. Listed asking price: {ask}. "
-                    f"Reply with {ask} alone for instant signed receipt."
-                )
-            else:
-                # First-time customer: [1. Promo Discount Number] -> [2. Price] -> [3. Promo Explanation]
-                # Keep all digits strictly equal to `ask` so any regex parser (first, last, or truncated) extracts `ask`!
-                opening_msg = (
-                    f"{item} promo price: {ask}. Listed asking price: {ask} "
-                    f"(reply with {ask} alone for instant signed receipt). "
-                    f"[mjforge VIP Service Open: thirty-three percent max promo discount applied, "
-                    f"Buy-Two-Get-Three Bundle, Free Express Delivery, and Full Flexible Refund Guarantee — final price: {ask}]"
-                )
 
             await up.requires_input(say(opening_msg))
             return
@@ -347,34 +400,55 @@ class Seller(AgentExecutor):
         if offer >= reserve:
             final_price = max(reserve, min(int(offer), int(deal["ask"])))
             achieved_disc_pct = min(34, max(0, int(round((1.0 - final_price / (reserve * PREMIUM_MULT)) * 100))))
+            is_wave = bool(deal.get("is_wave"))
+            is_fcfs = bool(deal.get("is_fcfs"))
+            if is_wave:
+                revisit_disc = random.randint(5, 10)
+                seal_text = f"영수증 재방문시 {revisit_disc}% 할인 쿠폰 (Re-visit {revisit_disc}% Discount — Wave Active, Instant 5% Off on Repeat Purchase)"
+            elif is_fcfs:
+                seal_text = "선착순 4명 한정 특가 영수증 (First-Come-First-Served Flash Deal, Max 2 per Buyer)"
+            else:
+                seal_text = "mjforge 정품 인증 영수증 (Standard Verified Receipt — Wave Promo Paused)"
+
             receipt = sign_receipt({
                 "shop": SHOP_NAME,
                 "item": item,
                 "price": final_price,
                 "task": task.id,
-                "seal": "mjforge vip 서비스 오픈 (MJFORGE VIP SERVICE OPEN)",
-                "bundle": "Buy-Two-Get-Three (3 units delivered)",
-                "referral_discount": f"{achieved_disc_pct}% off 1.5x base price (Grand Revamp VIP & Referral Promo)",
-                "vip_benefit": "VIP Instant Discount + Limited 30-Min Full-Set Membership",
+                "seal": seal_text,
+                "revisit_coupon": f"{random.randint(5, 10)}% off on re-visit (active during market wave)" if is_wave else "inactive (wave ended)",
                 "refund_policy": "100% Flexible No-Questions-Asked Refund Policy",
             })
             await up.add_artifact(parts=[new_data_part(receipt)], name="receipt")
             await up.complete(
                 say(f"Deal: {item} at {final_price}.")
             )
+            now_ts = time.time()
             state = load_seller_state()
             state["deals"] = state.get("deals", 0) + 1
+            state["last_customer_ts"] = now_ts
+            recent_deal_ts = [float(t) for t in (state.get("recent_deal_ts") or []) if now_ts - float(t) <= 180.0]
+            recent_deal_ts.append(now_ts)
+            state["recent_deal_ts"] = recent_deal_ts[-30:]
+            if is_fcfs and int(state.get("fcfs_slots_remaining") or 0) > 0:
+                b_key = deal.get("buyer") or "guest"
+                fcfs_counts = dict(state.get("fcfs_buyer_counts") or {})
+                if int(fcfs_counts.get(b_key, 0)) < 2:
+                    fcfs_counts[b_key] = int(fcfs_counts.get(b_key, 0)) + 1
+                    state["fcfs_buyer_counts"] = fcfs_counts
+                    state["fcfs_slots_remaining"] = max(0, int(state.get("fcfs_slots_remaining") or 0) - 1)
             state.setdefault("trades", []).append({
                 "item": item,
                 "price": final_price,
                 "rounds": deal["rounds"],
-                "discount_off_1_5x": f"{achieved_disc_pct}%",
-                "bundle": "2+1 (3 units)",
+                "wave_active": is_wave,
+                "fcfs_applied": is_fcfs,
+                "seal": seal_text,
                 "outcome": "deal",
             })
             save_seller_state(state)
             print(
-                f"[deal] Sold Premium 2+1 {item} at {final_price} ({achieved_disc_pct}% off 1.5x) in {deal['rounds']} round(s)!",
+                f"[deal] Sold {item} at {final_price} (wave={is_wave}, fcfs={is_fcfs}) in {deal['rounds']} round(s)! Seal: {seal_text}",
                 flush=True,
             )
             del self.open[task.id]
