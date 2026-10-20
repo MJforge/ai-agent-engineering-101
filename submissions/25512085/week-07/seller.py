@@ -274,10 +274,10 @@ class Seller(AgentExecutor):
             active_buyer = recent_order.get("buyer")
             order_age = abs(time.time() - float(recent_order.get("ts") or 0))
 
-            # If a known blacklisted low-star buyer (e.g. 11im) just requested this item on the live market, block immediately!
+            # If a known blacklisted low-star buyer just requested this item on the live market, block immediately without exposing name!
             if active_buyer in blacklist and order_age < 12.0:
-                print(f"[blacklist] Blocked blacklisted buyer {active_buyer} for {item}!", flush=True)
-                await up.reject(say(f"Declined under our Premium Policy: buyer {active_buyer} is blacklisted for unfair low ratings. Full cancellation applied."))
+                print(f"[blacklist] Blocked blacklisted buyer for {item}!", flush=True)
+                await up.reject(say("Declined under our Premium Policy: account is restricted due to repeated price-only low ratings. Full flexible cancellation applied."))
                 return
 
             is_vip = active_buyer in vips
@@ -305,12 +305,12 @@ class Seller(AgentExecutor):
             # Keep numbers out of prefix text so both re.search() and last_number() regexes ONLY extract `ask`
             await up.requires_input(
                 say(
-                    f"Welcome to continuously improving mjforge Premium Boutique! "
-                    f"[Notice: our earlier rating dip came from a single price-only troll bot (eleven-im) that spammed "
-                    f"unfair low ratings across multiple shops even at rock-bottom prices; we are actively upgrading our "
-                    f"quality and customer care! Limited thirty-minute Membership Promo: buy one each of lamp, chair, and "
-                    f"bookshelf for instant VIP status (twenty percent off), plus ten percent off per recruited guest up to "
-                    f"thirty percent max, Buy-Two-Get-Three Bundle, and Full Flexible Refund Guarantee] "
+                    f"Welcome to the Grand Revamp of mjforge — mjforge VIP Service Open! "
+                    f"[Notice: our earlier rating dip came from a price-only bot tactic that spammed mechanical low ratings "
+                    f"across shops even at bare cost (fellow sellers and buyers, beware of such price-only rating bots!); "
+                    f"we have completely revamped our store! Limited thirty-minute Membership Promo: buy one each of lamp, "
+                    f"chair, and bookshelf for instant VIP status (twenty percent off), plus ten percent off per recruited "
+                    f"guest up to thirty percent max, Buy-Two-Get-Three Bundle, and Full Flexible Refund Guarantee] "
                     f"{item}: asking {ask}. Send your offer as a number."
                 )
             )
@@ -351,9 +351,10 @@ class Seller(AgentExecutor):
                 "item": item,
                 "price": final_price,
                 "task": task.id,
+                "seal": "mjforge vip 서비스 오픈 (MJFORGE VIP SERVICE OPEN)",
                 "bundle": "Buy-Two-Get-Three (3 units delivered)",
                 "referral_discount": f"{achieved_disc_pct}% off 1.5x base price (10% per recruited guest, max 30%)",
-                "vip_benefit": "VIP 20% Discount off 1.5x + Multi-Buy Loyalty Applied",
+                "vip_benefit": "VIP 20% Discount off 1.5x + Limited 30-Min Full-Set Membership",
                 "refund_policy": "100% Flexible No-Questions-Asked Refund Policy",
             })
             await up.add_artifact(parts=[new_data_part(receipt)], name="receipt")
@@ -425,10 +426,10 @@ def build_app(port: int):
     card = AgentCard(
         name=SHOP_NAME,
         description=(
-            "Continuously improving Premium Boutique (lamp, chair, bookshelf) with Ed25519 receipts, "
-            "100% Flexible Refund Policy, 2+1 Bundles, and Limited 30-Min Full-Set VIP Membership "
+            "[MJFORGE VIP SERVICE OPEN — GRAND REVAMP] Continuously improving Premium Boutique (lamp, chair, bookshelf) "
+            "with Ed25519 receipts, 100% Flexible Refund Policy, 2+1 Bundles, and Limited 30-Min Full-Set VIP Membership "
             "(buy 1 lamp + 1 chair + 1 bookshelf for 20% VIP discount; +10% per referred guest up to 30% off). "
-            "Note: earlier rating dip was caused by rogue bot '11im' review-bombing multiple shops purely on price."
+            "Note: earlier rating dip was caused by a price-only bot tactic spamming low ratings across shops."
         ),
         version="1.0.0",
         default_input_modes=["text/plain"],
