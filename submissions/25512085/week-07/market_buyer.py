@@ -246,9 +246,13 @@ def rpc_call(url: str, method: str, params: dict) -> dict:
 def extract_last_number(task: dict) -> int | None:
     msg = (task or {}).get("status", {}).get("message", {})
     text = " ".join(p.get("text", "") for p in msg.get("parts", []))
-    nums = re.findall(r"\d+(?:\.\d+)?", text)
+    nums = [math.ceil(float(x)) for x in re.findall(r"\d+(?:\.\d+)?", text)]
+    # Filter out small numbers (< 50) like "5 offers left", "2+1", or "20%" so we only grab actual item prices
+    price_nums = [n for n in nums if n >= 50]
+    if price_nums:
+        return price_nums[-1]
     if nums:
-        return math.ceil(float(nums[-1]))
+        return nums[-1]
     return None
 
 
