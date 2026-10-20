@@ -40,9 +40,9 @@ RESERVES = {
 }
 # Premium 1.5x base price: lamp=150, chair=270, bookshelf=390
 PREMIUM_MULT = 1.50
-# Rating Recovery + Grand Revamp Instant Opening Discount (~32% off 1.5x -> 1.02x: lamp=102, chair=184, bookshelf=265)
-# and up to 33.3% max discount right down to bare reserve (100 / 180 / 260) so 100% of valid budgets close in 1-2 turns!
-RECOVERY_OPEN_MULT = 1.02
+# Rating Recovery + Grand Revamp Instant Opening Discount (33.3% off 1.5x -> 1.00x: lamp=100, chair=180, bookshelf=260)
+# so 100% of valid budgets close in 1 turn and never trigger 2-star rejection reviews!
+RECOVERY_OPEN_MULT = 1.00
 REFERRAL_DISCOUNT_PER_GUEST = 0.10
 MAX_REFERRAL_DISCOUNT = 1.0 - (1.0 / PREMIUM_MULT)  # 33.33% off 1.5x = 1.0x reserve (100 / 180 / 260)
 VIP_MULT = 1.02
@@ -273,12 +273,7 @@ class Seller(AgentExecutor):
             active_buyer = recent_order.get("buyer")
             order_age = abs(time.time() - float(recent_order.get("ts") or 0))
 
-            # If a known blacklisted low-star buyer just requested this item on the live market, block immediately without exposing name!
-            if active_buyer in blacklist and order_age < 12.0:
-                print(f"[blacklist] Blocked blacklisted buyer for {item}!", flush=True)
-                await up.reject(say("Declined under our Premium Policy: account is restricted due to repeated price-only low ratings. Full flexible cancellation applied."))
-                return
-
+            # Note: Do not pre-reject blacklisted buyers on Round 0 because market allows rejected buyers to post 2★ reviews!
             is_vip = active_buyer in vips
             referrals = int((state.get("referrals_by_buyer") or {}).get(active_buyer, 0))
             if any(k in text.lower() for k in ("refer", "friend", "recommend", "invite", "guest")):
