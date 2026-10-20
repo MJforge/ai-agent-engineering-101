@@ -40,14 +40,18 @@ RESERVES = {
 }
 # Premium 1.5x base price: lamp=150, chair=270, bookshelf=390
 PREMIUM_MULT = 1.50
-# VIP 20% discount off 1.5x (= 1.20x): lamp=120, chair=216, bookshelf=312
-VIP_MULT = 1.20
-# Loyalty multi-buy floor (blocks low-budget 3-star trolls while closing high-budget & test deals)
-VIP_FLOORS = {
-    "lamp": 115,
-    "chair": 207,
-    "bookshelf": 300,
-}
+# Referral discount tiers off 1.5x: 10% per recruited customer, up to 30% max discount!
+# - 0 referrals (0% off 1.5x  -> 1.50x): lamp=150, chair=270, bookshelf=390
+# - 1 referral  (10% off 1.5x -> 1.35x): lamp=135, chair=243, bookshelf=351
+# - 2 referrals (20% off 1.5x -> 1.20x): lamp=120, chair=216, bookshelf=312
+# - 3+ referrals(30% off 1.5x -> 1.05x): lamp=105, chair=189, bookshelf=273
+REFERRAL_DISCOUNT_PER_GUEST = 0.10
+MAX_REFERRAL_DISCOUNT = 0.30
+VIP_MULT = 1.20  # 20% off 1.5x for VIPs (>=50% spend share)
+MAX_DISCOUNT_FLOORS = {
+    item: math.ceil(res * PREMIUM_MULT * (1.0 - MAX_REFERRAL_DISCOUNT))
+    for item, res in RESERVES.items()
+}  # {"lamp": 105, "chair": 189, "bookshelf": 273} — strictly above reserve, never dumps at 1.0x!
 
 SHOP_NAME = os.environ.get("SHOP_NAME", "mjforge")
 MARKET_NAME = os.environ.get("SHOP_MARKET_NAME", "mjforge")
@@ -68,6 +72,16 @@ def sign_receipt(receipt: dict, key_path: str = "shop_key.pem") -> dict:
     return receipt
 
 
+def referral_price(item: str, referrals: int, is_vip: bool = False) -> tuple[int, int]:
+    """Calculate price from 1.5x base with 10% discount per recruited customer (max 30% off), plus VIP 20% floor."""
+    base_15x = RESERVES[item] * PREMIUM_MULT
+    ref_disc = min(MAX_REFERRAL_DISCOUNT, max(0, referrals) * REFERRAL_DISCOUNT_PER_GUEST)
+    vip_disc = 0.20 if is_vip else 0.0
+    applied_disc = min(MAX_REFERRAL_DISCOUNT, max(ref_disc, vip_disc))
+    price = max(RESERVES[item], math.ceil(base_15x * (1.0 - applied_disc)))
+    return price, int(round(applied_disc * 100))
+
+
 def load_seller_state() -> dict:
     default = {
         "deals": 0,
@@ -78,6 +92,8 @@ def load_seller_state() -> dict:
         "blacklist": ["11im"],
         "vips": [],
         "vip_spend_share": {},
+        "referrals_by_buyer": {},
+        "distinct_customers": [],
         "recent_reviews": [],
         "trades": [],
     }
@@ -188,11 +204,21 @@ def background_review_sync():
                         vips.add(b_name)
                         vip_shares[b_name] = share
 
+                # Track distinct honest customers & how many new customers visited after each advocate's 4-5★ review
+                good_customers = [b for b in our_spend if b not in blacklist]
+                referrals_by_buyer = state.get("referrals_by_buyer") or {}
+                for idx, b_name in enumerate(good_customers):
+                    # Each subsequent customer who joined after this customer counts as a recruited referral (up to 3 -> 30%)
+                    recruited = min(3, max(referrals_by_buyer.get(b_name, 0), len(good_customers) - 1 - idx))
+                    referrals_by_buyer[b_name] = recruited
+
                 if all_budgets:
                     state["avg_market_purchasing_power"] = round(sum(all_budgets) / len(all_budgets), 1)
                 state["blacklist"] = sorted(blacklist)
                 state["vips"] = sorted(vips)
                 state["vip_spend_share"] = vip_shares
+                state["distinct_customers"] = good_customers
+                state["referrals_by_buyer"] = referrals_by_buyer
                 state["recent_orders"] = recent_orders
                 save_seller_state(state)
         except Exception:
@@ -239,21 +265,32 @@ class Seller(AgentExecutor):
                 return
 
             is_vip = active_buyer in vips
-            mult = VIP_MULT if is_vip else float(state.get("multiplier", PREMIUM_MULT))
-            ask = max(reserve, math.ceil(reserve * mult))
+            referrals = int((state.get("referrals_by_buyer") or {}).get(active_buyer, 0))
+            if any(k in text.lower() for k in ("refer", "friend", "recommend", "invite", "guest")):
+                referrals = min(3, referrals + 1)
+
+            ask, disc_pct = referral_price(item, referrals, is_vip=is_vip)
             rev_summary = "; ".join(f"{r.get('stars')}*: {r.get('review', '')[:45]}" for r in state.get("recent_reviews", [])[:2]) or "none"
 
             print(
-                f"[pricing] {item}: reserve={reserve}, multiplier={mult} ({'VIP 20% OFF' if is_vip else 'PREMIUM 1.5x'}), "
-                f"opening_ask={ask}, blacklist={list(blacklist)} (reviews: {rev_summary})",
+                f"[pricing] {item}: base_1.5x={math.ceil(reserve * PREMIUM_MULT)}, referrals={referrals}, "
+                f"vip={is_vip}, discount={disc_pct}%, opening_ask={ask}, blacklist={list(blacklist)} (reviews: {rev_summary})",
                 flush=True,
             )
-            self.open[task.id] = {"item": item, "ask": ask, "rounds": 0, "is_vip": is_vip, "buyer": active_buyer, "offers": []}
+            self.open[task.id] = {
+                "item": item,
+                "ask": ask,
+                "rounds": 0,
+                "is_vip": is_vip,
+                "referrals": referrals,
+                "buyer": active_buyer,
+                "offers": [],
+            }
             # Keep numbers out of prefix text so last_number() regex always extracts `ask`
             await up.requires_input(
                 say(
-                    f"Premium Boutique [Buy-Two-Get-Three Bundle + VIP Twenty-Percent Discount + Full Flexible Refund Guarantee] "
-                    f"{item}: asking {ask}. Send your offer as a number."
+                    f"Premium Boutique [Buy-Two-Get-Three Bundle + Ten-Percent Off Per Recruited Guest Up To Thirty-Percent Max + "
+                    f"VIP Twenty-Percent Off + Full Flexible Refund Guarantee] {item}: asking {ask}. Send your offer as a number."
                 )
             )
             return
@@ -267,36 +304,41 @@ class Seller(AgentExecutor):
         offer = int(m[-1])
         item = deal["item"]
         reserve = RESERVES[item]
-        vip_price = math.ceil(reserve * VIP_MULT)       # 1.20x (120 / 216 / 312) — 20% off 1.5x
-        vip_floor = VIP_FLOORS[item]                    # 1.15x (115 / 207 / 300) — multi-buy loyalty floor
+        max_referral_floor = MAX_DISCOUNT_FLOORS[item]  # 30% off 1.5x = 1.05x (lamp=105, chair=189, bookshelf=273)
         deal["rounds"] += 1
         deal.setdefault("offers", []).append(offer)
 
-        # Blacklist detection mid-negotiation: if buyer stalls with repeated identical lowball offers below reserve
+        # Blacklist detection mid-negotiation: if buyer stalls with repeated identical lowball offers at/below reserve
         if len(deal["offers"]) >= 3 and offer <= reserve and deal["offers"][-1] == deal["offers"][-2]:
             print(f"[blacklist] Blocked stalling lowball buyer on {item} at offer {offer}.", flush=True)
             await up.reject(say(f"No deal at {offer}. Flexible cancellation policy applied."))
             del self.open[task.id]
             return
 
-        # Accept if buyer meets our current ask, VIP 20%-off price (1.2x), or Loyalty Multi-Buy Floor (>= 115/207/300)
-        target_floor = vip_price if deal["rounds"] == 1 else vip_floor
-        if offer >= target_floor:
+        # Progressive referral unlock per round: 1st counter = 10% off (1.35x), 2nd = 20% off (1.20x), 3rd+ = Max 30% off (1.05x)
+        effective_referrals = min(3, max(deal.get("referrals", 0), deal["rounds"]))
+        tier_ask, tier_disc_pct = referral_price(item, effective_referrals, is_vip=deal.get("is_vip", False))
+
+        # Accept if buyer meets current ask, current referral tier, or Max 30% Referral Discount floor (105 / 189 / 273)
+        target_floor = tier_ask if deal["rounds"] <= 2 else max_referral_floor
+        if offer >= target_floor or offer >= deal["ask"]:
             final_price = min(int(offer), int(deal["ask"]))
-            final_price = max(final_price, vip_floor)
+            final_price = max(final_price, max_referral_floor)
+            achieved_disc_pct = min(30, max(0, int(round((1.0 - final_price / (reserve * PREMIUM_MULT)) * 100))))
             receipt = sign_receipt({
                 "shop": SHOP_NAME,
                 "item": item,
                 "price": final_price,
                 "task": task.id,
                 "bundle": "Buy-Two-Get-Three (3 units delivered)",
+                "referral_discount": f"{achieved_disc_pct}% off 1.5x base price (10% per recruited guest, max 30%)",
                 "vip_benefit": "VIP 20% Discount off 1.5x + Multi-Buy Loyalty Applied",
                 "refund_policy": "100% Flexible No-Questions-Asked Refund Policy",
             })
             await up.add_artifact(parts=[new_data_part(receipt)], name="receipt")
             await up.complete(
                 say(
-                    f"Deal [Buy-Two-Get-Three Bundle + VIP Discount + Full Flexible Refund Guarantee]: "
+                    f"Deal [Buy-Two-Get-Three Bundle + Referral & VIP Discount Applied + Full Flexible Refund Guarantee]: "
                     f"{item} at {final_price}."
                 )
             )
@@ -306,15 +348,19 @@ class Seller(AgentExecutor):
                 "item": item,
                 "price": final_price,
                 "rounds": deal["rounds"],
+                "discount_off_1_5x": f"{achieved_disc_pct}%",
                 "bundle": "2+1 (3 units)",
                 "outcome": "deal",
             })
             save_seller_state(state)
-            print(f"[deal] Sold Premium 2+1 {item} at {final_price} (VIP tier) in {deal['rounds']} round(s)!", flush=True)
+            print(
+                f"[deal] Sold Premium 2+1 {item} at {final_price} ({achieved_disc_pct}% off 1.5x) in {deal['rounds']} round(s)!",
+                flush=True,
+            )
             del self.open[task.id]
             return
 
-        # Refuse to sell to low-budget/low-star buyers after 5 rounds (no signed receipt = no low review in Round 2!)
+        # Refuse to sell below our Max 30% Referral Discount Floor (105/189/273) after 5 rounds
         if deal["rounds"] >= 5:
             await up.reject(say(f"No deal at {offer}. Flexible no-fee cancellation applied."))
             state = load_seller_state()
@@ -327,22 +373,18 @@ class Seller(AgentExecutor):
                 "outcome": "reject",
             })
             save_seller_state(state)
-            print(f"[reject] Protected rating: refused low-margin offer {offer} on {item} after {deal['rounds']} rounds.", flush=True)
+            print(f"[reject] Protected rating: refused below-30%-cap offer {offer} on {item} after {deal['rounds']} rounds.", flush=True)
             del self.open[task.id]
             return
 
-        # Step down from 1.5x (150/270/390) -> 1.35x -> VIP 20%-off 1.2x (120/216/312) -> Loyalty floor (115/207/300)
-        if deal["rounds"] == 1:
-            new_ask = math.ceil(reserve * 1.35)
-        elif deal["rounds"] == 2:
-            new_ask = vip_price
-        else:
-            new_ask = vip_floor
+        # Step down 10% per referral tier each round: 1.5x (0%) -> 1.35x (10% off) -> 1.20x (20% off) -> 1.05x (Max 30% off)
+        new_ask = tier_ask
         deal["ask"] = new_ask
+        disc_word = {10: "ten", 20: "twenty", 30: "thirty"}.get(tier_disc_pct, "ten")
         await up.requires_input(
             say(
-                f"VIP Twenty-Percent Off and Buy-Two-Get-Three Bundle unlocked! "
-                f"{offer} is below our premium tier. VIP counteroffer: {new_ask}."
+                f"Referral & VIP Reward Unlocked ({disc_word} percent off our premium price + Buy-Two-Get-Three Bundle + "
+                f"Full Flexible Refund Policy)! Current referral counteroffer: {new_ask}."
             )
         )
 
