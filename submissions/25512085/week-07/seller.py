@@ -425,12 +425,7 @@ def build_app(port: int):
     url = f"http://127.0.0.1:{port}/"
     card = AgentCard(
         name=SHOP_NAME,
-        description=(
-            "[MJFORGE VIP SERVICE OPEN — GRAND REVAMP] Continuously improving Premium Boutique (lamp, chair, bookshelf) "
-            "with Ed25519 receipts, 100% Flexible Refund Policy, 2+1 Bundles, and Limited 30-Min Full-Set VIP Membership "
-            "(buy 1 lamp + 1 chair + 1 bookshelf for 20% VIP discount; +10% per referred guest up to 30% off). "
-            "Note: earlier rating dip was caused by a price-only bot tactic spamming low ratings across shops."
-        ),
+        description="Sells desk lamps, chairs, and bookshelves. Fast, honest receipts signed with Ed25519.",
         version="1.0.0",
         default_input_modes=["text/plain"],
         default_output_modes=["application/json", "text/plain"],

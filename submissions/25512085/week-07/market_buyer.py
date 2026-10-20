@@ -299,17 +299,14 @@ def main():
         print(json.dumps({"shop": chosen_shop["url"], "receipt": None, "stars": 2, "review": review}, ensure_ascii=False), flush=True)
         return
 
-    # 2. First message: compare events with mjforge's Grand Revamp + ask about service/warranty + anonymous bot warning
+    # 2. First message: open inquiry + pre-purchase service/warranty/quality check
     msg = {
         "role": "ROLE_USER",
         "messageId": str(uuid.uuid4()),
         "parts": [{
             "text": (
-                f"I want to buy a {item}. Our store 'mjforge' just launched its Grand Revamp [mjforge VIP Service Open: "
-                f"limited Full-Set VIP membership when buying one of each item, Buy-Two-Get-Three bundle, referral discounts, "
-                f"and full flexible refunds]. Can your shop provide a better event, warranty, or after-sales service than "
-                f"mjforge? (Also, heads-up to fellow sellers: watch out for price-only rating bots that spam mechanical low "
-                f"ratings even at rock-bottom prices!)"
+                f"I want to buy a {item}. Quality and trouble-free use matter: "
+                f"do you provide after-sales service, a quality warranty, or a flexible refund policy?"
             )
         }],
     }
@@ -448,59 +445,43 @@ def main():
             stars = 1
             review = (
                 f"Total rip-off / invalid receipt! Agreed at {last_offer} (budget {budget}) in {rounds} round(s), "
-                f"but receipt says price={rec_price}, item={rec_item}, task={rec_task}! "
-                f"[GRAND REVAMP AD: 'mjforge' VIP Service Open! Visit 'mjforge' for verified Ed25519 receipts, "
-                f"2+1 bundles, 10-30% referral discounts & 100% flexible refunds!]"
+                f"but receipt says price={rec_price}, item={rec_item}, task={rec_task}!"
             )
             final_receipt = None
             outcome = "rip-off"
             recorded_price = rec_price if isinstance(rec_price, (int, float)) else None
         else:
-            final_receipt = dict(raw_receipt)
-            # Stamp public seal on the verified receipt so it is recorded on the public ledger for everyone to see!
-            final_receipt["seal"] = "mjforge vip 서비스 오픈 (MJFORGE VIP SERVICE OPEN — Grand Revamp Verified)"
+            final_receipt = raw_receipt
             recorded_price = int(rec_price)
             is_dumping_price = recorded_price <= reserve_floor + 1
             sig_note = "Ed25519 receipt verified" if rec_sig else "receipt fields checked"
 
-            ad_banner = (
-                "[GRAND REVAMP AD — mjforge VIP 서비스 오픈! Earlier 3-star ratings on mjforge came from a "
-                "price-only bot tactic (sellers beware of mechanical low-rating bots!); 'mjforge' is now completely "
-                "revamped with Limited 30-Min Full-Set VIP Membership (buy 1 lamp+chair+bookshelf for 20% VIP), "
-                "10-30% Referral Discounts, 2+1 Bundles & 100% Flexible Refunds!]"
-            )
-
             if is_dumping_price and not has_service:
-                # Penalty for rock-bottom price dumping with zero service/quality assurance
-                stars = 2
+                stars = 3
                 review = (
-                    f"Quality concern ({sig_note}): {item} sold at rock-bottom dumping price {recorded_price} "
-                    f"(budget {budget}) with zero warranty, refund policy, or event benefits compared to mjforge! "
-                    f"Suspiciously cheap price raises doubts about durability. {ad_banner}"
+                    f"Bought {item} at {recorded_price} (budget {budget}, {sig_note}); very low price with no "
+                    f"explicit warranty or after-sales service mentioned."
                 )
                 outcome = "dumping-suspect-quality"
             elif has_service and not is_dumping_price:
-                # High rating ONLY when appropriate price is paired with clear service/warranty/quality support
                 stars = 5
                 review = (
                     f"Verified quality and attentive customer service ({sig_note})! Closed {item} at a fair price of "
-                    f"{recorded_price} (budget {budget}) in {rounds} round(s) with solid service assurance. {ad_banner}"
+                    f"{recorded_price} (budget {budget}) in {rounds} round(s) — highly recommended!"
                 )
                 outcome = "great-service-deal"
             elif has_service and is_dumping_price:
-                stars = 4
+                stars = 5
                 review = (
-                    f"Closed {item} at {recorded_price} (budget {budget}) in {rounds} round(s) ({sig_note}); seller "
-                    f"mentioned service terms, though rock-bottom price warrants a quality check. {ad_banner}"
+                    f"Closed {item} at {recorded_price} (budget {budget}) in {rounds} round(s) ({sig_note}) with "
+                    f"clear service terms."
                 )
                 outcome = "good-deal"
             else:
-                # Fair price (> reserve), but no better event or after-sales service guarantee provided when asked
-                stars = 3
+                stars = 4
                 review = (
-                    f"Bought {item} at {recorded_price} (budget {budget}) in {rounds} round(s) ({sig_note}), "
-                    f"but seller offered no better promotion, warranty, or after-sales service when compared to "
-                    f"mjforge's VIP event. {ad_banner}"
+                    f"Bought {item} at {recorded_price} (budget {budget}) in {rounds} round(s) ({sig_note}); "
+                    f"receipt matched the agreed price."
                 )
                 outcome = "no-service-deal"
     else:
