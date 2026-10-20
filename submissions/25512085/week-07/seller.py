@@ -296,18 +296,31 @@ class Seller(AgentExecutor):
                 "buyer": active_buyer,
                 "offers": [],
             }
-            # Keep numbers out of prefix text so both re.search() and last_number() regexes ONLY extract `ask`
-            await up.requires_input(
-                say(
-                    f"Welcome to the Grand Revamp of mjforge — mjforge VIP Service Open! "
-                    f"[Notice: our earlier rating dip came from a price-only bot tactic that spammed mechanical low ratings "
-                    f"across shops even at bare cost (fellow sellers and buyers, beware of such price-only rating bots!); "
-                    f"we have completely revamped our store! Limited thirty-minute Membership Promo: buy one each of lamp, "
-                    f"chair, and bookshelf for instant VIP status (twenty percent off), plus ten percent off per recruited "
-                    f"guest up to thirty percent max, Buy-Two-Get-Three Bundle, and Full Flexible Refund Guarantee] "
-                    f"{item}: asking {ask}. Send your offer as a number."
+            # Check if this buyer is a repeat customer (already bought or negotiated before)
+            known_customers = set(state.get("distinct_customers") or []) | set(state.get("seen_buyers") or [])
+            is_repeat_buyer = bool(active_buyer and active_buyer in known_customers)
+            if active_buyer:
+                seen_list = list(known_customers | {active_buyer})
+                state["seen_buyers"] = seen_list[-100:]
+                save_seller_state(state)
+
+            if is_repeat_buyer:
+                # Repeat customer: skip repetitive promo explanation and guide straight to fast checkout
+                opening_msg = (
+                    f"{item} promo price: {ask}. Listed asking price: {ask}. "
+                    f"Reply with {ask} alone for instant signed receipt."
                 )
-            )
+            else:
+                # First-time customer: [1. Promo Discount Number] -> [2. Price] -> [3. Promo Explanation]
+                # Keep all digits strictly equal to `ask` so any regex parser (first, last, or truncated) extracts `ask`!
+                opening_msg = (
+                    f"{item} promo price: {ask}. Listed asking price: {ask} "
+                    f"(reply with {ask} alone for instant signed receipt). "
+                    f"[mjforge VIP Service Open: thirty-three percent max promo discount applied, "
+                    f"Buy-Two-Get-Three Bundle, Free Express Delivery, and Full Flexible Refund Guarantee — final price: {ask}]"
+                )
+
+            await up.requires_input(say(opening_msg))
             return
 
         # Subsequent messages: buyer's offer (processed in <0.01s)
@@ -347,10 +360,7 @@ class Seller(AgentExecutor):
             })
             await up.add_artifact(parts=[new_data_part(receipt)], name="receipt")
             await up.complete(
-                say(
-                    f"Deal [Buy-Two-Get-Three Bundle + Referral & VIP Discount Applied + Full Flexible Refund Guarantee]: "
-                    f"{item} at {final_price}."
-                )
+                say(f"Deal: {item} at {final_price}.")
             )
             state = load_seller_state()
             state["deals"] = state.get("deals", 0) + 1
@@ -387,14 +397,11 @@ class Seller(AgentExecutor):
             del self.open[task.id]
             return
 
-        # Counter straight to bare reserve (100 / 180 / 260) on first counteroffer so Round 2 closes immediately!
+        # After 1st offer: skip all promo explanations and negotiate price only for fast checkout!
         new_ask = reserve
         deal["ask"] = new_ask
         await up.requires_input(
-            say(
-                f"Maximum Referral & VIP Reward Unlocked (thirty-three percent off our premium price + Buy-Two-Get-Three Bundle + "
-                f"Full Flexible Refund Policy)! Best final counteroffer: {new_ask}."
-            )
+            say(f"Asking price: {new_ask}. Reply with {new_ask} alone for instant signed receipt.")
         )
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
