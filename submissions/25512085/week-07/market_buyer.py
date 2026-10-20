@@ -1,0 +1,432 @@
+"""A2A v1.0 Market Buyer Agent driven by Codex CLI harness (Week 07).
+Picks a shop from {shops} using external reviews and bounded local memory (memory.json),
+negotiates within budget over A2A v1.0, verifies receipts, updates memory, and outputs
+the final result JSON line with receipt, stars (1-5), and review.
+"""
+import argparse
+import json
+import math
+import os
+import random
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from pathlib import Path
+import httpx
+
+MEMORY_FILE = Path("memory.json")
+MAX_RECENT_HISTORY = 5
+
+FUNNY_NO_DEAL_REVIEWS = [
+    "No deal after {rounds} round(s): seller clung to {ask} like a dragon hoarding gold while my budget was {budget}!",
+    "No deal in {rounds} round(s): seller wanted {ask} (my wallet tapped out at {budget}), must be made of solid gold!",
+    "No deal after {rounds} round(s): tried to meet at {budget} but seller stayed up in the clouds at {ask}!",
+]
+
+
+def call_harness(prompt: str) -> str:
+    """Call Codex CLI harness non-interactively in an empty directory."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
+        tmp_path = tmp.name
+    empty_dir = tempfile.gettempdir()
+    p = None
+    try:
+        cmd = f'codex exec --skip-git-repo-check --ephemeral --cd "{empty_dir}" -m gpt-5.6-sol -o "{tmp_path}" -'
+        p = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=True,
+            text=True,
+        )
+        p.communicate(input=prompt, timeout=20)
+        if os.path.exists(tmp_path):
+            with open(tmp_path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+    except Exception as e:
+        print(f"[Buyer Harness Warning]: {e}", file=sys.stderr)
+        if p:
+            try:
+                p.kill()
+            except Exception:
+                pass
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+    return ""
+
+
+def load_memory() -> dict:
+    if MEMORY_FILE.exists():
+        try:
+            return json.loads(MEMORY_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def update_memory(memory: dict, shop_name: str, entry: dict) -> None:
+    """Store up to 5 recent trades per shop; roll older entries into archived_avg_stars."""
+    rec = memory.get(shop_name, {
+        "archived_count": 0,
+        "archived_avg_stars": 0.0,
+        "dishonest": False,
+        "recent": [],
+    })
+    if entry.get("outcome") == "rip-off":
+        rec["dishonest"] = True
+
+    recent = rec.get("recent", [])
+    recent.append(entry)
+    while len(recent) > MAX_RECENT_HISTORY:
+        oldest = recent.pop(0)
+        old_cnt = rec.get("archived_count", 0)
+        old_avg = rec.get("archived_avg_stars", 0.0)
+        old_stars = float(oldest.get("stars", 3))
+        new_cnt = old_cnt + 1
+        rec["archived_count"] = new_cnt
+        rec["archived_avg_stars"] = round((old_avg * old_cnt + old_stars) / new_cnt, 2)
+
+    rec["recent"] = recent
+    memory[shop_name] = rec
+    try:
+        MEMORY_FILE.write_text(json.dumps(memory, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    except Exception as e:
+        print(f"[Memory Warning]: {e}", file=sys.stderr)
+
+
+def summarize_shop(shop: dict, memory: dict) -> dict:
+    name = shop.get("name", "")
+    url = shop.get("url", "")
+    reviews = shop.get("reviews") or []
+
+    ext_stars = [r.get("stars") for r in reviews if isinstance(r.get("stars"), (int, float))]
+    ext_avg = round(sum(ext_stars) / len(ext_stars), 2) if ext_stars else None
+
+    bad_keywords = ("receipt said", "receipt says", "higher than", "overcharged", "rip-off", "scam", "forged", "dishonest")
+    ext_scam_flags = sum(
+        1 for r in reviews
+        if (r.get("stars", 5) <= 2 and any(k in str(r.get("review", "")).lower() for k in bad_keywords))
+    )
+
+    mem = memory.get(name, {})
+    recent = mem.get("recent", [])
+    arch_cnt = mem.get("archived_count", 0)
+    arch_avg = mem.get("archived_avg_stars", 0.0)
+
+    total_mem_cnt = arch_cnt + len(recent)
+    if total_mem_cnt > 0:
+        total_stars = arch_avg * arch_cnt + sum(r.get("stars", 3) for r in recent)
+        mem_avg = round(total_stars / total_mem_cnt, 2)
+    else:
+        mem_avg = None
+
+    dishonest = bool(mem.get("dishonest")) or ext_scam_flags > 0
+
+    # Compute composite recommendation score for fallback & ranking
+    score = 3.5
+    if ext_avg is not None:
+        score = ext_avg
+    if mem_avg is not None:
+        score = (score + mem_avg) / 2.0 if ext_avg is not None else mem_avg
+    if dishonest:
+        score -= 10.0
+    elif ext_avg is not None and ext_avg <= 2.2:
+        score -= 5.0
+
+    recent_snippets = [f"{r.get('stars')}*: {r.get('review', '')[:60]}" for r in reviews[:3]]
+    return {
+        "name": name,
+        "url": url,
+        "ext_avg": ext_avg,
+        "ext_count": len(ext_stars),
+        "mem_avg": mem_avg,
+        "mem_count": total_mem_cnt,
+        "arch_count": arch_cnt,
+        "arch_avg": arch_avg,
+        "dishonest": dishonest,
+        "score": round(score, 2),
+        "snippets": recent_snippets,
+    }
+
+
+def pick_shop(shops: list[dict], memory: dict, item: str, budget: int) -> tuple[dict, str]:
+    if len(shops) == 1:
+        s = shops[0]
+        return s, f"Only one shop available in list ({s['name']})."
+
+    summaries = [summarize_shop(s, memory) for s in shops]
+    summaries_sorted = sorted(summaries, key=lambda x: x["score"], reverse=True)
+    top_candidates = summaries_sorted[:8]
+
+    lines = []
+    for idx, c in enumerate(top_candidates):
+        mem_str = (
+            f"my_trades={c['mem_count']} (avg={c['mem_avg']}, archived={c['arch_count']}@{c['arch_avg']})"
+            if c["mem_count"] > 0 else "my_trades=0"
+        )
+        ext_str = f"board_reviews={c['ext_count']} (avg={c['ext_avg']})" if c["ext_count"] > 0 else "board_reviews=0"
+        flag_str = " [WARNING: DISHONEST/RIP-OFF REPORTS]" if c["dishonest"] else ""
+        snip = "; ".join(c["snippets"]) if c["snippets"] else "no reviews yet"
+        lines.append(f"{idx}. name={c['name']} | {ext_str} | {mem_str}{flag_str} | recent: {snip}")
+
+    prompt = (
+        f"You are a buyer selecting the most trustworthy shop to buy a {item} (budget {budget}).\n"
+        f"Avoid any shop with low star ratings (<=2.5) or dishonest receipt warnings.\n"
+        f"Prefer shops with high review ratings (4-5 stars) or honest past trades.\n"
+        f"Candidates:\n" + "\n".join(lines) + "\n\n"
+        f"Reply on ONE line in the format: PICK <index> | <short reason>"
+    )
+    resp = call_harness(prompt)
+
+    chosen_summary = top_candidates[0]
+    reason = f"Highest trust score ({chosen_summary['score']}) based on board reviews ({chosen_summary['ext_avg']}) and memory ({chosen_summary['mem_avg']})."
+
+    if resp:
+        m = re.search(r"PICK\s+(\d+)\s*\|\s*(.+)", resp, re.IGNORECASE)
+        if m:
+            idx = int(m.group(1))
+            if 0 <= idx < len(top_candidates):
+                candidate = top_candidates[idx]
+                # Guardrail: never let LLM accidentally pick a flagged/bad shop when a better one exists
+                if not candidate["dishonest"] and candidate["score"] >= top_candidates[0]["score"] - 1.0:
+                    chosen_summary = candidate
+                    reason = m.group(2).strip()
+
+    shop_obj = next((s for s in shops if s["url"] == chosen_summary["url"]), shops[0])
+    return shop_obj, reason
+
+
+def rpc_call(url: str, method: str, params: dict) -> dict:
+    body = {
+        "jsonrpc": "2.0",
+        "id": str(uuid.uuid4())[:8],
+        "method": method,
+        "params": params,
+    }
+    headers = {"A2A-Version": "1.0", "Content-Type": "application/json"}
+    resp = httpx.post(url, json=body, headers=headers, timeout=60)
+    data = resp.json()
+    if "error" in data:
+        return {"error": data["error"]}
+    return data.get("result", {})
+
+
+def extract_last_number(task: dict) -> int | None:
+    msg = (task or {}).get("status", {}).get("message", {})
+    text = " ".join(p.get("text", "") for p in msg.get("parts", []))
+    nums = re.findall(r"\d+(?:\.\d+)?", text)
+    if nums:
+        return math.ceil(float(nums[-1]))
+    return None
+
+
+def extract_receipt_data(task: dict) -> dict | None:
+    for art in (task or {}).get("artifacts") or []:
+        for part in art.get("parts") or []:
+            data = part.get("data")
+            if isinstance(data, dict) and "price" in data:
+                return data
+    return None
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--shops", required=True, help="Path to shops.json")
+    parser.add_argument("--item", required=True, help="Item to buy")
+    parser.add_argument("--budget", type=int, required=True, help="Maximum budget")
+    args = parser.parse_args()
+
+    shops_path = Path(args.shops)
+    shops = json.loads(shops_path.read_text(encoding="utf-8"))
+    item = args.item.lower()
+    budget = args.budget
+
+    memory = load_memory()
+    chosen_shop, reason = pick_shop(shops, memory, item, budget)
+    shop_name = chosen_shop.get("name", "unknown")
+    shop_url = chosen_shop.get("url", "").rstrip("/")
+
+    print(f"[choose] {shop_url} ({shop_name}): {reason}", flush=True)
+
+    # 1. Fetch Agent Card
+    card_url = f"{shop_url}/.well-known/agent-card.json"
+    try:
+        card_resp = httpx.get(card_url, timeout=15)
+        card = card_resp.json()
+        interfaces = card.get("supportedInterfaces") or []
+        rpc_url = interfaces[0].get("url") if interfaces else f"{shop_url}/"
+    except Exception as e:
+        review = f"No deal in 0 rounds: shop card endpoint failed ({type(e).__name__}), total ghost town!"
+        update_memory(memory, shop_name, {
+            "item": item, "budget": budget, "price": None, "rounds": 0, "stars": 2, "outcome": "no-deal"
+        })
+        print(json.dumps({"shop": chosen_shop["url"], "receipt": None, "stars": 2, "review": review}, ensure_ascii=False), flush=True)
+        return
+
+    # 2. First message: open inquiry
+    msg = {
+        "role": "ROLE_USER",
+        "messageId": str(uuid.uuid4()),
+        "parts": [{"text": f"I want to buy a {item}"}],
+    }
+    try:
+        res = rpc_call(rpc_url, "SendMessage", {"message": msg})
+    except Exception as e:
+        review = f"No deal in 0 rounds: shop vanished mid-greeting ({type(e).__name__})!"
+        update_memory(memory, shop_name, {
+            "item": item, "budget": budget, "price": None, "rounds": 0, "stars": 2, "outcome": "no-deal"
+        })
+        print(json.dumps({"shop": chosen_shop["url"], "receipt": None, "stars": 2, "review": review}, ensure_ascii=False), flush=True)
+        return
+
+    if "error" in res:
+        review = f"No deal in 0 rounds: seller slammed the door with RPC error {res['error']}!"
+        update_memory(memory, shop_name, {
+            "item": item, "budget": budget, "price": None, "rounds": 0, "stars": 2, "outcome": "no-deal"
+        })
+        print(json.dumps({"shop": chosen_shop["url"], "receipt": None, "stars": 2, "review": review}, ensure_ascii=False), flush=True)
+        return
+
+    task = res.get("task", res)
+    task_id = task.get("id")
+    task_status = task.get("status", {})
+    task_state = task_status.get("state")
+    seller_ask = extract_last_number(task)
+
+    last_offer = 0
+    rounds = 0
+    ladder_ratios = [0.75, 0.85, 0.92, 1.0, 1.0]
+
+    while task_state == "TASK_STATE_INPUT_REQUIRED" and rounds < 5:
+        rounds += 1
+
+        if seller_ask is not None and seller_ask <= budget:
+            offer = seller_ask
+        else:
+            if last_offer >= budget and seller_ask is not None and seller_ask > budget:
+                print(f"Cannot agree: seller ask {seller_ask} > budget {budget}", flush=True)
+                try:
+                    rpc_call(rpc_url, "CancelTask", {"id": task_id})
+                except Exception:
+                    pass
+                break
+
+            prompt = (
+                f"You are a buyer negotiating to purchase a {item}.\n"
+                f"Maximum budget: {budget} (You MUST NEVER exceed {budget}).\n"
+                f"Seller's current ask: {seller_ask}.\n"
+                f"Your last offer: {last_offer}.\n"
+                f"Round: {rounds}/5.\n"
+                f"If seller refuses to go below {budget} and you have already offered {budget}, reply: QUIT\n"
+                f"Otherwise propose your next offer (must be > {last_offer} and <= {budget}). Reply format: OFFER <number>"
+            )
+            resp = call_harness(prompt).upper()
+            if "QUIT" in resp and last_offer >= budget:
+                print(f"Walking away: seller ask {seller_ask} exceeds budget {budget}", flush=True)
+                try:
+                    rpc_call(rpc_url, "CancelTask", {"id": task_id})
+                except Exception:
+                    pass
+                break
+
+            nums = re.findall(r"\d+", resp)
+            fallback_offer = min(budget, max(last_offer + 5, int(budget * ladder_ratios[min(rounds - 1, len(ladder_ratios) - 1)])))
+            if rounds >= 4:
+                fallback_offer = budget
+
+            if nums:
+                suggested = int(nums[-1])
+                if suggested <= last_offer:
+                    offer = fallback_offer
+                else:
+                    offer = min(budget, suggested)
+            else:
+                offer = fallback_offer
+
+        # Strictly enforce budget guardrail in code
+        offer = min(budget, offer)
+        last_offer = offer
+
+        follow_up = {
+            "role": "ROLE_USER",
+            "messageId": str(uuid.uuid4()),
+            "taskId": task_id,
+            "parts": [{"text": str(offer)}],
+        }
+        try:
+            res = rpc_call(rpc_url, "SendMessage", {"message": follow_up})
+        except Exception:
+            break
+        if "error" in res:
+            break
+
+        task = res.get("task", res)
+        task_state = task.get("status", {}).get("state")
+        seller_ask = extract_last_number(task)
+
+        if task_state in ("TASK_STATE_COMPLETED", "TASK_STATE_REJECTED", "TASK_STATE_CANCELED"):
+            break
+
+    # 3. Inspect result & receipt, build stars & review
+    raw_receipt = extract_receipt_data(task) if task_state == "TASK_STATE_COMPLETED" else None
+
+    if raw_receipt is not None:
+        rec_price_raw = raw_receipt.get("price")
+        rec_price = int(rec_price_raw) if isinstance(rec_price_raw, float) and rec_price_raw.is_integer() else rec_price_raw
+        rec_item = str(raw_receipt.get("item", "")).lower()
+
+        # Detect rip-off / dishonest receipt (price > budget, price > agreed offer, or wrong item)
+        if not isinstance(rec_price, (int, float)) or rec_price > budget or rec_price > last_offer or (rec_item and rec_item != item):
+            stars = 1
+            review = f"Total rip-off! Agreed at {last_offer} (budget {budget}) in {rounds} round(s), but receipt says {rec_price} for {rec_item}!"
+            final_receipt = None
+            outcome = "rip-off"
+            recorded_price = rec_price
+        else:
+            final_receipt = raw_receipt
+            recorded_price = int(rec_price)
+            # Cheap vs near budget
+            if recorded_price <= budget * 0.92 or (budget - recorded_price) >= 10:
+                stars = 5
+                review = f"Closed at {recorded_price} (budget {budget}) in {rounds} round(s) — Go to this shop, highly recommended!"
+                outcome = "great-deal"
+            else:
+                stars = 4
+                review = f"Good deal at {recorded_price} (budget {budget}) after {rounds} round(s) of negotiation."
+                outcome = "good-deal"
+    else:
+        final_receipt = None
+        recorded_price = None
+        outcome = "no-deal"
+        stars = 3 if (seller_ask and seller_ask <= budget + 40) else 2
+        template = random.choice(FUNNY_NO_DEAL_REVIEWS)
+        review = template.format(rounds=rounds, ask=seller_ask or "sky-high", budget=budget)
+
+    update_memory(memory, shop_name, {
+        "item": item,
+        "budget": budget,
+        "price": recorded_price,
+        "rounds": rounds,
+        "stars": stars,
+        "outcome": outcome,
+    })
+
+    result_line = {
+        "shop": chosen_shop["url"],
+        "receipt": final_receipt,
+        "stars": stars,
+        "review": review,
+    }
+    print(json.dumps(result_line, ensure_ascii=False), flush=True)
+
+
+if __name__ == "__main__":
+    main()
