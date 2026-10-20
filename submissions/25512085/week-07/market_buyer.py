@@ -153,6 +153,7 @@ def summarize_shop(shop: dict, memory: dict, board_row: dict | None = None) -> d
     reviews_cnt = int(board_row.get("reviews") if board_row.get("reviews") is not None else len(ext_stars))
     visits = int(board_row.get("visits") or 0)
     share = float(board_row.get("share") or 0.0)
+    is_house = bool(board_row.get("house")) or "market.ourolabs.ai/shop/" in url
 
     # Base trust score (used for 2-shop unit test & within-bucket tie-breaking)
     score = 3.8
@@ -174,6 +175,7 @@ def summarize_shop(shop: dict, memory: dict, board_row: dict | None = None) -> d
         "deals": deals,
         "visits": visits,
         "share": share,
+        "is_house": is_house,
         "mem_avg": mem_avg,
         "mem_count": total_mem_cnt,
         "arch_count": arch_cnt,
@@ -198,10 +200,11 @@ def pick_shop(shops: list[dict], memory: dict, item: str, budget: int) -> tuple[
         shop_obj = next((s for s in shops if s["url"] == best["url"]), shops[0])
         return shop_obj, f"Selected {best['name']} with highest review score ({best['score']})."
 
-    # Live Market Mode: Stratified 30% / 50% / 20% Anti-Monopoly Selection (Excluding Top 10!)
+    # Live Market Mode: Stratified 30% / 50% / 20% Anti-Monopoly Selection (Excluding Top 10 & dummy house shops!)
     board_map = fetch_board_stats()
     summaries = [summarize_shop(s, memory, board_map.get(s.get("name", ""))) for s in shops]
-    honest_pool = [c for c in summaries if not c["dishonest"]]
+    student_honest = [c for c in summaries if not c["dishonest"] and not c["is_house"]]
+    honest_pool = student_honest if student_honest else [c for c in summaries if not c["dishonest"]]
     if not honest_pool:
         honest_pool = summaries
 
