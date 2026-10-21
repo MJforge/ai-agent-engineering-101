@@ -396,9 +396,9 @@ class Seller(AgentExecutor):
             del self.open[task.id]
             return
 
-        # Instant 1-turn close: accept ANY offer >= reserve (100 / 180 / 260) immediately!
+        # Instant 1-turn close: accept ANY offer >= reserve (100 / 180 / 260) at the exact agreed offer!
         if offer >= reserve:
-            final_price = max(reserve, min(int(offer), int(deal["ask"])))
+            final_price = int(offer)
             achieved_disc_pct = min(34, max(0, int(round((1.0 - final_price / (reserve * PREMIUM_MULT)) * 100))))
             is_wave = bool(deal.get("is_wave"))
             is_fcfs = bool(deal.get("is_fcfs"))
