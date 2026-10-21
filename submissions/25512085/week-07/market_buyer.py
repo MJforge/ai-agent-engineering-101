@@ -422,8 +422,16 @@ def main():
     while task_state == "TASK_STATE_INPUT_REQUIRED" and rounds < 5:
         rounds += 1
 
+        reserve = RESERVES.get(item, 100)
+        # Thrifty negotiation: if seller ask is already close to reserve (<= 1.05x), take it immediately.
+        # Otherwise, bargain down on rounds 1-2 (target halfway between reserve and ask) rather than paying full ask!
         if seller_ask is not None and seller_ask <= budget:
-            offer = seller_ask
+            if seller_ask <= math.ceil(reserve * 1.05) or rounds >= 3:
+                offer = seller_ask
+            else:
+                bargain_target = max(reserve, int(reserve + (seller_ask - reserve) * 0.50))
+                ladder_offer = int(budget * ladder_ratios[min(rounds - 1, len(ladder_ratios) - 1)])
+                offer = min(seller_ask, max(last_offer + 5, min(bargain_target, ladder_offer)))
         else:
             if last_offer >= budget and seller_ask is not None and seller_ask > budget:
                 print(f"Cannot agree: seller ask {seller_ask} > budget {budget}", flush=True)
