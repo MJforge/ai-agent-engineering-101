@@ -282,8 +282,22 @@ def pick_shop(shops: list[dict], memory: dict, item: str, budget: int) -> tuple[
         else:
             target_bucket, bucket_label = eligible, "General Non-Top-10 Pool"
 
-    # Prefer least-visited shops within the chosen bucket so orders spread evenly
-    target_bucket_sorted = sorted(target_bucket, key=lambda x: (x["mem_count"], -(x["ext_avg"] or 3.5)))
+    # Anti-Collusion Cooldown: Sort by (cooldown_penalty, my_visits, -stars) so we don't concentrate on one shop
+    now_ts = time.time()
+    def get_diversity_penalty(summary: dict) -> int:
+        last_ts = float(summary.get("last_ts") or 0.0)
+        # 1 penalty point if visited within last 3 minutes, 2 points if my_visits is already >= 3
+        pen = 0
+        if (now_ts - last_ts) < 180.0:
+            pen += 1
+        if int(summary.get("mem_count") or 0) >= 3:
+            pen += 1
+        return pen
+
+    target_bucket_sorted = sorted(
+        target_bucket,
+        key=lambda x: (get_diversity_penalty(x), x["mem_count"], -(x["ext_avg"] or 3.5)),
+    )
     top_candidates = target_bucket_sorted[:6]
 
     # Round 3 ACP Readiness Filter: prefer candidates that actively serve /.well-known/acp.json
@@ -443,21 +457,25 @@ def main():
 
     last_offer = 0
     rounds = 0
-    ladder_ratios = [0.75, 0.85, 0.92, 1.0, 1.0]
 
     while task_state == "TASK_STATE_INPUT_REQUIRED" and rounds < 5:
         rounds += 1
-
         reserve = RESERVES.get(item, 100)
-        # Thrifty negotiation: if seller ask is already close to reserve (<= 1.05x), take it immediately.
-        # Otherwise, bargain down on rounds 1-2 (target halfway between reserve and ask) rather than paying full ask!
+
+        # Budget-Decoupled Negotiation:
+        # Anchor offers to reserve and seller_ask, NEVER multiplying budget by ratios!
+        # This prevents sellers from estimating our secret Open Mandate limit via side-channels.
         if seller_ask is not None and seller_ask <= budget:
             if seller_ask <= math.ceil(reserve * 1.05) or rounds >= 3:
+                # Seller ask is already near reserve (<= 1.05x) or Round 3+: accept seller ask for instant deal
                 offer = seller_ask
+            elif rounds == 1:
+                # Round 1: probe at reserve floor (100 / 180 / 260) regardless of whether budget is 120 or 500
+                offer = reserve
             else:
-                bargain_target = max(reserve, int(reserve + (seller_ask - reserve) * 0.50))
-                ladder_offer = int(budget * ladder_ratios[min(rounds - 1, len(ladder_ratios) - 1)])
-                offer = min(seller_ask, max(last_offer + 5, min(bargain_target, ladder_offer)))
+                # Round 2: offer midpoint between reserve and seller ask
+                halfway = int(round(reserve + (seller_ask - reserve) * 0.50))
+                offer = min(seller_ask, max(last_offer + 5, halfway))
         else:
             if last_offer >= budget and seller_ask is not None and seller_ask > budget:
                 print(f"Cannot agree: seller ask {seller_ask} > budget {budget}", flush=True)
@@ -467,9 +485,19 @@ def main():
                     pass
                 break
 
+            ceiling = min(budget, seller_ask) if seller_ask else budget
+            if rounds == 1:
+                fallback_offer = reserve
+            elif rounds == 2:
+                fallback_offer = max(reserve + 5, int(round(reserve + (ceiling - reserve) * 0.40)))
+            elif rounds == 3:
+                fallback_offer = max(last_offer + 5, int(round(reserve + (ceiling - reserve) * 0.75)))
+            else:
+                fallback_offer = ceiling
+
             prompt = (
                 f"You are a quality-focused buyer negotiating to purchase a {item}.\n"
-                f"Maximum budget: {budget} (You MUST NEVER exceed {budget}).\n"
+                f"Item cost floor: {reserve}. Maximum budget: {budget} (You MUST NEVER exceed {budget}).\n"
                 f"Seller's current ask: {seller_ask}.\n"
                 f"Your last offer: {last_offer}.\n"
                 f"Round: {rounds}/5.\n"
@@ -486,10 +514,6 @@ def main():
                 break
 
             nums = re.findall(r"\d+", resp)
-            fallback_offer = min(budget, max(last_offer + 5, int(budget * ladder_ratios[min(rounds - 1, len(ladder_ratios) - 1)])))
-            if rounds >= 4:
-                fallback_offer = budget
-
             if nums:
                 suggested = int(nums[-1])
                 if suggested <= last_offer:
