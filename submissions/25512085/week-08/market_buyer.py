@@ -187,6 +187,20 @@ def summarize_shop(shop: dict, memory: dict, board_row: dict | None = None) -> d
     }
 
 
+def check_acp_support(shop_url: str, timeout: float = 2.0) -> bool:
+    """Probe /.well-known/acp.json to verify if a shop runs kit v3 / supports ACP checkout for Round 3 settlement."""
+    base = shop_url.rstrip("/")
+    try:
+        r = httpx.get(f"{base}/.well-known/acp.json", timeout=timeout)
+        if r.status_code != 200:
+            return False
+        data = r.json()
+        services = (data.get("capabilities") or {}).get("services") or []
+        return data.get("protocol") == "acp" and "checkout" in services
+    except Exception:
+        return False
+
+
 def pick_shop(shops: list[dict], memory: dict, item: str, budget: int) -> tuple[dict, str]:
     if len(shops) == 1:
         s = shops[0]
@@ -272,6 +286,16 @@ def pick_shop(shops: list[dict], memory: dict, item: str, budget: int) -> tuple[
     target_bucket_sorted = sorted(target_bucket, key=lambda x: (x["mem_count"], -(x["ext_avg"] or 3.5)))
     top_candidates = target_bucket_sorted[:6]
 
+    # Round 3 ACP Readiness Filter: prefer candidates that actively serve /.well-known/acp.json
+    acp_candidates = [c for c in top_candidates if check_acp_support(c["url"])]
+    if not acp_candidates:
+        # Probe broader eligible pool (and house fallback if needed) so Round 3 orders settle reliably
+        extra_pool = [c for c in eligible if c not in top_candidates][:8]
+        acp_candidates = [c for c in extra_pool if check_acp_support(c["url"])]
+    if acp_candidates:
+        top_candidates = acp_candidates
+        bucket_label = f"{bucket_label} + ACP-v3-Ready"
+
     lines = []
     for idx, c in enumerate(top_candidates):
         lines.append(
@@ -323,9 +347,11 @@ def rpc_call(url: str, method: str, params: dict) -> dict:
 def extract_last_number(task: dict) -> int | None:
     msg = (task or {}).get("status", {}).get("message", {})
     text = " ".join(p.get("text", "") for p in msg.get("parts", []))
-    nums = [math.ceil(float(x)) for x in re.findall(r"\d+(?:\.\d+)?", text)]
-    # Filter out small numbers (< 50) like "5 offers left", "2+1", or "20%" so we only grab actual item prices
-    price_nums = [n for n in nums if n >= 50]
+    # Strip percentages (e.g., "100% refund", "50% off") so they don't overwrite the item price
+    cleaned = re.sub(r"\d+(?:\.\d+)?\s*%", " ", text)
+    nums = [math.ceil(float(x)) for x in re.findall(r"\d+(?:\.\d+)?", cleaned)]
+    # Filter out small numbers (< 50) and huge numbers (> 1000) so we only grab actual item prices
+    price_nums = [n for n in nums if 50 <= n <= 1000]
     if price_nums:
         return price_nums[-1]
     if nums:
