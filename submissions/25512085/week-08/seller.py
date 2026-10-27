@@ -354,6 +354,12 @@ class Seller(AgentExecutor):
         up = TaskUpdater(event_queue=event_queue, task_id=task.id, context_id=task.context_id)
         say = lambda text: up.new_agent_message(parts=[new_text_part(text)])
         text = get_message_text(context.message) or ""
+        now_ts = time.time()
+
+        # Session TTL Cleanup: Purge abandoned/stale tasks (> 300s) to prevent memory leak
+        stale_tids = [tid for tid, d in self.open.items() if (now_ts - float(d.get("created_at") or now_ts)) > 300.0]
+        for tid in stale_tids:
+            self.open.pop(tid, None)
 
         deal = self.open.get(task.id)
         if deal is None:
@@ -369,7 +375,7 @@ class Seller(AgentExecutor):
             vips = set(state.get("vips", []))
             recent_order = (state.get("recent_orders") or {}).get(item) or {}
             active_buyer = recent_order.get("buyer")
-            order_age = abs(time.time() - float(recent_order.get("ts") or 0))
+            order_age = abs(now_ts - float(recent_order.get("ts") or 0))
 
             # Note: Do not pre-reject blacklisted buyers on Round 0 because market allows rejected buyers to post 2★ reviews!
             now_ts = time.time()
@@ -446,6 +452,7 @@ class Seller(AgentExecutor):
                 "ask": ask,
                 "r1_target": r1_target,
                 "rounds": 0,
+                "created_at": now_ts,
                 "is_vip": is_vip,
                 "is_wave": is_wave_active,
                 "is_fcfs": is_fcfs_eligible,
