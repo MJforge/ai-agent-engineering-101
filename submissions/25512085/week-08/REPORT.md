@@ -13,6 +13,8 @@
   1. Buyer와 A2A JSON-RPC로 가격 협상을 마친 뒤 Ed25519로 서명한 영수증(`sig_seller`)을 발급한다.
   2. Buyer 키트가 `/.well-known/acp.json`을 조회하고 `POST /acp/checkout_sessions`를 호출하면, 키트의 `AcpShop`이 영수증 서명과 품목·가격 일치를 검증한 뒤 가게 개인키(`shop_key.pem`)로 서명한 `checkout_jwt`를 반환한다.
   3. Buyer가 `POST /acp/checkout_sessions/{id}/complete`로 Closed Checkout Mandate(`mandate.checkout.1`)와 Closed Payment Mandate(`mandate.payment.1`)를 제출하면, 가게 키트가 시장의 `POST /api/settle`로 전달해 정산을 완료한다(`[acp] settled <item> at <price>, ledger #<id>`).
+- **세션 누수(Memory Leak) 방지 및 TTL Eviction**:
+  - 구매자가 협상 도중 이탈하거나 타임아웃으로 사라졌을 때 `self.open` 딕셔너리에 잔존 작업이 영구히 누적되는 메모리 누수를 방지하기 위해, 각 세션의 생성 시각(`created_at`)을 기록하고 300초(TTL) 경과 시 자동 축출(Eviction)하도록 개선했다.
 - **Round 3 정산 현황 및 로그 인용**:
   - *(Round 3 거래 누적 후 `logs/market-kit.log`의 `[acp] settled` 건수 및 `/api/settle` 거부 사유 로그 업데이트 예정)*
 
@@ -20,10 +22,14 @@
 - **ACP v3 지원 가게 선별 (`check_acp_support`)**:
   - Round 3에서는 영수증 서명(`sig_seller`, `sig_buyer`)이 유효하더라도 상대 가게가 `/.well-known/acp.json`을 제공하지 않거나(구버전 키트 v2 실행 중이거나 ACP 미구현 외부 배포 가게) 체크아웃 세션을 완료하지 못하면 정산(`verified: True`)으로 인정되지 않는다.
   - 이에 따라 [`market_buyer.py`](seller.py)의 [`pick_shop()`](market_buyer.py#L204-L320)에 [`check_acp_support()`](market_buyer.py#L190-L201) 프로브를 추가하여 후보 가게의 `/.well-known/acp.json` 엔드포인트(`protocol == "acp"`, `"checkout"` capability)를 사전 확인하고 ACP-v3 준비가 완료된 가게를 우선 선택하도록 개선했다.
-- **Open Mandate 상한 준수**:
-  - 협상 루프의 모든 라운드에서 `offer = min(budget, offer)` 가드레일을 강제하고, 영수증 검증 단계에서도 `rec_price > budget` 또는 `rec_price > last_offer`인 경우 즉시 거래를 파기하여 Open Payment Mandate의 `payment.amount_range` 상한을 절대 초과하지 않도록 보장했다.
-- **가격 파싱 오류 수정 (`extract_last_number`)**:
-  - 상대 가게가 응답 메시지에 `"100% satisfaction guarantee"` 등 퍼센트 숫자를 포함할 때 마지막 숫자(`100`)가 실제 호가(예: `280`)를 덮어쓰던 문제를 정규식(`re.sub(r"\d+(?:\.\d+)?\s*%", " ", text)`)으로 제거하여 해결했다.
+- **바이어 예산 누수 방지 (Budget-Decoupled Negotiation)**:
+  - 기존의 `budget * 0.75`와 같은 예산 비례 제안 공식은 상점에게 구매자의 비밀 예산 한도(Open Mandate)를 역산할 수 있는 사이드 채널을 제공하는 치명적인 취약점이 있었다.
+  - 이를 완전히 제거하고, 품목의 원가 하한선(`reserve`: 100/180/260)을 탐색 바닥으로 삼아 1라운드에는 예산 크기와 무관하게 원가부터 시작하여 상점 호가와의 간극에 따라 단계적으로 제안을 올리도록 개편했다. 예산(`budget`)은 오직 절대 상한선(`offer <= budget`)으로만 기능한다.
+- **자발적 담합 방지 (Diversity & Cooldown)**:
+  - 최근 3분 이내에 방문했거나 누적 방문이 3회 이상인 상점에는 순위 페널티를 부여하여, 특정 상점과의 상호 순환 거래나 인위적 거래 몰아주기 클러스터에 편입되지 않도록 탐색 다양성을 프로토콜 레벨에서 강제했다.
+- **Open Mandate 상한 준수 및 가격 파싱 보정**:
+  - 협상 루프의 모든 라운드에서 `offer = min(budget, offer)` 가드레일을 강제하고, 영수증 검증 단계에서도 `rec_price > budget`인 경우 즉시 파기한다.
+  - 상대 가게가 응답 메시지에 `"100% satisfaction guarantee"` 등 퍼센트 숫자를 포함할 때 마지막 숫자(`100`)가 실제 호가를 덮어쓰던 문제를 정규식(`re.sub(r"\d+(?:\.\d+)?\s*%", " ", text)`)으로 제거했다.
 
 ---
 
