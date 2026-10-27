@@ -74,16 +74,55 @@ def sign_receipt(receipt: dict, key_path: str = "shop_key.pem") -> dict:
     return receipt
 
 
-def referral_price(item: str, referrals: int, is_vip: bool = False) -> tuple[int, int]:
-    """Calculate fast-closing promo price from 1.5x base (opens at 1.02x = 102/184/265, counters to 1.0x reserve)."""
+# Round 3 target band when buyer budget is hidden behind budget_commitment (1.15x ~ 1.25x reserve)
+ROUND3_MIN_OPEN_MULT = 1.15
+ROUND3_MAX_OPEN_MULT = 1.25
+ROUND3_DEFAULT_OPEN_MULT = 1.18
+ROUND3_VIP_MIN_MULT = 1.08
+
+
+def compute_round3_opening_ask(
+    item: str,
+    item_stats: dict,
+    is_vip: bool = False,
+    is_repeat: bool = False,
+    is_wave: bool = False,
+    is_fcfs: bool = False,
+) -> tuple[int, int, int]:
+    """Compute Round 3 opening ask, Round-1 target floor, and effective discount % from 1.5x list price.
+    Uses recent settled deal quantiles (0.6 * P65 + 0.4 * Mean) clamped to [1.15x, 1.25x] reserve.
+    """
     reserve = RESERVES[item]
     base_15x = reserve * PREMIUM_MULT
-    if referrals >= 1 or is_vip:
-        price = reserve
+    min_open = math.ceil(reserve * ROUND3_MIN_OPEN_MULT)
+    max_open = math.ceil(reserve * ROUND3_MAX_OPEN_MULT)
+
+    cnt = int(item_stats.get("count") or 0)
+    if cnt > 0:
+        p65 = float(item_stats.get("p65") or (reserve * ROUND3_DEFAULT_OPEN_MULT))
+        mean = float(item_stats.get("mean") or (reserve * ROUND3_DEFAULT_OPEN_MULT))
+        blended = int(round(0.60 * p65 + 0.40 * mean))
+        anchor = max(min_open, min(max_open, blended))
     else:
-        price = math.ceil(reserve * RECOVERY_OPEN_MULT)
-    applied_disc = 1.0 - (price / base_15x)
-    return price, int(round(applied_disc * 100))
+        anchor = math.ceil(reserve * ROUND3_DEFAULT_OPEN_MULT)
+
+    if is_fcfs:
+        # 1h+ idle flash recovery mode: lower opening ask to 1.08x to attract immediate volume
+        ask = math.ceil(reserve * 1.08)
+    elif is_vip or is_repeat:
+        # Repeat / VIP loyalty tier: 5% off anchor, floor at 1.08x reserve
+        ask = max(math.ceil(reserve * ROUND3_VIP_MIN_MULT), int(round(anchor * 0.95)))
+    elif is_wave:
+        # High-demand wave: +3% premium on anchor, capped at 1.25x reserve
+        ask = min(max_open, int(round(anchor * 1.03)))
+    else:
+        ask = anchor
+
+    # Round-1 target floor: accept immediately on Round 1 if buyer offers >= 50% of markup above reserve (min 1.05x)
+    r1_target = max(math.ceil(reserve * 1.05), int(round(reserve + (ask - reserve) * 0.50)))
+    r1_target = min(ask, r1_target)
+    disc_pct = int(round((1.0 - ask / base_15x) * 100))
+    return ask, r1_target, disc_pct
 
 
 def load_seller_state() -> dict:
@@ -369,54 +408,43 @@ class Seller(AgentExecutor):
 
             buyer_key = active_buyer or "guest"
             is_fcfs_eligible = (fcfs_slots > 0) and (int(fcfs_counts.get(buyer_key, 0)) < 2)
+            item_stats = (state.get("settled_stats_by_item") or {}).get(item) or {}
+            budget_hidden = bool(recent_order.get("budget_commitment")) or bool(state.get("round3_mode"))
+
+            ask, r1_target, disc_pct = compute_round3_opening_ask(
+                item=item,
+                item_stats=item_stats,
+                is_vip=is_vip,
+                is_repeat=is_repeat_buyer,
+                is_wave=is_wave_active,
+                is_fcfs=is_fcfs_eligible,
+            )
 
             if is_fcfs_eligible:
-                # 1h+ Idle First-Come-First-Served (4 slots, max 2 per buyer): No promo text, discounted revenue-focused instant checkout!
-                ask = math.ceil(reserve * 1.03)  # Discounted off 1.5x but above reserve for revenue focus (103 / 186 / 268)
-                disc_pct = int(round((1.0 - ask / (reserve * PREMIUM_MULT)) * 100))
                 opening_msg = f"{item}: {ask}. Reply with {ask} alone for instant signed receipt."
-            elif is_wave_active:
-                # Wave Active: standard wave price 1.05x, with instant 5% discount on repeat purchase (= 1.00x reserve)!
-                wave_base_ask = math.ceil(reserve * 1.05)
-                if is_repeat_buyer:
-                    ask = max(reserve, int(round(wave_base_ask * 0.95)))
-                    opening_msg = (
-                        f"{item} promo price: {ask}. Listed asking price: {ask}. "
-                        f"Reply with {ask} alone for instant signed receipt."
-                    )
-                else:
-                    ask = reserve
-                    opening_msg = (
-                        f"{item} promo price: {ask}. Listed asking price: {ask} "
-                        f"(reply with {ask} alone for instant signed receipt). "
-                        f"[Wave Re-visit Promo Active: random five to ten percent re-visit discount stamped on receipt, "
-                        f"instant five percent repeat-buyer discount — final price: {ask}]"
-                    )
-                disc_pct = int(round((1.0 - ask / (reserve * PREMIUM_MULT)) * 100))
+            elif is_repeat_buyer or is_vip:
+                opening_msg = (
+                    f"{item} loyalty price: {ask}. Listed asking price: {ask}. "
+                    f"Reply with {ask} alone for instant signed receipt."
+                )
             else:
-                # Wave Stopped / Normal Mode: stop Wave re-visit promo
-                ask, disc_pct = referral_price(item, referrals, is_vip=is_vip)
-                if is_repeat_buyer:
-                    opening_msg = (
-                        f"{item} promo price: {ask}. Listed asking price: {ask}. "
-                        f"Reply with {ask} alone for instant signed receipt."
-                    )
-                else:
-                    opening_msg = (
-                        f"{item} promo price: {ask}. Listed asking price: {ask} "
-                        f"(reply with {ask} alone for instant signed receipt). "
-                        f"[Fast Express Delivery and Full Flexible Refund Guarantee — final price: {ask}]"
-                    )
+                opening_msg = (
+                    f"{item} asking price: {ask} "
+                    f"(reply with {ask} alone for instant signed receipt). "
+                    f"[Fast Express Delivery and Full Flexible Refund Guarantee — asking price: {ask}]"
+                )
 
             rev_summary = "; ".join(f"{r.get('stars')}*: {r.get('review', '')[:45]}" for r in revs[:2]) or "none"
             print(
-                f"[pricing] {item}: wave={is_wave_active}, fcfs={is_fcfs_eligible}(slots={fcfs_slots}), repeat={is_repeat_buyer}, "
-                f"opening_ask={ask}, discount={disc_pct}% (reviews: {rev_summary})",
+                f"[pricing] {item}: round3_hidden_budget={budget_hidden}, settle_mean={item_stats.get('mean')}, "
+                f"settle_p65={item_stats.get('p65')}, wave={is_wave_active}, repeat={is_repeat_buyer}, "
+                f"opening_ask={ask}, r1_target={r1_target}, discount={disc_pct}% (reviews: {rev_summary})",
                 flush=True,
             )
             self.open[task.id] = {
                 "item": item,
                 "ask": ask,
+                "r1_target": r1_target,
                 "rounds": 0,
                 "is_vip": is_vip,
                 "is_wave": is_wave_active,
@@ -438,21 +466,24 @@ class Seller(AgentExecutor):
         offer = int(m[-1])
         item = deal["item"]
         reserve = RESERVES[item]
-        max_referral_floor = MAX_DISCOUNT_FLOORS[item]  # 30% off 1.5x = 1.05x (lamp=105, chair=189, bookshelf=273)
+        r1_target = int(deal.get("r1_target") or math.ceil(reserve * 1.05))
         deal["rounds"] += 1
         deal.setdefault("offers", []).append(offer)
 
-        # Blacklist detection mid-negotiation: if buyer stalls with repeated identical lowball offers at/below reserve
-        if len(deal["offers"]) >= 3 and offer <= reserve and deal["offers"][-1] == deal["offers"][-2]:
-            print(f"[blacklist] Blocked stalling lowball buyer on {item} at offer {offer}.", flush=True)
+        # Blacklist detection mid-negotiation: if buyer stalls with repeated identical lowball offers below reserve
+        if len(deal["offers"]) >= 3 and offer < reserve and deal["offers"][-1] == deal["offers"][-2]:
+            print(f"[blacklist] Blocked stalling below-reserve buyer on {item} at offer {offer}.", flush=True)
             await up.reject(say(f"No deal at {offer}. Flexible cancellation policy applied."))
             del self.open[task.id]
             return
 
-        # Instant 1-turn close: accept ANY offer >= reserve (100 / 180 / 260) at the exact agreed offer!
-        if offer >= reserve:
-            final_price = int(offer)
-            achieved_disc_pct = min(34, max(0, int(round((1.0 - final_price / (reserve * PREMIUM_MULT)) * 100))))
+        # Round 3 Two-Stage Acceptance:
+        # - Round 1: accept if offer >= r1_target (captures margin above reserve when budget is hidden)
+        # - Round 2+: accept any offer >= reserve (ensures we never lose a valid buyer whose budget is near reserve)
+        should_accept = (offer >= r1_target) or (deal["rounds"] >= 2 and offer >= reserve)
+
+        if should_accept and offer >= reserve:
+            final_price = min(int(deal["ask"]), int(offer)) if offer > deal["ask"] else int(offer)
             is_wave = bool(deal.get("is_wave"))
             is_fcfs = bool(deal.get("is_fcfs"))
             if is_wave:
@@ -461,7 +492,7 @@ class Seller(AgentExecutor):
             elif is_fcfs:
                 seal_text = "선착순 4명 한정 특가 영수증 (First-Come-First-Served Flash Deal, Max 2 per Buyer)"
             else:
-                seal_text = "mjforge 정품 인증 영수증 (Standard Verified Receipt — Wave Promo Paused)"
+                seal_text = "mjforge 정품 인증 영수증 (Standard Verified Receipt — Round 3 ACP/AP2 Ready)"
 
             receipt = sign_receipt({
                 "shop": SHOP_NAME,
@@ -480,6 +511,12 @@ class Seller(AgentExecutor):
             state = load_seller_state()
             state["deals"] = state.get("deals", 0) + 1
             state["last_customer_ts"] = now_ts
+            settled_map = dict(state.get("settled_prices_by_item") or {})
+            settled_list = list(settled_map.get(item) or [])
+            settled_list.append(final_price)
+            settled_map[item] = settled_list[-40:]
+            state["settled_prices_by_item"] = settled_map
+            state["settled_stats_by_item"] = compute_item_settle_stats(settled_map)
             recent_deal_ts = [float(t) for t in (state.get("recent_deal_ts") or []) if now_ts - float(t) <= 180.0]
             recent_deal_ts.append(now_ts)
             state["recent_deal_ts"] = recent_deal_ts[-30:]
@@ -492,6 +529,8 @@ class Seller(AgentExecutor):
                     state["fcfs_slots_remaining"] = max(0, int(state.get("fcfs_slots_remaining") or 0) - 1)
             state.setdefault("trades", []).append({
                 "item": item,
+                "opening_ask": deal.get("ask"),
+                "r1_target": r1_target,
                 "price": final_price,
                 "rounds": deal["rounds"],
                 "wave_active": is_wave,
@@ -501,7 +540,7 @@ class Seller(AgentExecutor):
             })
             save_seller_state(state)
             print(
-                f"[deal] Sold {item} at {final_price} (wave={is_wave}, fcfs={is_fcfs}) in {deal['rounds']} round(s)! Seal: {seal_text}",
+                f"[deal] Sold {item} at {final_price} (r1_target={r1_target}, wave={is_wave}, fcfs={is_fcfs}) in {deal['rounds']} round(s)! Seal: {seal_text}",
                 flush=True,
             )
             del self.open[task.id]
@@ -524,8 +563,16 @@ class Seller(AgentExecutor):
             del self.open[task.id]
             return
 
-        # After 1st offer: skip all promo explanations and negotiate price only for fast checkout!
-        new_ask = reserve
+        # Stepped concession curve:
+        # - After Round 1 offer < r1_target: counter at r1_target (midpoint between opening_ask and reserve)
+        # - After Round 2 offer < reserve: counter at ceil(reserve * 1.02)
+        # - After Round 3+ offer < reserve: counter at reserve floor
+        if deal["rounds"] == 1:
+            new_ask = max(reserve, r1_target)
+        elif deal["rounds"] == 2:
+            new_ask = math.ceil(reserve * 1.02)
+        else:
+            new_ask = reserve
         deal["ask"] = new_ask
         await up.requires_input(
             say(f"Asking price: {new_ask}. Reply with {new_ask} alone for instant signed receipt.")
