@@ -1,8 +1,8 @@
-"""A2A v1.0 Seller Agent (Week 07: LAB 2 + Challenge 1, Ultra-Fast Response).
+"""A2A v1.0 Seller Agent (Week 08: Round 3 ACP/AP2 Market & Settled-Price Dynamic Pricing).
 Sells lamp (reserve 100), chair (reserve 180), and bookshelf (reserve 260).
-- LAB 2: Signs receipts with Ed25519 (sig_seller) over canonical JSON of {shop, item, price, task}.
-- Challenge 1: Reads its own trade history and market reviews from local files to adapt asking
-  prices dynamically in <0.01s, while strictly enforcing reserve prices.
+- Signs receipts with Ed25519 (sig_seller) over canonical JSON of {shop, item, price, task}.
+- Adapts opening asks and concession curves using Round 3 settled ledger prices (kind='settle')
+  now that buyer budgets are hidden behind budget_commitment hashes in /api/ledger.
 """
 import argparse
 import base64
@@ -93,6 +93,9 @@ def load_seller_state() -> dict:
         "multiplier": PREMIUM_MULT,
         "vip_multiplier": VIP_MULT,
         "avg_market_purchasing_power": 220,
+        "round3_mode": False,
+        "settled_prices_by_item": {"lamp": [], "chair": [], "bookshelf": []},
+        "settled_stats_by_item": {},
         "blacklist": ["11im"],
         "vips": [],
         "vip_spend_share": {},
@@ -125,8 +128,27 @@ def save_seller_state(state: dict) -> None:
         pass
 
 
+def compute_item_settle_stats(prices_by_item: dict[str, list[int]]) -> dict[str, dict]:
+    """Compute mean, P50 (median), and P65 from recent settled prices per item."""
+    stats = {}
+    for item, reserve in RESERVES.items():
+        raw = [int(p) for p in (prices_by_item.get(item) or []) if isinstance(p, (int, float)) and p >= reserve]
+        if raw:
+            s = sorted(raw[-40:])
+            n = len(s)
+            p50 = s[n // 2]
+            p65 = s[min(n - 1, int(n * 0.65))]
+            mean = round(sum(s) / n, 1)
+            stats[item] = {"count": n, "mean": mean, "p50": p50, "p65": p65}
+        else:
+            # Cold-start Round 3 fallback when no settled prices are in window yet (1.18x reserve)
+            anchor = math.ceil(reserve * 1.18)
+            stats[item] = {"count": 0, "mean": float(anchor), "p50": anchor, "p65": anchor}
+    return stats
+
+
 def refresh_reviews_and_adapt_price() -> dict:
-    """Challenge 1: Read own trades, market reviews, VIP spend share (>=50%), and blacklist in <0.01s."""
+    """Read own trades, market reviews, Round 3 settled stats, VIP spend share, and blacklist in <0.01s."""
     state = load_seller_state()
     shops_file = Path(__file__).resolve().parent / ".market" / "shops.json"
     reviews = state.get("recent_reviews", [])
@@ -143,6 +165,7 @@ def refresh_reviews_and_adapt_price() -> dict:
     if reviews:
         state["recent_reviews"] = reviews[:5]
 
+    state["settled_stats_by_item"] = compute_item_settle_stats(state.get("settled_prices_by_item") or {})
     state["multiplier"] = PREMIUM_MULT
     state["vip_multiplier"] = VIP_MULT
     save_seller_state(state)
@@ -150,7 +173,7 @@ def refresh_reviews_and_adapt_price() -> dict:
 
 
 def background_review_sync():
-    """Periodically sync reviews, buyer purchasing power (VIP >=50% spend share), and low-star blacklist."""
+    """Periodically sync reviews, Round 3 settled ledger deals (kind='settle'), and VIP/blacklist stats."""
     while True:
         try:
             r = httpx.get("https://market.ourolabs.ai/api/shops", timeout=3.0).json()
@@ -171,6 +194,11 @@ def background_review_sync():
                 items_bought_at_ours = {}
                 all_budgets = []
                 recent_orders = {}
+                settled_by_item = {
+                    k: list((state.get("settled_prices_by_item") or {}).get(k, []))[-20:]
+                    for k in RESERVES
+                }
+                saw_round3_commitment = False
                 promo_active = (time.time() - PROMO_START_TS) <= MEMBERSHIP_PROMO_WINDOW_SEC
 
                 for entry in ledger:
@@ -183,10 +211,30 @@ def background_review_sync():
                         b_name = data.get("buyer")
                         item_name = data.get("item")
                         budget_val = data.get("budget")
+                        commitment = data.get("budget_commitment")
+                        if commitment or int(data.get("round") or 0) >= 3:
+                            saw_round3_commitment = True
                         if isinstance(budget_val, (int, float)):
                             all_budgets.append(int(budget_val))
                         if b_name and item_name:
-                            recent_orders[item_name] = {"buyer": b_name, "ts": ts, "budget": budget_val}
+                            recent_orders[item_name] = {
+                                "buyer": b_name,
+                                "ts": ts,
+                                "budget": budget_val,
+                                "budget_commitment": commitment,
+                                "round": data.get("round"),
+                            }
+                    elif kind == "settle":
+                        # Round 3 ACP/AP2 settled deal: {"order", "buyer", "item", "amount", "checkout_hash"}
+                        saw_round3_commitment = True
+                        b_name = data.get("buyer")
+                        s_item = str(data.get("item") or "").lower()
+                        amount = data.get("amount")
+                        if s_item in RESERVES and isinstance(amount, (int, float)) and amount >= RESERVES[s_item]:
+                            settled_by_item[s_item].append(int(amount))
+                            all_budgets.append(int(amount))
+                        if b_name and isinstance(amount, (int, float)):
+                            total_spend[b_name] = total_spend.get(b_name, 0) + int(amount)
                     elif kind == "result":
                         b_name = data.get("buyer")
                         rec = data.get("receipt") or {}
@@ -202,6 +250,8 @@ def background_review_sync():
                             or "sara-viii" in shop_url
                         )
                         if b_name and isinstance(price, (int, float)) and data.get("verified"):
+                            if rec_item in RESERVES and price >= RESERVES[rec_item]:
+                                settled_by_item[rec_item].append(int(price))
                             total_spend[b_name] = total_spend.get(b_name, 0) + int(price)
                             if is_ours:
                                 our_spend[b_name] = our_spend.get(b_name, 0) + int(price)
@@ -210,13 +260,15 @@ def background_review_sync():
                         if b_name and is_ours and isinstance(stars, (int, float)) and stars <= 3:
                             blacklist.add(b_name)
 
+                for k in settled_by_item:
+                    settled_by_item[k] = settled_by_item[k][-40:]
+
                 vip_shares = {}
                 full_set_vips = []
                 for b_name, tot in total_spend.items():
                     mine = our_spend.get(b_name, 0)
                     share = round(mine / tot, 3) if tot > 0 else 0.0
                     bought_set = items_bought_at_ours.get(b_name, set())
-                    # VIP if >=50% spend share OR (within conservative 30-min promo window, bought 1 of each: lamp, chair, bookshelf)
                     if b_name not in blacklist:
                         if share >= 0.50:
                             vips.add(b_name)
@@ -225,16 +277,17 @@ def background_review_sync():
                             vips.add(b_name)
                             full_set_vips.append(b_name)
 
-                # Track distinct honest customers & how many new customers visited after each advocate's 4-5★ review
                 good_customers = [b for b in our_spend if b not in blacklist]
                 referrals_by_buyer = state.get("referrals_by_buyer") or {}
                 for idx, b_name in enumerate(good_customers):
-                    # Each subsequent customer who joined after this customer counts as a recruited referral (up to 3 -> 30%)
                     recruited = min(3, max(referrals_by_buyer.get(b_name, 0), len(good_customers) - 1 - idx))
                     referrals_by_buyer[b_name] = recruited
 
                 if all_budgets:
                     state["avg_market_purchasing_power"] = round(sum(all_budgets) / len(all_budgets), 1)
+                state["round3_mode"] = saw_round3_commitment or bool(state.get("round3_mode"))
+                state["settled_prices_by_item"] = settled_by_item
+                state["settled_stats_by_item"] = compute_item_settle_stats(settled_by_item)
                 state["blacklist"] = sorted(blacklist)
                 state["vips"] = sorted(vips)
                 state["vip_spend_share"] = vip_shares
