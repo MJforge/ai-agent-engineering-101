@@ -250,6 +250,12 @@ def pick_round3_shop_and_sku(
     hub_trust = hub.get("shop_trust") or {}
     summaries = [summarize_shop(s, memory, board_map.get(s.get("name", "")), hub_trust) for s in shops]
 
+    # shops.json offers list every SKU of the category a shop holds, not only the order's acceptable ones.
+    # Keep only acceptable SKUs, so a shop that holds none of them is not a candidate.
+    acceptable = set(order_data.get("acceptable") or [])
+    for c in summaries:
+        c["offers"] = [off for off in c["offers"] if off.get("sku") in acceptable]
+
     # Filter to shops that actually have matching in-stock offers for this order
     stocked = [c for c in summaries if c.get("offers") and not c["dishonest"]]
     if not stocked:
