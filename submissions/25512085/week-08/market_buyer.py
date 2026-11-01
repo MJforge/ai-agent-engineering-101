@@ -308,9 +308,10 @@ def pick_round3_shop_and_sku(
         shop_obj = next((s for s in shops if s["url"].rstrip("/") == cand_summary["url"]), shops[0])
         return shop_obj, sku_target, f"[R3-Surplus-Fallback] Picked {cand_summary['name']} for SKU {sku_target['sku']}"
 
-    # No shop has explicit offers listed in shops.json -> fall back to general shop selection
-    chosen_shop, reason = pick_shop(shops, memory, order_data.get("item", ""), budget)
-    return chosen_shop, None, reason
+    # No shop currently holds in-stock SKUs matching this order's acceptable list.
+    # Do NOT fall back to picking an arbitrary shop without an acceptable SKU, as doing so leads to
+    # purchasing out-of-order SKUs and falsely branding innocent shops as scammers!
+    return None, None, f"No shop currently holds in-stock acceptable SKUs for order {order_data.get('order')}"
 
 
 def pick_shop(shops: list[dict], memory: dict, item: str, budget: int) -> tuple[dict, str]:
@@ -455,6 +456,16 @@ def main():
         chosen_shop, target_sku_info, reason = pick_round3_shop_and_sku(
             shops, memory, hub, catalog, order_data, budget
         )
+        if chosen_shop is None:
+            # Cleanly close as no-deal without falsely blaming or penalizing any shop
+            print(f"[skip] {reason}", flush=True)
+            print(json.dumps({
+                "shop": "",
+                "receipt": None,
+                "stars": None,
+                "review": f"No deal: no shop currently has acceptable SKUs in stock for {item}.",
+            }, ensure_ascii=False), flush=True)
+            return
     else:
         target_sku_info = None
         chosen_shop, reason = pick_shop(shops, memory, item_low, budget)
