@@ -189,50 +189,63 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
 
     if kind == "goods":
         # Non-food ("goods"): Grade is permanent (A/B/C), no expiration, 1%/day storage fee.
-        # Even Grade B (cost 40-60%) and Grade C (cost 25-45%) give the buyer 100% list_price value!
+        # Goods can break up to 6 hours after sale. If warranty is given and unit breaks, full price is refunded!
+        # Therefore, hard floor must strictly guarantee >= 18% margin to hedge against defects.
+        hard_floor = max(cost + 50, int(cost * 1.18))
         if grade == "A":
-            # High anchor near list_price (94-97%), fast-close target around 80-84% of list_price
-            open_ask = max(int(cost * 1.28), min(int(list_price * 0.97), max(market_anchor, int(list_price * 0.93))))
-            r1_target = max(int(cost * 1.15), int(round(cost + (open_ask - cost) * 0.52)))
-            hard_floor = max(cost + 50, int(cost * 1.06))
+            # High anchor: 94~97% of list_price (gives buyer strong discount satisfaction)
+            open_ask = max(int(cost * 1.35), min(int(list_price * 0.96), max(market_anchor, int(list_price * 0.92))))
+            # Turn 1 target: around 82~86% of list_price
+            r1_target = max(int(cost * 1.25), int(round(cost + (open_ask - cost) * 0.55)))
+            # Turn 2 mid-step: keeps margin healthy (>20%) while making significant concession
+            r2_target = max(hard_floor, int(round(cost + (open_ask - cost) * 0.28)))
             default_warranty = 6
         elif grade == "B":
-            # Grade B cost is only 40-60% of list_price -> huge margin potential even at 20% discount off list!
-            open_ask = max(int(cost * 1.35), int(list_price * 0.88))
-            r1_target = max(int(cost * 1.18), int(list_price * 0.74))
-            hard_floor = max(cost + 50, int(cost * 1.08))
+            # Grade B cost is only 40-60% of list_price -> strong margin potential
+            open_ask = max(int(cost * 1.38), int(list_price * 0.88))
+            r1_target = max(int(cost * 1.25), int(list_price * 0.76))
+            r2_target = max(hard_floor, int(list_price * 0.68))
             default_warranty = 6
         else:
-            # Grade C (refurb): cost is 25-45% of list_price!
-            open_ask = max(int(cost * 1.45), int(list_price * 0.80))
-            r1_target = max(int(cost * 1.22), int(list_price * 0.65))
-            hard_floor = max(cost + 50, int(cost * 1.10))
+            # Grade C (refurb): cost is 25-45% of list_price
+            open_ask = max(int(cost * 1.45), int(list_price * 0.82))
+            r1_target = max(int(cost * 1.28), int(list_price * 0.70))
+            r2_target = max(hard_floor, int(list_price * 0.60))
             default_warranty = 3
     else:
-        # Perishable/Non-perishable Food ("food"): markdown dynamically as shelf life drops
+        # Perishable/Non-perishable Food ("food"): no storage fee, markdown dynamically as shelf life drops
         if grade == "A":
-            open_ask = max(int(cost * 1.25), min(int(list_price * 0.96), max(market_anchor, int(list_price * 0.92))))
-            r1_target = max(int(cost * 1.12), int(round(cost + (open_ask - cost) * 0.50)))
-            hard_floor = max(cost + 20, int(cost * 1.05))
+            hard_floor = max(cost + 20, int(cost * 1.10))
+            open_ask = max(int(cost * 1.25), min(int(list_price * 0.95), max(market_anchor, int(list_price * 0.90))))
+            r1_target = max(int(cost * 1.18), int(round(cost + (open_ask - cost) * 0.50)))
+            r2_target = max(hard_floor, int(round(cost + (open_ask - cost) * 0.22)))
         elif grade == "B":
-            # Markdown to move before falling to Grade C
-            open_ask = max(int(cost * 1.18), int(list_price * 0.84))
-            r1_target = max(int(cost * 1.06), int(list_price * 0.74))
-            hard_floor = max(cost + 10, int(cost * 1.02))
+            hard_floor = max(cost + 10, int(cost * 1.06))
+            open_ask = max(int(cost * 1.18), int(list_price * 0.85))
+            r1_target = max(int(cost * 1.12), int(list_price * 0.76))
+            r2_target = max(hard_floor, int(list_price * 0.70))
         else:
-            # Grade C (approaching expiration): recover cost quickly before spoilage!
-            open_ask = max(int(cost * 1.08), int(list_price * 0.72))
-            r1_target = max(cost, int(cost * 1.02))
-            hard_floor = cost
+            hard_floor = max(cost, int(cost * 1.02))
+            open_ask = max(int(cost * 1.10), int(list_price * 0.75))
+            r1_target = max(hard_floor, int(cost * 1.05))
+            r2_target = hard_floor
         default_warranty = 0
 
     r1_target = min(open_ask, max(hard_floor, r1_target))
+    r2_target = min(r1_target, max(hard_floor, r2_target))
     disc_from_list = max(1, int(round((1.0 - open_ask / max(1, list_price)) * 100)))
     return {
         "open_ask": open_ask,
         "r1_target": r1_target,
+        "r2_target": r2_target,
         "hard_floor": hard_floor,
         "list_price": list_price,
+        "cost": cost,
+        "grade": grade,
+        "hours_left": hours_left,
+        "warranty_hours": default_warranty,
+        "disc_pct": disc_from_list,
+    }
         "cost": cost,
         "grade": grade,
         "hours_left": hours_left,
@@ -468,7 +481,9 @@ class Seller(AgentExecutor):
                     "item": unit["sku"],
                     "ask": ask,
                     "r1_target": r1_target,
+                    "r2_target": pricing["r2_target"],
                     "hard_floor": hard_floor,
+                    "list_price": list_price,
                     "grade": grade,
                     "warranty_hours": warranty,
                     "rounds": 0,
@@ -547,20 +562,39 @@ class Seller(AgentExecutor):
                 return
 
             cost = int(u.get("cost") or 100)
+            list_price = int(deal.get("list_price") or u.get("list_price") or cost * 1.5)
             hard_floor = max(cost, int(deal.get("hard_floor") or cost))
             r1_target = int(deal.get("r1_target") or hard_floor)
+            r2_target = int(deal.get("r2_target") or hard_floor)
 
-            # High-Anchor + Fast-Close Acceptance Policy (maximizes 5-star speed rating + margin):
-            # - Turn 1: accept immediately if offer >= r1_target (captures solid margin in 1 turn -> 5★)
-            # - Turn 2+: accept immediately if offer >= hard_floor (closes before buyer penalizes turn count!)
-            should_accept = (offer >= r1_target) or (deal["rounds"] >= 2 and offer >= hard_floor)
+            # Balanced 3-Turn Concession Policy:
+            # Closes fast (max 2~3 turns) before buyer walkaway/speed-penalty while preserving healthy margin & warranty hedging:
+            # - Turn 1: accept if buyer offer >= r1_target (high margin in 1 turn -> 5★ speed & big profit)
+            # - Turn 2: accept if buyer offer >= r2_target (good margin ~20-25% -> 5★/4★)
+            # - Turn 3+: accept if buyer offer >= hard_floor (safe floor preserving >= 18% margin on goods, preventing walkaway)
+            should_accept = (
+                (offer >= r1_target)
+                or (deal["rounds"] == 2 and offer >= r2_target)
+                or (deal["rounds"] >= 3 and offer >= hard_floor)
+            )
 
             if should_accept and offer >= cost:
                 final_price = min(int(deal["ask"]), int(offer)) if offer > deal["ask"] else int(offer)
-                warranty = int(deal.get("warranty_hours") or 0)
-                # If buyer pushed price down near bare cost on Grade B/C goods, trim warranty to protect margin
-                if u.get("kind") == "goods" and live_grade != "A" and final_price < r1_target:
-                    warranty = max(1, warranty // 2)
+                
+                # Dynamic Warranty Policy (Risk Hedging vs Defect Refunds):
+                # Full 6h warranty is granted only when buyer pays healthy price (>= 80% list_price or >= cost*1.28).
+                # If price is discounted towards floor, trim warranty (2~3h or 0h) so seller never loses full price on low-margin deals!
+                if u.get("kind") == "goods":
+                    if final_price >= int(list_price * 0.82) or final_price >= int(cost * 1.30):
+                        warranty = 6
+                    elif final_price >= int(list_price * 0.72) or final_price >= int(cost * 1.22):
+                        warranty = 3
+                    elif final_price >= hard_floor:
+                        warranty = 1
+                    else:
+                        warranty = 0
+                else:
+                    warranty = 0
 
                 receipt = {
                     "shop": SHOP_NAME,
@@ -595,16 +629,23 @@ class Seller(AgentExecutor):
                 del self.open[task.id]
                 return
 
-            # Fast 2-step concession curve so buyer feels they got a big discount:
+            # Stepped Concession Curve:
+            # After Turn 1: counter with r1_target
+            # After Turn 2: counter with r2_target (moderate concession to encourage close on Turn 2/3)
+            # After Turn 3+: counter with hard_floor
             if deal["rounds"] == 1:
                 new_ask = max(hard_floor, r1_target)
+            elif deal["rounds"] == 2:
+                new_ask = max(hard_floor, r2_target)
             else:
                 new_ask = hard_floor
             deal["ask"] = new_ask
+
             await up.requires_input(say(
-                f"Special discount for fast close — {u['name']} ({u['sku']}, grade={live_grade}, cert=true, "
-                f"warranty={deal['warranty_hours']}h): asking price {new_ask}. Reply {new_ask} to close now."
+                f"Special concession — {u['name']} ({u['sku']}, grade={live_grade}, cert=true): "
+                f"asking price {new_ask}. Reply with an offer or accept {new_ask} to close now."
             ))
+            return
             return
 
         # --- Legacy Rounds 0-2 Offer Processing ---
