@@ -4,4 +4,6 @@ memory.json
 seller_history.json
 state_hub.json
 *.tmp
+logs/*under-test*.log
+
 
