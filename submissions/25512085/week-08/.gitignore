@@ -2,3 +2,6 @@
 .market/
 memory.json
 seller_history.json
+state_hub.json
+*.tmp
+
