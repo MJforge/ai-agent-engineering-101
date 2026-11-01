@@ -469,6 +469,7 @@ class Seller(AgentExecutor):
                     f"grade={grade}, ask={ask}, r1_target={r1_target}, floor={hard_floor}, warranty={warranty}h",
                     flush=True,
                 )
+                wants_warranty = any(kw in text.lower() for kw in ("warranty", "guarantee", "service", "care", "보증"))
                 self.open[task.id] = {
                     "mode": "round3_stock",
                     "unit": unit,
@@ -480,6 +481,7 @@ class Seller(AgentExecutor):
                     "list_price": list_price,
                     "grade": grade,
                     "warranty_hours": warranty,
+                    "wants_warranty": wants_warranty,
                     "rounds": 0,
                     "created_at": now_ts,
                     "offers": [],
@@ -545,6 +547,8 @@ class Seller(AgentExecutor):
         offer = int(m[-1])
         deal["rounds"] += 1
         deal.setdefault("offers", []).append(offer)
+        if any(kw in text.lower() for kw in ("warranty", "guarantee", "service", "care", "보증")):
+            deal["wants_warranty"] = True
 
         if deal.get("mode") == "round3_stock":
             u = deal["unit"]
@@ -575,16 +579,17 @@ class Seller(AgentExecutor):
             if should_accept and offer >= cost:
                 final_price = min(int(deal["ask"]), int(offer)) if offer > deal["ask"] else int(offer)
                 
-                # Dynamic Warranty Policy (Risk Hedging vs Defect Refunds):
-                # Full 6h warranty is granted only when buyer pays healthy price (>= 80% list_price or >= cost*1.28).
-                # If price is discounted towards floor, trim warranty (2~3h or 0h) so seller never loses full price on low-margin deals!
+                # Smart Warranty Policy:
+                # 1. If buyer explicitly asks for warranty OR pays fair price (>= 75% list or >= cost*1.22):
+                #    Grant full 6h warranty (ensures 100% ACP payment success and prevents checkout refusal!)
+                # 2. On Grade A goods (70% of inventory, defect rate < 3%): always grant 6h warranty because defect risk is negligible
+                #    and getting deals settled (>= 20 deals) is top priority.
+                # 3. Only on heavily discounted Grade B/C (refurb/damaged) goods where buyer did NOT ask for warranty:
+                #    Drop warranty to 0h to eliminate defect refund exposure.
+                wants_w = bool(deal.get("wants_warranty"))
                 if u.get("kind") == "goods":
-                    if final_price >= int(list_price * 0.82) or final_price >= int(cost * 1.30):
+                    if live_grade == "A" or wants_w or final_price >= int(list_price * 0.75) or final_price >= int(cost * 1.22):
                         warranty = 6
-                    elif final_price >= int(list_price * 0.72) or final_price >= int(cost * 1.22):
-                        warranty = 3
-                    elif final_price >= hard_floor:
-                        warranty = 1
                     else:
                         warranty = 0
                 else:
