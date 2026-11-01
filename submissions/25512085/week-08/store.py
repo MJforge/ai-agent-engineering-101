@@ -185,52 +185,94 @@ def update_capital_stage(hub: dict[str, Any], inv: dict[str, Any]) -> dict[str, 
     return cs
 
 
-def sync_ledger_incremental(hub: dict[str, Any], catalog: dict[str, dict[str, Any]], timeout: float = 4.0) -> None:
-    """Fetch recent Round 3 ledger entries incrementally and update demand_radar."""
+def sync_ledger_incremental(hub: dict[str, Any], catalog: dict[str, dict[str, Any]], timeout: float = 4.0, market_dir: Path | None = None) -> None:
+    """Fetch recent ledger entries incrementally and update demand_radar.
+    Reads from local .market/ledger.jsonl if available, falling back to HTTP /api/ledger."""
     radar = hub["demand_radar"]
     seq = int(hub.get("ledger_seq", 0))
-    try:
-        if seq == 0:
-            req = urllib.request.Request(f"{MARKET_URL}/api/ledger?after=-1", headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                latest = json.loads(resp.read().decode("utf-8"))
-            if isinstance(latest, list) and latest:
-                top_seq = int(latest[-1].get("seq", 0))
-                seq = max(0, top_seq - 400)
-        req = urllib.request.Request(f"{MARKET_URL}/api/ledger?after={seq}", headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            rows = json.loads(resp.read().decode("utf-8"))
-        if not isinstance(rows, list) or not rows:
-            return
+    rows: list[dict[str, Any]] = []
 
-        for e in rows:
-            s_id = int(e.get("seq", 0))
-            if s_id > seq:
-                seq = s_id
-            if e.get("round", 0) < 3:
-                continue
-            kind = e.get("kind")
-            data = e.get("data") or {}
-            if kind == "settle":
-                sku = str(data.get("item") or data.get("sku") or "")
-                price = data.get("price")
-                cat_info = catalog.get(sku) or {}
-                cat = cat_info.get("category") or sku
-                if cat:
-                    radar["market_settles"][cat] = radar["market_settles"].get(cat, 0) + 1
-                if sku and isinstance(price, (int, float)) and price > 0:
-                    arr = radar["sku_settles"].setdefault(sku, [])
-                    arr.append(int(price))
-                    if len(arr) > 30:
-                        radar["sku_settles"][sku] = arr[-30:]
-                refs = radar.setdefault("recent_refs", [])
-                if s_id not in refs:
-                    refs.append(s_id)
-                    if len(refs) > 25:
-                        radar["recent_refs"] = refs[-25:]
-        hub["ledger_seq"] = seq
-    except Exception:
-        pass
+    # 1. Try local .market/ledger.jsonl first (fast and robust against network timeouts)
+    if market_dir is None:
+        market_dir = BASE_DIR / ".market"
+    ledger_file = market_dir / "ledger.jsonl"
+
+    if ledger_file.exists():
+        try:
+            with open(ledger_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        e = json.loads(line)
+                        s_id = int(e.get("seq", 0))
+                        if s_id > seq:
+                            rows.append(e)
+                    except ValueError:
+                        continue
+        except OSError:
+            pass
+
+    # 2. Fall back to HTTP /api/ledger if local file is missing or yielded nothing
+    if not rows:
+        try:
+            if seq == 0:
+                req = urllib.request.Request(f"{MARKET_URL}/api/ledger?after=-1", headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    latest = json.loads(resp.read().decode("utf-8"))
+                if isinstance(latest, list) and latest:
+                    top_seq = int(latest[-1].get("seq", 0))
+                    seq = max(0, top_seq - 400)
+            req = urllib.request.Request(f"{MARKET_URL}/api/ledger?after={seq}", headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if isinstance(data, list):
+                rows = data
+        except Exception:
+            pass
+
+    if not rows:
+        return
+
+    for e in rows:
+        s_id = int(e.get("seq", 0))
+        if s_id > seq:
+            seq = s_id
+
+        kind = e.get("kind")
+        data = e.get("data") or {}
+
+        # Settle entries appear in the ledger as kind == "result" with verified == true (or legacy "settle")
+        # Structure:
+        # - kind == "result": data has "verified": True, "receipt": {"item": sku, "price": amount, ...}
+        # - kind == "settle": data has {"item": sku, "price": amount}
+        rec = data.get("receipt") if kind == "result" else data
+        is_deal = False
+        if kind == "result":
+            is_deal = bool(data.get("verified")) and isinstance(rec, dict) and bool(rec.get("price"))
+        elif kind == "settle":
+            is_deal = isinstance(data.get("price"), (int, float)) and data.get("price") > 0
+
+        if is_deal and isinstance(rec, dict):
+            sku = str(rec.get("item") or rec.get("sku") or "")
+            price = rec.get("price")
+            cat_info = catalog.get(sku) or {}
+            cat = cat_info.get("category") or sku
+            if cat:
+                radar["market_settles"][cat] = radar["market_settles"].get(cat, 0) + 1
+            if sku and isinstance(price, (int, float)) and price > 0:
+                arr = radar["sku_settles"].setdefault(sku, [])
+                arr.append(int(price))
+                if len(arr) > 30:
+                    radar["sku_settles"][sku] = arr[-30:]
+            refs = radar.setdefault("recent_refs", [])
+            if s_id not in refs:
+                refs.append(s_id)
+                if len(refs) > 25:
+                    radar["recent_refs"] = refs[-25:]
+
+    hub["ledger_seq"] = seq
 
 
 def sync_broken_and_payments(hub: dict[str, Any], market_dir: Path) -> list[dict[str, Any]]:
