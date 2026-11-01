@@ -246,12 +246,6 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
         "warranty_hours": default_warranty,
         "disc_pct": disc_from_list,
     }
-        "cost": cost,
-        "grade": grade,
-        "hours_left": hours_left,
-        "warranty_hours": default_warranty,
-        "disc_pct": disc_from_list,
-    }
 
 
 # --- Round 0-2 Legacy Helpers (for backward compatibility & market_test_week07.py) ---
