@@ -700,14 +700,16 @@ def main():
                 )
                 outcome = "no-service-deal"
 
-            # Record purchase in shared state_hub.json for Round 3 broken.jsonl attribution!
+            # Round 3: an agreed receipt is not a purchase yet. The kit still has to verify the signatures and
+            # pay through ACP, and it runs review.py only for paid deals. Park the deal under its order id;
+            # review.py turns it into a purchase record and a shop-memory entry once the payment settled.
             if is_round3:
                 matched_sku = rec_item if rec_item in catalog else (target_sku_info["sku"] if target_sku_info else rec_item)
                 sku_meta = catalog.get(matched_sku) or {}
-                # Append under the lock so a concurrent restock/review save cannot drop this purchase
+                now_ts = int(time.time())
                 with mutate_hub() as hub:
-                    purchases = hub.setdefault("my_purchases", [])
-                    purchases.append({
+                    pending = hub.setdefault("pending_deals", {})
+                    pending[str(order_data.get("order"))] = {
                         "order": order_data.get("order"),
                         "sku": matched_sku,
                         "name": sku_meta.get("name") or (target_sku_info["name"] if target_sku_info else item),
@@ -717,11 +719,12 @@ def main():
                         "price": recorded_price,
                         "list_price": int(sku_meta.get("list_price") or list_price),
                         "warranty_hours": raw_receipt.get("warranty_hours") or 0,
-                        "ts": int(time.time()),
-                        "broke": False,
-                    })
-                    if len(purchases) > 150:
-                        hub["my_purchases"] = purchases[-150:]
+                        "ts": now_ts,
+                        "memory": {"item": item, "budget": budget, "price": recorded_price, "rounds": rounds},
+                    }
+                    # Unpaid deals never reach review.py; drop them once they are 6 hours old
+                    for k in [k for k, v in pending.items() if now_ts - int(v.get("ts") or 0) > 21600]:
+                        del pending[k]
     else:
         final_receipt = None
         recorded_price = None
@@ -730,14 +733,16 @@ def main():
         template = random.choice(FUNNY_NO_DEAL_REVIEWS)
         review = template.format(rounds=rounds, ask=seller_ask or "high", budget=budget)
 
-    update_memory(memory, shop_name, {
-        "item": item,
-        "budget": budget,
-        "price": recorded_price,
-        "rounds": rounds,
-        "stars": stars,
-        "outcome": outcome,
-    })
+    # A Round 3 agreed deal enters shop memory from review.py, only after it is paid
+    if not (is_round3 and final_receipt is not None):
+        update_memory(memory, shop_name, {
+            "item": item,
+            "budget": budget,
+            "price": recorded_price,
+            "rounds": rounds,
+            "stars": stars,
+            "outcome": outcome,
+        })
 
     result_line: dict[str, Any] = {
         "shop": chosen_shop["url"],

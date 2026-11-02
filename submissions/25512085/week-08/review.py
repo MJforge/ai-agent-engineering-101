@@ -5,8 +5,9 @@ Invoked by market_kit.py v4 after each settled deal via:
 
 Responsibilities:
 1. Inspects `settled` mandate_receipt in `deal.json` (`grade`, `claim`, `claim_honest`, `value`, `ledger`).
-2. Updates shop honesty & settlement metrics in `state_hub.json` (`store.py`), and attaches the exact
-   ledger sequence ID to the most recent record in `my_purchases`.
+2. Updates shop honesty & settlement metrics in `state_hub.json` (`store.py`), and confirms the deal
+   `market_buyer.py` parked in `pending_deals` as a paid purchase (`my_purchases`, with its ledger ID)
+   and as a shop-memory entry (`memory.json`). Unpaid deals never get here, so they are never recorded.
 3. Checks `.market/broken.jsonl` to attribute any broken non-food items back to the selling shop.
 4. Publishes high-value, ledger-referenced (`refs: [ledger_seq]`) buyer market intelligence reports
    to `.market/outbox.jsonl` (respecting the 5-minute rate limit) and casts strategic votes on
@@ -21,6 +22,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from market_buyer import load_memory, update_memory
 from store import (
     load_json_safe,
     mutate_hub,
@@ -65,18 +67,29 @@ def evaluate_settled_deal(deal_data: dict[str, Any], hub: dict[str, Any], market
             st["honest"] = st.get("honest", 0) + 1
         st["last_ts"] = int(time.time())
 
-    # Update ledger seq in my_purchases & recent_refs
     if isinstance(ledger_seq, int):
         refs = hub.setdefault("demand_radar", {}).setdefault("recent_refs", [])
         if ledger_seq not in refs:
             refs.append(ledger_seq)
             hub["demand_radar"]["recent_refs"] = refs[-25:]
-        for p in reversed(hub.get("my_purchases", [])):
-            if p.get("sku") == sku and p.get("price") == price and not p.get("ledger"):
-                p["ledger"] = ledger_seq
-                p["name"] = name
-                p["warranty_hours"] = warranty
-                break
+
+    # The kit runs this hook only for paid deals, so this is where a purchase becomes real: take the deal
+    # market_buyer.py parked under this order id and record it, with what the market says was shipped.
+    order_id = str(order.get("order") or "")
+    pending = (hub.get("pending_deals") or {}).pop(order_id, None) if order_id else None
+    purchase = dict(pending or {
+        "order": order.get("order"), "category": order.get("category") or order.get("item"),
+        "shop_name": str(receipt.get("shop") or ""), "list_price": value,
+    })
+    memory_entry = purchase.pop("memory", None)
+    purchase.update({
+        "sku": sku, "name": name, "shop_url": shop_url or purchase.get("shop_url", ""), "price": price,
+        "warranty_hours": warranty, "ledger": ledger_seq, "ts": int(time.time()), "broke": False,
+    })
+    purchases = hub.setdefault("my_purchases", [])
+    purchases.append(purchase)
+    if len(purchases) > 150:
+        hub["my_purchases"] = purchases[-150:]
 
     # Sync any broken goods notifications from .market/broken.jsonl
     newly_broken = sync_broken_and_payments(hub, market_dir)
@@ -111,6 +124,11 @@ def evaluate_settled_deal(deal_data: dict[str, Any], hub: dict[str, Any], market
         review = (
             f"[Settled #{ledger_seq}] Paid {price} for {name} ({sku}, grade {grade}, list value {value})."
         )
+
+    # Shop memory (memory.json, read by market_buyer.py when ranking shops) gets the deal only now, paid,
+    # with the stars this review gives
+    if memory_entry is not None and purchase.get("shop_name"):
+        update_memory(load_memory(), purchase["shop_name"], dict(memory_entry, stars=stars, outcome="settled"))
 
     # Trigger Buyer Forum Posting (every >= 315s) with real ledger refs to earn upvotes!
     now = int(time.time())
