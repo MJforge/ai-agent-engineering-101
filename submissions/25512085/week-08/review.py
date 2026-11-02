@@ -60,7 +60,8 @@ def evaluate_settled_deal(deal_data: dict[str, Any], hub: dict[str, Any], market
         })
         if receipt.get("shop"):
             st["name"] = str(receipt.get("shop"))
-        st["settled"] = st.get("settled", 0) + 1
+        # "settled" is counted once, from the paid line the kit writes to payments.jsonl
+        # (sync_broken_and_payments below); counting it here as well counted every deal twice
         if claim_honest is False:
             st["dishonest"] = st.get("dishonest", 0) + 1
         elif claim_honest is True:
