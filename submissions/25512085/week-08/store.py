@@ -270,8 +270,10 @@ def update_capital_stage(hub: dict[str, Any], inv: dict[str, Any]) -> dict[str, 
 
 def sync_ledger_incremental(hub: dict[str, Any], catalog: dict[str, dict[str, Any]], timeout: float = 4.0) -> None:
     """Fetch recent ledger entries incrementally from /api/ledger and update demand_radar.
-    Accurately parses Round 3 'settle' (amount) and verified 'result' events,
-    filtering out Round 1/2 legacy test items (lamp, chair, bookshelf)."""
+    Counts only Round 3 'settle' entries: in Round 3 a deal counts only once it is settled, and the
+    settle entry always names the shipped SKU and its 'amount'. 'result' entries are skipped because a
+    verified receipt is not a settlement, its item may be the order's category, and counting it too
+    would count each settled deal twice. Rounds 1/2 have no settle entries."""
     radar = hub["demand_radar"]
     seq = int(hub.get("ledger_seq", 0))
     rows: list[dict[str, Any]] = []
@@ -280,9 +282,6 @@ def sync_ledger_incremental(hub: dict[str, Any], catalog: dict[str, dict[str, An
     cat_lookup: dict[str, tuple[str, str]] = {}
     for c_sku, c_info in catalog.items():
         cat_lookup[c_sku.lower()] = (c_sku, c_info.get("category") or "general")
-
-    # Round 1/2 legacy test items to exclude from Round 3 metrics
-    legacy_items = {"lamp", "chair", "bookshelf"}
 
     try:
         if seq == 0:
@@ -312,30 +311,14 @@ def sync_ledger_incremental(hub: dict[str, Any], catalog: dict[str, dict[str, An
         data = e.get("data") or {}
 
         # Round 3 settle schema: {"kind": "settle", "data": {"order": "...", "amount": 8551, "item": "G1f5d00c7", ...}}
-        # Result schema: {"kind": "result", "data": {"verified": true, "receipt": {"item": "...", "price": 8551}}}
-        raw_sku = ""
-        amount: int | float | None = None
-
-        if kind == "settle":
-            raw_sku = str(data.get("item") or data.get("sku") or "")
-            amt_val = data.get("amount") if data.get("amount") is not None else data.get("price")
-            if isinstance(amt_val, (int, float)) and amt_val > 0:
-                amount = amt_val
-        elif kind == "result":
-            if bool(data.get("verified")):
-                rec = data.get("receipt") if isinstance(data.get("receipt"), dict) else data
-                raw_sku = str(rec.get("item") or rec.get("sku") or "")
-                amt_val = rec.get("amount") if rec.get("amount") is not None else rec.get("price")
-                if isinstance(amt_val, (int, float)) and amt_val > 0:
-                    amount = amt_val
-
-        if not raw_sku or amount is None:
+        if kind != "settle":
+            continue
+        raw_sku = str(data.get("item") or data.get("sku") or "")
+        amount = data.get("amount")
+        if not raw_sku or not isinstance(amount, (int, float)) or amount <= 0:
             continue
 
         raw_lower = raw_sku.lower()
-        if raw_lower in legacy_items:
-            continue
-
         if raw_lower in cat_lookup:
             canonical_sku, cat = cat_lookup[raw_lower]
         else:
