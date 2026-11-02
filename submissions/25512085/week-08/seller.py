@@ -464,7 +464,7 @@ def extract_buyer_offer(text: str, current_ask: int = 0, list_price: int = 0, sk
     if not text:
         return None
     # 1. Normalize comma-separated numbers: "1,200" -> "1200"
-    cleaned = re.sub(r"(\d),(\d{3})\b", r"\1\2", text)
+    cleaned = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", text)
 
     # 2. Strip explicit SKU or standard hex SKU patterns
     if sku:
@@ -488,7 +488,8 @@ def extract_buyer_offer(text: str, current_ask: int = 0, list_price: int = 0, sk
     for pat in intent_patterns:
         m = re.findall(pat, cleaned)
         if m:
-            return int(m[-1])
+            offer = int(m[-1])
+            return offer if offer > 0 else None
 
     # 6. Budget vs Offer distinction
     budget_match = re.search(r"(?i)\bbudget\s*(?:is|of|:)?\s*(\d{2,7})\b", cleaned)
@@ -499,16 +500,16 @@ def extract_buyer_offer(text: str, current_ask: int = 0, list_price: int = 0, sk
     if not raw_nums:
         return None
     if len(raw_nums) == 1:
-        return raw_nums[0]
+        return raw_nums[0] if raw_nums[0] > 0 else None
 
     non_budget = [n for n in raw_nums if n != budget_val]
     if non_budget:
         ref_price = max(current_ask, list_price, 50)
         viable = [n for n in non_budget if n >= 10 or n >= ref_price * 0.1]
         if viable:
-            return viable[-1]
-        return non_budget[-1]
-    return raw_nums[-1]
+            return viable[-1] if viable[-1] > 0 else None
+        return non_budget[-1] if non_budget[-1] > 0 else None
+    return raw_nums[-1] if raw_nums[-1] > 0 else None
 
 
 def get_harness_cmd() -> str:
