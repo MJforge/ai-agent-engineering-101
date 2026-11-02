@@ -22,10 +22,9 @@ from pathlib import Path
 from typing import Any
 
 from store import (
-    load_hub,
     load_json_safe,
+    mutate_hub,
     queue_forum_action,
-    save_hub,
     sync_broken_and_payments,
 )
 
@@ -182,9 +181,9 @@ def main() -> None:
     market_dir = deal_path.parent
     deal_data = load_json_safe(deal_path, {}) or {}
 
-    hub = load_hub()
-    stars, review = evaluate_settled_deal(deal_data, hub, market_dir)
-    save_hub(hub)
+    # Read, update and save the hub under one lock so concurrent writers' updates are not overwritten
+    with mutate_hub() as hub:
+        stars, review = evaluate_settled_deal(deal_data, hub, market_dir)
 
     print(json.dumps({"stars": stars, "review": review}, ensure_ascii=False), flush=True)
 

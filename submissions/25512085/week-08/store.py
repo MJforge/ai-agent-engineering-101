@@ -271,21 +271,9 @@ def update_capital_stage(hub: dict[str, Any], inv: dict[str, Any]) -> dict[str, 
     return cs
 
 
-def sync_ledger_incremental(hub: dict[str, Any], catalog: dict[str, dict[str, Any]], timeout: float = 4.0) -> None:
-    """Fetch recent ledger entries incrementally from /api/ledger and update demand_radar.
-    Counts only Round 3 'settle' entries: in Round 3 a deal counts only once it is settled, and the
-    settle entry always names the shipped SKU and its 'amount'. 'result' entries are skipped because a
-    verified receipt is not a settlement, its item may be the order's category, and counting it too
-    would count each settled deal twice. Rounds 1/2 have no settle entries."""
-    radar = hub["demand_radar"]
-    seq = int(hub.get("ledger_seq", 0))
-    rows: list[dict[str, Any]] = []
-
-    # Fast case-insensitive catalog lookup for canonical SKU & category
-    cat_lookup: dict[str, tuple[str, str]] = {}
-    for c_sku, c_info in catalog.items():
-        cat_lookup[c_sku.lower()] = (c_sku, c_info.get("category") or "general")
-
+def fetch_ledger_rows(seq: int, timeout: float = 4.0) -> list[dict[str, Any]]:
+    """Fetch ledger entries after seq from /api/ledger (the newest 400 when seq is 0). Network only: call it
+    outside mutate_hub so the other processes are not kept waiting on the lock. Returns [] on any failure."""
     try:
         if seq == 0:
             req = urllib.request.Request(f"{MARKET_URL}/api/ledger?after=-1", headers={"User-Agent": "Mozilla/5.0"})
@@ -297,16 +285,31 @@ def sync_ledger_incremental(hub: dict[str, Any], catalog: dict[str, dict[str, An
         req = urllib.request.Request(f"{MARKET_URL}/api/ledger?after={seq}", headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-        if isinstance(data, list):
-            rows = data
+        return data if isinstance(data, list) else []
     except Exception:
-        pass
+        return []
 
-    if not rows:
-        return
+
+def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: dict[str, dict[str, Any]]) -> None:
+    """Update demand_radar from rows fetched by fetch_ledger_rows. Call it inside mutate_hub.
+    Counts only Round 3 'settle' entries: in Round 3 a deal counts only once it is settled, and the
+    settle entry always names the shipped SKU and its 'amount'. 'result' entries are skipped because a
+    verified receipt is not a settlement, its item may be the order's category, and counting it too
+    would count each settled deal twice. Rounds 1/2 have no settle entries.
+    Rows at or below hub["ledger_seq"] are skipped, so rows fetched with a stale seq are never counted twice."""
+    radar = hub["demand_radar"]
+    last_seq = int(hub.get("ledger_seq", 0))
+    seq = last_seq
+
+    # Fast case-insensitive catalog lookup for canonical SKU & category
+    cat_lookup: dict[str, tuple[str, str]] = {}
+    for c_sku, c_info in catalog.items():
+        cat_lookup[c_sku.lower()] = (c_sku, c_info.get("category") or "general")
 
     for e in rows:
         s_id = int(e.get("seq", 0))
+        if s_id <= last_seq:
+            continue
         if s_id > seq:
             seq = s_id
 

@@ -32,8 +32,8 @@ from store import (
     load_catalog,
     load_hub,
     load_json_safe,
+    mutate_hub,
     record_buyer_order,
-    save_hub,
     sync_broken_and_payments,
 )
 
@@ -704,24 +704,24 @@ def main():
             if is_round3:
                 matched_sku = rec_item if rec_item in catalog else (target_sku_info["sku"] if target_sku_info else rec_item)
                 sku_meta = catalog.get(matched_sku) or {}
-                hub = load_hub()
-                purchases = hub.setdefault("my_purchases", [])
-                purchases.append({
-                    "order": order_data.get("order"),
-                    "sku": matched_sku,
-                    "name": sku_meta.get("name") or (target_sku_info["name"] if target_sku_info else item),
-                    "category": sku_meta.get("category") or order_data.get("category") or item,
-                    "shop_url": shop_url,
-                    "shop_name": shop_name,
-                    "price": recorded_price,
-                    "list_price": int(sku_meta.get("list_price") or list_price),
-                    "warranty_hours": raw_receipt.get("warranty_hours") or 0,
-                    "ts": int(time.time()),
-                    "broke": False,
-                })
-                if len(purchases) > 150:
-                    hub["my_purchases"] = purchases[-150:]
-                save_hub(hub)
+                # Append under the lock so a concurrent restock/review save cannot drop this purchase
+                with mutate_hub() as hub:
+                    purchases = hub.setdefault("my_purchases", [])
+                    purchases.append({
+                        "order": order_data.get("order"),
+                        "sku": matched_sku,
+                        "name": sku_meta.get("name") or (target_sku_info["name"] if target_sku_info else item),
+                        "category": sku_meta.get("category") or order_data.get("category") or item,
+                        "shop_url": shop_url,
+                        "shop_name": shop_name,
+                        "price": recorded_price,
+                        "list_price": int(sku_meta.get("list_price") or list_price),
+                        "warranty_hours": raw_receipt.get("warranty_hours") or 0,
+                        "ts": int(time.time()),
+                        "broke": False,
+                    })
+                    if len(purchases) > 150:
+                        hub["my_purchases"] = purchases[-150:]
     else:
         final_receipt = None
         recorded_price = None

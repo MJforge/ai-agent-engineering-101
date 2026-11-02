@@ -26,13 +26,14 @@ from typing import Any
 from store import (
     SAFE_FOOD_CATEGORIES,
     SEED_GOODS_CATEGORIES,
+    apply_ledger_rows,
+    fetch_ledger_rows,
     load_catalog,
     load_hub,
     load_inventory,
      load_json_safe,
+    mutate_hub,
     queue_forum_action,
-    save_hub,
-    sync_ledger_incremental,
     update_capital_stage,
 )
 
@@ -149,15 +150,27 @@ def build_restock_plan(market_dir: Path) -> dict[str, Any]:
     if balance < int(inv.get("bankrupt_line") or 0) and int(inv.get("bankruptcies_left") or 0) > 0 and not sellable:
         return {"buy": [], "bankrupt": True}
 
-    hub = load_hub()
-    sync_ledger_incremental(hub, catalog)
+    # The ledger fetch (up to a few seconds) runs before taking the lock, so seller.py is not kept waiting
+    rows = fetch_ledger_rows(int(load_hub().get("ledger_seq", 0)))
+    with mutate_hub() as hub:
+        return plan_with_hub(hub, market_dir, catalog, inv, rows)
+
+
+def plan_with_hub(
+    hub: dict[str, Any],
+    market_dir: Path,
+    catalog: dict[str, dict[str, Any]],
+    inv: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """The plan itself. Runs inside mutate_hub, which saves the hub on return: do not save it here."""
+    apply_ledger_rows(hub, rows, catalog)
     cs = update_capital_stage(hub, inv)
     forum_posts = load_json_safe(market_dir / "forum.json", []) or []
 
     stage = int(cs.get("stage", 1))
     avail_budget = int(cs.get("available_budget", 0))
     if avail_budget < 8_000:
-        save_hub(hub)
         return {"buy": []}
 
     # Group catalog SKUs by category
@@ -257,7 +270,6 @@ def build_restock_plan(market_dir: Path) -> dict[str, Any]:
         queue_forum_action(market_dir, {"post": post_text, "refs": refs, "as": "shop"})
         hub["forum_state"]["last_shop_post_ts"] = now
 
-    save_hub(hub)
     return {"buy": buy_orders[:10]}
 
 
