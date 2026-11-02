@@ -238,7 +238,7 @@ def update_capital_stage(hub: dict[str, Any], inv: dict[str, Any]) -> dict[str, 
     # Stage transitions:
     # Stage 1 (Seed): Initial 2.5M cap (50% of 5M starting capital) focused on non-expiring high-margin goods
     # Stage 2 (Growth): Reinvest 75% of positive equity gains into expanding inventory cap (up to 4.2M)
-    # Stage 3 (Scale-up): When total equity >= 6.0M, expand aggressively while keeping >= 1.5M safety cash buffer
+    # Stage 3 (Scale-up): When total equity >= 6.0M, expand aggressively while keeping the cash floor below
     if total_equity >= 6_000_000:
         stage = 3
         max_cap = int(2_500_000 + max(0, est_profit) * 0.85)
@@ -249,9 +249,12 @@ def update_capital_stage(hub: dict[str, Any], inv: dict[str, Any]) -> dict[str, 
         stage = 1
         max_cap = 2_500_000
 
-    # Hard safety floor: never allow restock spending to push cash balance below 1,500,000 (bankruptcy line is 500,000)
-    SAFE_CASH_FLOOR = 1_500_000
-    available_to_spend = max(0, balance - SAFE_CASH_FLOOR)
+    # Cash floor scales with the balance: half of it, capped at 1,500,000, but never closer than 200,000 to the
+    # bankruptcy line (500,000). A fixed 1,500,000 floor froze a shop holding 0.5M-1.5M with no stock: it could
+    # neither restock nor file for bankruptcy. The 200,000 margin absorbs supply costs above our 65% estimate.
+    bankrupt_line = int(inv.get("bankrupt_line") or 500_000)
+    cash_floor = min(1_500_000, max(bankrupt_line + 200_000, balance // 2))
+    available_to_spend = max(0, balance - cash_floor)
     effective_cap = min(max_cap, stock_cost + available_to_spend)
 
     cs = hub["capital_stage"]

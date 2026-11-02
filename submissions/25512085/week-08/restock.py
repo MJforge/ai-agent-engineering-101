@@ -9,7 +9,7 @@ Implements the Coupang-style 3-Stage Scale-Up Strategy:
   prioritizing categories with the highest Demand Score (2.5x missed shop inquiries + 1.5x buyer orders
   + 1.0x ledger settlements + forum demand).
 - Stage 3 (Full Assortment Scale-Up): Expand across all active categories while enforcing a strict
-  1,500,000 credit cash reserve floor to prevent bankruptcy.
+  cash reserve floor (half the balance, at most 1,500,000, at least 200,000 above the bankruptcy line).
 
 Outputs a single JSON line: {"buy": [{"sku": "...", "qty": 1..20}, ...]} (at most 10 lines).
 """
