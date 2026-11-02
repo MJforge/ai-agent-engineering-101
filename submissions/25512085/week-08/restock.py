@@ -142,6 +142,13 @@ def build_restock_plan(market_dir: Path) -> dict[str, Any]:
     if not catalog or not inv:
         return {"buy": []}
 
+    # Bankruptcy: with a restock hook the kit files only when we print "bankrupt": true (market_kit.py restock()).
+    # Mirror the kit's default rule: below the line, filings left, and nothing left to sell.
+    balance = int(inv.get("balance") or 0)
+    sellable = [u for u in (inv.get("units") or []) if u.get("grade") != "expired"]
+    if balance < int(inv.get("bankrupt_line") or 0) and int(inv.get("bankruptcies_left") or 0) > 0 and not sellable:
+        return {"buy": [], "bankrupt": True}
+
     hub = load_hub()
     sync_ledger_incremental(hub, catalog)
     cs = update_capital_stage(hub, inv)
