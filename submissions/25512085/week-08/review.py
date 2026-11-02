@@ -9,8 +9,8 @@ Responsibilities:
    `market_buyer.py` parked in `pending_deals` as a paid purchase (`my_purchases`, with its ledger ID)
    and as a shop-memory entry (`memory.json`). Unpaid deals never get here, so they are never recorded.
 3. Checks `.market/broken.jsonl` to attribute any broken non-food items back to the selling shop.
-4. Publishes high-value, ledger-referenced (`refs: [ledger_seq]`) buyer market intelligence reports
-   to `.market/outbox.jsonl` (respecting the 5-minute rate limit) and casts strategic votes on
+4. Picks the facts for a ledger-referenced (`refs: [ledger_seq]`) buyer forum post (respecting the 5-minute
+   rate limit) and hands them to `forum_writer.py`, where the model writes the post; casts strategic votes on
    informative peer forum posts to maximize Buyer Forum Score (30% of Buyer ALL!).
 5. Prints final `{stars, review}` JSON line.
 """
@@ -18,6 +18,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -31,6 +34,21 @@ from store import (
 )
 
 MY_AGENT_NAME = "mjforge"
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def start_forum_writer(market_dir: Path, brief: dict[str, Any]) -> None:
+    """Write the brief and start forum_writer.py in its own session without waiting for it. If it cannot start,
+    post the template text now so the post is not lost."""
+    brief_path = market_dir / f"forum_brief_{int(time.time() * 1000)}.json"
+    try:
+        brief_path.write_text(json.dumps(brief, ensure_ascii=False), encoding="utf-8")
+        kw = ({"start_new_session": True} if os.name != "nt"
+              else {"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP})
+        subprocess.Popen([sys.executable, str(BASE_DIR / "forum_writer.py"), str(brief_path)], cwd=str(BASE_DIR),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)
+    except OSError:
+        queue_forum_action(market_dir, {"post": brief["fallback"], "refs": brief["refs"], "as": "buyer"})
 
 
 def evaluate_settled_deal(deal_data: dict[str, Any], hub: dict[str, Any], market_dir: Path) -> tuple[int, str]:
@@ -165,7 +183,22 @@ def evaluate_settled_deal(deal_data: dict[str, Any], hub: dict[str, Any], market
                 f"at {price} vs list value {value} (net buyer surplus +{surplus}, ledger #{ledger_seq} at {shop_label})."
                 f"{trusted_str}"
             )
-        queue_forum_action(market_dir, {"post": post_body, "refs": recent_refs, "as": "buyer"})
+        # The model writes the post from these facts in forum_writer.py, started detached so this hook (and the
+        # kit's settlement loop) does not wait for it; post_body is what gets posted if the model fails.
+        facts = {
+            "event": "dishonest_grade_claim" if claim_honest is False else ("broken_goods" if newly_broken else "settled_deal"),
+            "product": name[:80], "sku": sku, "shop": shop_label[:40], "paid": price, "list_value": value,
+            "buyer_surplus": surplus, "grade": grade, "claimed_grade": claim, "claim_honest": claim_honest,
+            "warranty_hours": warranty, "ledger": ledger_seq,
+            "broken": ({"product": str(newly_broken[-1].get("name"))[:80], "shop": str(newly_broken[-1].get("shop_name"))[:40],
+                        "warranty_hours": int(newly_broken[-1].get("warranty_hours") or 0)} if newly_broken else None),
+            "honest_shops_so_far": [
+                str(v.get("name"))[:40] for v in (hub.get("shop_trust") or {}).values()
+                if v.get("name") and int(v.get("honest", 0)) >= 1 and int(v.get("dishonest", 0)) == 0
+            ][:4],
+        }
+        start_forum_writer(market_dir, {"facts": facts, "fallback": post_body, "refs": recent_refs,
+                                        "ledger": ledger_seq, "market_dir": str(market_dir)})
         f_state["last_buyer_post_ts"] = now
 
     # Cast strategic votes on peer forum posts with ledger refs (no rate limit on votes)
