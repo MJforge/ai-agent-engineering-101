@@ -219,16 +219,16 @@ def find_stock_unit(text: str, taken_units: set[str], inv: dict[str, Any], catal
         if exact:
             chosen = select_best_unit(exact, want)
             return chosen, chosen.get("category") or wanted_sku
-        # If we don't have this exact SKU, check what category it belongs to in catalog!
+        # If we do not have this exact SKU, resolve its category for demand radar,
+        # but NEVER substitute a different SKU from the same category!
+        # Arbitrary substitution causes ACP checkout failure because buyer orders specify
+        # strict acceptable SKU subsets, which would trigger 1-star rip-off reviews.
+        cat_name = wanted_sku
         for c_sku, c_info in catalog.items():
             if c_sku.lower() == wanted_sku:
                 cat_name = c_info.get("category") or wanted_sku
-                # Check if we have another SKU in the same category with similar list_price
-                same_cat = [u for u in valid_units if u.get("category") == cat_name]
-                if same_cat:
-                    chosen = select_best_unit(same_cat, want)
-                    return chosen, cat_name
-                return None, cat_name
+                break
+        return None, cat_name
 
     # 2. Match by product name or category leaf in buyer message
     fit = []

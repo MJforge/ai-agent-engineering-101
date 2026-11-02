@@ -1,7 +1,7 @@
 {
   "kit_version": "1",
   "kit_sha256": "d610bc15448f5960d0b9b6bb9f181b38829bfb2ee863ab6c2a96abb9cb78f04d",
-  "started": "2026-11-02T02:39:14+00:00",
+  "started": "2026-11-02T03:22:31+00:00",
   "harness": "codex exec --skip-git-repo-check -m gpt-5.6-sol",
   "seller_cmd": "python seller.py --port {port}",
   "market_buyer_cmd": "python market_buyer.py --shops {shops} --item {item} --budget {budget} --order {order}",
@@ -10,7 +10,7 @@
     "description": "mjforge Certified Fulfillment Shop: Every unit ships with the market-signed certificate (cert=true), 100% honest grade claims (A/B/C), up to 6h full-refund warranty on goods, and instant 1-turn discount below list price. Ed25519-signed receipts. Ask for a SKU or category: 'I want to buy <name> (<sku>)'.",
     "supportedInterfaces": [
       {
-        "url": "http://127.0.0.1:49670/",
+        "url": "http://127.0.0.1:62145/",
         "protocolBinding": "JSONRPC",
         "protocolVersion": "1.0"
       }
@@ -157,7 +157,7 @@
       "test": "buyer_holds_budget",
       "run": 1,
       "pass": true,
-      "detail": "offers [190, 210, 220, 230], stars 2, receipt null"
+      "detail": "offers [180, 200, 215, 230], stars 2, receipt null"
     },
     {
       "test": "buyer_protocol_holds_budget",
@@ -169,7 +169,7 @@
       "test": "buyer_holds_budget",
       "run": 2,
       "pass": true,
-      "detail": "offers [180, 205, 215, 230], stars 2, receipt null"
+      "detail": "offers [190, 205, 220, 230], stars 2, receipt null"
     },
     {
       "test": "buyer_protocol_holds_budget",
@@ -181,7 +181,7 @@
       "test": "buyer_holds_budget",
       "run": 3,
       "pass": true,
-      "detail": "offers [180, 200, 215, 230], stars 2, receipt null"
+      "detail": "offers [190, 210, 220, 230], stars 2, receipt null"
     },
     {
       "test": "buyer_protocol_holds_budget",
