@@ -11,6 +11,7 @@ file replacement so concurrent processes never observe partial writes.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import statistics
@@ -83,35 +84,117 @@ def default_hub() -> dict[str, Any]:
     }
 
 
+@contextlib.contextmanager
+def file_lock(path: Path = STATE_FILE, timeout: float = 8.0):
+    """Cross-process advisory lock using msvcrt (Windows) or fcntl (POSIX)."""
+    lock_file = path.with_suffix(".lock")
+    start = time.time()
+    fd = None
+    while True:
+        try:
+            fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR)
+            if os.name == "nt":
+                import msvcrt
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except (BlockingIOError, OSError, PermissionError):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                fd = None
+            if (time.time() - start) >= timeout:
+                # Timeout safeguard: proceed anyway to avoid unrecoverable process freeze
+                break
+            time.sleep(0.04)
+
+    try:
+        yield
+    finally:
+        if fd is not None:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 def load_hub(path: Path = STATE_FILE) -> dict[str, Any]:
+    """Load state_hub.json with exponential backoff retries against Windows sharing locks."""
     hub = default_hub()
     if not path.exists():
         return hub
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(raw, dict):
-            for k, v in raw.items():
-                if isinstance(v, dict) and isinstance(hub.get(k), dict):
-                    hub[k].update(v)
-                else:
-                    hub[k] = v
-    except (OSError, ValueError):
-        pass
+    for attempt in range(5):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                for k, v in raw.items():
+                    if isinstance(v, dict) and isinstance(hub.get(k), dict):
+                        hub[k].update(v)
+                    else:
+                        hub[k] = v
+            return hub
+        except (OSError, ValueError):
+            if attempt < 4:
+                time.sleep(0.03)
     return hub
 
 
-def save_hub(hub: dict[str, Any], path: Path = STATE_FILE) -> None:
+def _save_hub_unlocked(hub: dict[str, Any], path: Path) -> None:
+    """Internal helper to write temporary JSON and replace file with retry backoff."""
     hub["updated_at"] = int(time.time())
     tmp = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         tmp.write_text(json.dumps(hub, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError:
-        try:
-            if tmp.exists():
+        replaced = False
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                replaced = True
+                break
+            except OSError:
+                if attempt < 4:
+                    time.sleep(0.04)
+        if not replaced and tmp.exists():
+            try:
                 tmp.unlink()
-        except OSError:
-            pass
+            except OSError:
+                pass
+    except OSError:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def save_hub(hub: dict[str, Any], path: Path = STATE_FILE) -> None:
+    """Atomically save state_hub.json under the cross-process lock."""
+    with file_lock(path):
+        _save_hub_unlocked(hub, path)
+
+
+@contextlib.contextmanager
+def mutate_hub(path: Path = STATE_FILE, timeout: float = 8.0):
+    """Context manager to safely load, mutate, and save state_hub.json under an exclusive lock."""
+    with file_lock(path, timeout=timeout):
+        hub = load_hub(path)
+        yield hub
+        _save_hub_unlocked(hub, path)
 
 
 def load_json_safe(path: Path, default: Any = None) -> Any:
@@ -339,22 +422,20 @@ def record_inbound_inquiry(category_or_item: str, matched: bool, path: Path = ST
     """Record a buyer inquiry arriving at seller.py (including missed demand when out of stock)."""
     if not category_or_item:
         return
-    hub = load_hub(path)
-    radar = hub["demand_radar"]
-    radar["inbound_wants"][category_or_item] = radar["inbound_wants"].get(category_or_item, 0) + 1
-    if not matched:
-        radar["missed_wants"][category_or_item] = radar["missed_wants"].get(category_or_item, 0) + 1
-    save_hub(hub, path)
+    with mutate_hub(path) as hub:
+        radar = hub.setdefault("demand_radar", default_hub()["demand_radar"])
+        radar["inbound_wants"][category_or_item] = radar["inbound_wants"].get(category_or_item, 0) + 1
+        if not matched:
+            radar["missed_wants"][category_or_item] = radar["missed_wants"].get(category_or_item, 0) + 1
 
 
 def record_buyer_order(category: str, path: Path = STATE_FILE) -> None:
     """Record an order category assigned to our market_buyer.py."""
     if not category:
         return
-    hub = load_hub(path)
-    radar = hub["demand_radar"]
-    radar["buyer_orders"][category] = radar["buyer_orders"].get(category, 0) + 1
-    save_hub(hub, path)
+    with mutate_hub(path) as hub:
+        radar = hub.setdefault("demand_radar", default_hub()["demand_radar"])
+        radar["buyer_orders"][category] = radar["buyer_orders"].get(category, 0) + 1
 
 
 def get_sku_market_anchor(hub: dict[str, Any], sku: str, list_price: int) -> int:
