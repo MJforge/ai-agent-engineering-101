@@ -459,6 +459,9 @@ class Seller(AgentExecutor):
     def __init__(self, port: int):
         self.port = port
         self.open: dict[str, dict[str, Any]] = {}
+        # committed_units tracks units for which a signed receipt has been issued,
+        # guarding them against concurrent sales until ACP settlement is finalized.
+        self.committed_units: dict[str, float] = {}
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         task = context.current_task
@@ -471,23 +474,36 @@ class Seller(AgentExecutor):
         text = get_message_text(context.message) or ""
         now_ts = time.time()
 
-        # Session TTL Cleanup: purge abandoned negotiations (> 180s) so locked units return to stock
-        stale_tids = [tid for tid, d in self.open.items() if (now_ts - float(d.get("created_at") or now_ts)) > 180.0]
+        # Session TTL Cleanup: purge abandoned negotiations (> 90s) so reserved units return to stock
+        stale_tids = [tid for tid, d in self.open.items() if (now_ts - float(d.get("created_at") or now_ts)) > 90.0]
         for tid in stale_tids:
             self.open.pop(tid, None)
 
+        # Committed Units TTL Cleanup: purge after 120s timeout
+        stale_committed = [u for u, ts in self.committed_units.items() if (now_ts - ts) > 120.0]
+        for u in stale_committed:
+            self.committed_units.pop(u, None)
+
         inv = load_inventory(MARKET_DIR)
         is_round3_stock = int(inv.get("round", 0)) >= 3
+
+        # If a committed unit is already absent from the fresh market inventory, ACP settlement finished!
+        current_inv_unit_ids = {u.get("unit") for u in (inv.get("units") or [])}
+        settled_uids = [u for u in self.committed_units if u not in current_inv_unit_ids]
+        for u in settled_uids:
+            self.committed_units.pop(u, None)
 
         deal = self.open.get(task.id)
         if deal is None:
             if is_round3_stock:
                 catalog = load_catalog(MARKET_DIR)
-                taken_units = {
+                # Combined Lock: Negotiation Locks (self.open) + Checkout Settlement Locks (committed_units)
+                negotiating_units = {
                     d["unit"]["unit"]
                     for d in self.open.values()
                     if isinstance(d.get("unit"), dict) and d["unit"].get("unit")
                 }
+                taken_units = negotiating_units | set(self.committed_units.keys())
                 unit, demand_query = find_stock_unit(text, taken_units, inv, catalog)
                 record_inbound_inquiry(demand_query, matched=(unit is not None))
 
@@ -512,6 +528,8 @@ class Seller(AgentExecutor):
                 if initial_offer and initial_offer >= ask:
                     # Instant 1-message close if buyer offered at or above our opening ask!
                     final_price = ask
+                    # Instantly lock in committed_units so no concurrent buyer can grab this unit during checkout
+                    self.committed_units[unit["unit"]] = now_ts
                     receipt = {
                         "shop": SHOP_NAME,
                         "item": unit["sku"],
@@ -555,6 +573,7 @@ class Seller(AgentExecutor):
                     flush=True,
                 )
                 wants_warranty = any(kw in text.lower() for kw in ("warranty", "guarantee", "service", "care", "보증"))
+                # Immediate Opening Ask Lock: unit is bound to this task so concurrent buyers cannot touch it
                 self.open[task.id] = {
                     "mode": "round3_stock",
                     "unit": unit,
@@ -704,6 +723,8 @@ class Seller(AgentExecutor):
                     f"(cost={cost}, profit=+{profit_est}, grade={live_grade}, warranty={warranty}h) in {deal['rounds']} turn(s)!",
                     flush=True,
                 )
+                # Elevate to committed lock before deleting negotiation state
+                self.committed_units[u["unit"]] = now_ts
                 del self.open[task.id]
                 return
 
