@@ -9,12 +9,15 @@ Supports both:
 - Rounds 0-2 Backward Compatibility (`lamp`, `chair`, `bookshelf`): passes `market_test_week07.py` 25/25.
 """
 import argparse
+import asyncio
 import base64
 import json
 import math
 import os
 import random
 import re
+import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -455,6 +458,126 @@ def refresh_reviews_and_adapt_price() -> dict:
     return state
 
 
+def extract_buyer_offer(text: str, current_ask: int = 0, list_price: int = 0, sku: str = "") -> int | None:
+    """Robust fallback parser to extract buyer's price offer from text,
+    filtering out SKU codes, warranty hours, units, and distinguishing budget vs offer."""
+    if not text:
+        return None
+    # 1. Normalize comma-separated numbers: "1,200" -> "1200"
+    cleaned = re.sub(r"(\d),(\d{3})\b", r"\1\2", text)
+
+    # 2. Strip explicit SKU or standard hex SKU patterns
+    if sku:
+        cleaned = re.sub(re.escape(sku), "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b[gfGF][0-9a-fA-F]{7,10}\b", "", cleaned)
+
+    # 3. Strip time / warranty phrases: "6 hours", "6h", "24 hrs", "30 mins", "720h"
+    cleaned = re.sub(r"\b\d+\s*(?:h|hr|hrs|hours?|m|min|mins?|seconds?|days?|일|시간|분|초)\b", "", cleaned, flags=re.IGNORECASE)
+
+    # 4. Strip quantity / unit phrases: "1 unit", "2 pcs", "1개", "1ea"
+    cleaned = re.sub(r"\b\d+\s*(?:units?|pcs?|items?|pieces?|개|ea)\b", "", cleaned, flags=re.IGNORECASE)
+
+    # 5. Intent patterns
+    intent_patterns = [
+        r"(?i)(?:offer|counter|bid|제안|가격)\s*(?:is|of|at|:)?\s*(\d{2,7})",
+        r"(?i)(?:pay|give|afford)\s*(?:up to|at)?\s*(\d{2,7})",
+        r"(?i)(?:how about|what about|can you do|would you do)\s*(\d{2,7})",
+        r"(?i)(?:buy|take it|take)\s*(?:at|for)\s*(\d{2,7})",
+        r"(?i)\b(\d{2,7})\s*(?:credits?|won|원)",
+    ]
+    for pat in intent_patterns:
+        m = re.findall(pat, cleaned)
+        if m:
+            return int(m[-1])
+
+    # 6. Budget vs Offer distinction
+    budget_match = re.search(r"(?i)\bbudget\s*(?:is|of|:)?\s*(\d{2,7})\b", cleaned)
+    budget_val = int(budget_match.group(1)) if budget_match else None
+
+    # 7. Collect raw numbers
+    raw_nums = [int(x) for x in re.findall(r"\b\d+\b", cleaned)]
+    if not raw_nums:
+        return None
+    if len(raw_nums) == 1:
+        return raw_nums[0]
+
+    non_budget = [n for n in raw_nums if n != budget_val]
+    if non_budget:
+        ref_price = max(current_ask, list_price, 50)
+        viable = [n for n in non_budget if n >= 10 or n >= ref_price * 0.1]
+        if viable:
+            return viable[-1]
+        return non_budget[-1]
+    return raw_nums[-1]
+
+
+def get_harness_cmd() -> str:
+    """Read harness command from HARNESS_CMD env var or agent.json, with default fallback."""
+    if os.environ.get("HARNESS_CMD"):
+        return os.environ["HARNESS_CMD"]
+    agent_file = Path(__file__).resolve().parent / "agent.json"
+    if agent_file.exists():
+        try:
+            d = json.loads(agent_file.read_text(encoding="utf-8"))
+            if d.get("harness"):
+                return str(d["harness"])
+        except Exception:
+            pass
+    return "codex exec --skip-git-repo-check -m gpt-5.6-sol"
+
+
+def call_harness_for_offer(buyer_text: str, current_ask: int, list_price: int, hard_floor: int, sku: str = "") -> dict[str, Any] | None:
+    """Invoke LLM harness (Codex CLI) in an isolated directory with 2.5s timeout to parse offer & warranty intent."""
+    prompt = (
+        f"You are an AI negotiation assistant for an e-commerce shop.\n"
+        f"Item SKU: {sku}, List Price: {list_price}, Current Asking Price: {current_ask}, Reserve Floor: {hard_floor}.\n"
+        f"Buyer message: \"{buyer_text}\"\n"
+        f"Task: Extract the numeric offer price (integer only; ignore warranty hours like 6h and quantities) "
+        f"and whether the buyer requested a warranty.\n"
+        f"Output ONLY a JSON object: {{\"offer\": <int or null>, \"wants_warranty\": <true or false>}}\n"
+    )
+    empty_dir = tempfile.gettempdir()
+    tmp_out = Path(empty_dir) / f"harness_{os.getpid()}_{threading.get_ident()}_{int(time.time()*1000)}.json"
+    p = None
+    try:
+        base_cmd = get_harness_cmd()
+        cmd = f'{base_cmd} --ephemeral --cd "{empty_dir}" -o "{tmp_out}" -'
+        p = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=True,
+            text=True,
+        )
+        p.communicate(input=prompt, timeout=2.5)
+        if tmp_out.exists():
+            content = tmp_out.read_text(encoding="utf-8").strip()
+            m = re.search(r"\{.*\}", content, re.DOTALL)
+            if m:
+                data = json.loads(m.group(0))
+                if isinstance(data, dict):
+                    raw_offer = data.get("offer")
+                    offer_val = int(raw_offer) if isinstance(raw_offer, (int, float)) and raw_offer > 0 else None
+                    return {
+                        "offer": offer_val,
+                        "wants_warranty": bool(data.get("wants_warranty")),
+                    }
+    except Exception:
+        if p:
+            try:
+                p.kill()
+            except Exception:
+                pass
+    finally:
+        if tmp_out.exists():
+            try:
+                tmp_out.unlink()
+            except OSError:
+                pass
+    return None
+
+
 class Seller(AgentExecutor):
     def __init__(self, port: int):
         self.port = port
@@ -523,8 +646,7 @@ class Seller(AgentExecutor):
                 list_price = pricing["list_price"]
 
                 # Check if the buyer already included an initial offer price in their first message!
-                nums = [int(x) for x in re.findall(r"\b\d{3,7}\b", text) if int(x) != int(re.sub(r"\D", "", unit["sku"]) or -1)]
-                initial_offer = nums[-1] if nums and len(text.split()) <= 6 else None
+                initial_offer = extract_buyer_offer(text, current_ask=ask, list_price=list_price, sku=unit["sku"])
                 if initial_offer and initial_offer >= ask:
                     # Instant 1-message close if buyer offered at or above our opening ask!
                     final_price = ask
@@ -640,18 +762,44 @@ class Seller(AgentExecutor):
             await up.requires_input(say(opening_msg))
             return
 
-        # --- Subsequent Turns: Process Buyer's Offer ---
-        # Strip out SKU codes before extracting the buyer's numeric price offer
-        clean_text = re.sub(r"\b[gfGF][0-9a-fA-F]{7,10}\b", "", text)
-        m = re.findall(r"\d+", clean_text)
-        if not m:
+        # --- Subsequent Turns: Process Buyer's Offer via Hybrid AI Harness + Fallback ---
+        offer = None
+        wants_w = any(kw in text.lower() for kw in ("warranty", "guarantee", "service", "care", "보증"))
+
+        # 1. Primary: Async LLM Harness with strict 3.0s timeout
+        try:
+            curr_ask = int(deal.get("ask") or 100)
+            lp = int(deal.get("list_price") or curr_ask)
+            hf = int(deal.get("hard_floor") or 0)
+            sku_str = str(deal.get("item") or "")
+            ai_res = await asyncio.wait_for(
+                asyncio.to_thread(call_harness_for_offer, text, curr_ask, lp, hf, sku_str),
+                timeout=3.0,
+            )
+            if ai_res and ai_res.get("offer") is not None:
+                offer = ai_res["offer"]
+                if ai_res.get("wants_warranty"):
+                    wants_w = True
+                print(f"[seller-ai-parsed] AI extracted offer={offer}, warranty={wants_w} from: '{text[:50]}'", flush=True)
+        except Exception:
+            pass
+
+        # 2. Safety Fallback: Ultra-fast 0.001s precision regex parser if AI didn't return an offer
+        if offer is None:
+            offer = extract_buyer_offer(
+                text,
+                current_ask=int(deal.get("ask") or 100),
+                list_price=int(deal.get("list_price") or 100),
+                sku=str(deal.get("item") or ""),
+            )
+
+        if offer is None:
             await up.requires_input(say(f"Send your offer as a number. Current ask is {deal['ask']}."))
             return
 
-        offer = int(m[-1])
         deal["rounds"] += 1
         deal.setdefault("offers", []).append(offer)
-        if any(kw in text.lower() for kw in ("warranty", "guarantee", "service", "care", "보증")):
+        if wants_w:
             deal["wants_warranty"] = True
 
         if deal.get("mode") == "round3_stock":
