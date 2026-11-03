@@ -508,15 +508,27 @@ def sync_broken_and_payments(hub: dict[str, Any], market_dir: Path) -> list[dict
     return newly_attributed
 
 
-def record_inbound_inquiry(category_or_item: str, matched: bool, path: Path = STATE_FILE) -> None:
+def record_inbound_inquiry(category_or_item: str, matched: bool, path: Path = STATE_FILE, raw_text: str = "") -> None:
     """Record a buyer inquiry arriving at seller.py (including missed demand when out of stock)."""
     if not category_or_item:
         return
+    now = time.time()
     with mutate_hub(path) as hub:
         radar = hub.setdefault("demand_radar", default_hub()["demand_radar"])
         radar["inbound_wants"][category_or_item] = radar["inbound_wants"].get(category_or_item, 0) + 1
         if not matched:
             radar["missed_wants"][category_or_item] = radar["missed_wants"].get(category_or_item, 0) + 1
+            missed_ts = radar.setdefault("missed_ts", {})
+            arr = [t for t in missed_ts.get(category_or_item, []) if 0 <= now - float(t) <= 7200]
+            arr.append(now)
+            missed_ts[category_or_item] = arr[-50:]
+            if raw_text:
+                import re
+                for m in re.findall(r"\b([gfGF][0-9a-fA-F]{7,10})\b", raw_text):
+                    k = m.lower()
+                    s_arr = [t for t in missed_ts.get(k, []) if 0 <= now - float(t) <= 7200]
+                    s_arr.append(now)
+                    missed_ts[k] = s_arr[-50:]
 
 
 def record_buyer_order(category: str, path: Path = STATE_FILE) -> None:

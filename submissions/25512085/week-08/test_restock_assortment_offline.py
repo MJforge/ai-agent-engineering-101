@@ -266,6 +266,27 @@ class AssortmentTests(unittest.TestCase):
         self.state()["blocked"] = True
         self.assertEqual(self.buys(), {})
 
+    def test_full_catalog_high_cash_missed_1h_and_100k_goods_single_unit(self):
+        self.inv["balance"] = 6_300_000
+        for i in range(20):
+            self.item(f"food{i}", f"foodcat{i}", price=15_000, kind="food")
+        self.stock("food0", 20)
+        self.own("food1", n=3)  # sold-out food blocked when >=20 food units held
+        for i in range(35):
+            price = 180_000 if i < 10 else 30_000
+            self.item(f"G{i:08d}", f"goodscat{i}", price=price, kind="goods")
+        self.own("G00000000", n=4, age=300)  # sold-out proven goods -> qty=1 only
+        self.hub["demand_radar"]["missed_ts"] = {"g00000001": [NOW - 600]}  # 1h missed SKU
+        plan = self.plan()
+        buys = {b["sku"]: b["qty"] for b in plan["buy"]}
+        self.assertEqual(buys.get("G00000000"), 1)
+        self.assertEqual(buys.get("G00000001"), 1)
+        self.assertNotIn("food1", buys)
+        self.assertTrue(all(q == 1 for q in buys.values()))
+        self.assertTrue(all(self.catalog[s]["kind"] == "goods" for s in buys))
+        expanded_Auto = [s for s in buys if s not in ("G00000000", "G00000001")]
+        self.assertTrue(all(self.catalog[s]["list_price"] >= 100_000 for s in expanded_Auto))
+
 
 if __name__ == "__main__":
     unittest.main()

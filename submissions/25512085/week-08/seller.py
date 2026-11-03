@@ -663,7 +663,7 @@ class Seller(AgentExecutor):
                 }
                 taken_units = negotiating_units | set(self.committed_units.keys())
                 unit, demand_query = find_stock_unit(text, taken_units, inv, catalog)
-                record_inbound_inquiry(demand_query, matched=(unit is not None))
+                record_inbound_inquiry(demand_query, matched=(unit is not None), raw_text=text)
 
                 if unit is None:
                     print(f"[stock-miss] Out of stock for buyer request: {text[:80]} (recorded demand: {demand_query})", flush=True)
