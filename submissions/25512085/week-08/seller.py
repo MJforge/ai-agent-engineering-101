@@ -273,6 +273,18 @@ NO_CARE_WORDS = ("without care", "without safe-care", "without safecare", "no ca
                  "케어 없이", "보증 없이", "보증 빼고", "미포함")
 
 
+def care_terms(kind: str, warranty: int) -> dict[str, str]:
+    """Plain-language Safe-Care terms added to a goods receipt for the buyer to read. The kit and the market use
+    only warranty_hours; these fields restate it and claim nothing beyond what the market enforces."""
+    if kind != "goods":
+        return {}
+    if warranty > 0:
+        return {"care_plan": f"Safe-Care (안심케어) {warranty}h",
+                "refund_policy": f"the market refunds the full price if the item breaks within {warranty} h of the sale"}
+    return {"care_plan": "none (bought without Safe-Care)",
+            "refund_policy": "no refund if the item breaks"}
+
+
 def no_care_price(price: int, cost: int, break_rate: float) -> int:
     """The same deal without Safe-Care: lower by the expected refund, never below cost x 1.10."""
     return max(int(cost * 1.10), int(price * (1.0 - break_rate)))
@@ -614,6 +626,7 @@ class Seller(AgentExecutor):
                     }
                     if warranty > 0:
                         receipt["warranty_hours"] = warranty
+                    receipt.update(care_terms(unit.get("kind", ""), warranty))
                     receipt = sign_receipt(receipt)
                     await up.add_artifact(parts=[new_data_part(receipt)], name="receipt")
                     await up.complete(say(
@@ -794,6 +807,7 @@ class Seller(AgentExecutor):
                 }
                 if warranty > 0:
                     receipt["warranty_hours"] = warranty
+                receipt.update(care_terms(u.get("kind", ""), warranty))
                 receipt = sign_receipt(receipt)
 
                 await up.add_artifact(parts=[new_data_part(receipt)], name="receipt")
