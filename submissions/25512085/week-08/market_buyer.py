@@ -29,6 +29,8 @@ from typing import Any
 import httpx
 
 from store import (
+    BREAK_RATE,
+    GOODS_BREAK_WINDOW_H,
     load_catalog,
     load_hub,
     load_json_safe,
@@ -358,7 +360,8 @@ def pick_shop(shops: list[dict], memory: dict, item: str, budget: int) -> tuple[
     return shop_obj, f"Selected {chosen['name']} (score={chosen['score']}, visits={chosen['mem_count']})."
 
 
-def build_accept_policy(order_data: dict[str, Any], agreed_price: int, list_price: int) -> dict[str, Any]:
+def build_accept_policy(order_data: dict[str, Any], agreed_price: int, list_price: int,
+                        receipt_warranty_h: float = 0) -> dict[str, Any]:
     """Construct Round 3 pre-payment `accept` policy verified by market_kit.py before paying."""
     kind = order_data.get("kind")
     policy: dict[str, Any] = {"cert": True}
@@ -369,9 +372,11 @@ def build_accept_policy(order_data: dict[str, Any], agreed_price: int, list_pric
         policy["grades"] = ["A", "B", "C"]
     elif kind == "goods":
         policy["grades"] = ["A", "B", "C"]
-        # If we are paying a high price (>= 78% of list_price), require at least 1h warranty
-        if agreed_price >= int(list_price * 0.85):
-            policy["warranty_hours"] = 1
+        # The kit builds the checkout from the shop's own terms, not from our copy of the receipt. If the shop
+        # promised the full-window warranty, require it, so a checkout without it is not paid. Deals agreed
+        # without a warranty were already checked for positive expected surplus before getting here.
+        if receipt_warranty_h >= GOODS_BREAK_WINDOW_H:
+            policy["warranty_hours"] = GOODS_BREAK_WINDOW_H
     return policy
 
 
@@ -700,10 +705,27 @@ def main():
                 )
                 outcome = "no-service-deal"
 
+            # Goods without a warranty covering the break window: a broken unit is worth 0 to the order, so the
+            # expected surplus is (1 - break_rate) x list - price. Pay only while it stays positive; with the
+            # warranty a break is refunded and any price under list is worth it. No grade claim: assume C.
+            if is_round3 and order_data.get("kind") == "goods":
+                warranty_h = float(raw_receipt.get("warranty_hours") or 0)
+                claimed = str(raw_receipt.get("claim") or "C")
+                lp = int((catalog.get(rec_item) or {}).get("list_price") or list_price)
+                b = BREAK_RATE.get(claimed, BREAK_RATE["C"])
+                if warranty_h < GOODS_BREAK_WINDOW_H and (1 - b) * lp - recorded_price <= 0:
+                    final_receipt = None
+                    stars = 3
+                    review = (
+                        f"No deal: grade {claimed} {rec_item} at {recorded_price} with no {GOODS_BREAK_WINDOW_H} h "
+                        f"warranty is worth less than its price at a {round(b * 100)}% break rate (list {lp})."
+                    )
+                    outcome = "declined-no-warranty"
+
             # Round 3: an agreed receipt is not a purchase yet. The kit still has to verify the signatures and
             # pay through ACP, and it runs review.py only for paid deals. Park the deal under its order id;
             # review.py turns it into a purchase record and a shop-memory entry once the payment settled.
-            if is_round3:
+            if is_round3 and final_receipt is not None:
                 matched_sku = rec_item if rec_item in catalog else (target_sku_info["sku"] if target_sku_info else rec_item)
                 sku_meta = catalog.get(matched_sku) or {}
                 now_ts = int(time.time())
@@ -751,7 +773,8 @@ def main():
         "review": review,
     }
     if is_round3 and final_receipt is not None and recorded_price is not None:
-        result_line["accept"] = build_accept_policy(order_data, recorded_price, list_price)
+        result_line["accept"] = build_accept_policy(order_data, recorded_price, list_price,
+                                                    float(final_receipt.get("warranty_hours") or 0))
 
     print(json.dumps(result_line, ensure_ascii=False), flush=True)
 

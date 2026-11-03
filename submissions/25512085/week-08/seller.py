@@ -39,6 +39,8 @@ from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
 from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
 
 from store import (
+    BREAK_RATE,
+    GOODS_BREAK_WINDOW_H,
     get_sku_market_anchor,
     load_catalog,
     load_hub,
@@ -261,10 +263,8 @@ def find_stock_unit(text: str, taken_units: set[str], inv: dict[str, Any], catal
 
 
 # 안심케어 (Safe-Care) = the 6 h warranty on goods: if the unit breaks within it, the market refunds the full price
-# from our balance. Goods break within 6 h of the sale at these rates by grade: the instructor's figures in class
-# (2026-11-03). The market's agent.md and the week-09 page do not publish them.
-BREAK_RATE = {"A": 0.03, "B": 0.15, "C": 0.35}
-CARE_HOURS = 6
+# from our balance. Break rates by grade (BREAK_RATE) live in store.py, shared with market_buyer.py.
+CARE_HOURS = GOODS_BREAK_WINDOW_H
 # Without Safe-Care we expect to keep the whole price, so the fair discount is the expected refund: price x break rate.
 # Grade C is always sold with Safe-Care: without it a third of those buyers would lose the whole price.
 NO_CARE_GRADES = ("A", "B")

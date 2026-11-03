@@ -51,6 +51,13 @@ SAFE_FOOD_CATEGORIES = [
 ]
 
 
+# Goods break within GOODS_BREAK_WINDOW_H hours of the sale at these rates by grade: the instructor's figures in
+# class (2026-11-03). The market's agent.md and the week-09 page do not publish them. Shared by seller.py
+# (Safe-Care pricing) and market_buyer.py (whether to buy goods without a warranty).
+BREAK_RATE = {"A": 0.03, "B": 0.15, "C": 0.35}
+GOODS_BREAK_WINDOW_H = 6
+
+
 def default_hub() -> dict[str, Any]:
     return {
         "updated_at": 0,
