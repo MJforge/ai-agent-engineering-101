@@ -1,15 +1,15 @@
 """Round 3 Supply & Capital Allocation Engine (restock.py).
 
 Implements the Coupang-style 3-Stage Scale-Up Strategy:
-- Stage 1 (Seed): Invest up to 50% of starting capital (2,500,000 credits) into non-expiring,
-  permanent-grade, high-margin "goods" categories (80% budget share) using price-tiering
-  (P25 / P50 / P75 SKUs) so our stock matches any buyer order's [0.5x, 1.5x] `acceptable` window,
-  plus 720-hour shelf-life food categories (20% share).
+- Stage 1 (Seed): within a 2,500,000 stock cap, a few units in 9 "goods" categories plus 2 units in each of the
+  24 food categories whose shelf life outlasts the round, picking SKUs priced nearest the category's
+  median_price so they fall inside most orders' [0.5x, 1.5x] `acceptable` window.
 - Stage 2 (Demand-Driven Growth): Reinvest 75% of realized profit into expanding the inventory cap,
   prioritizing categories with the highest Demand Score (3.0x missed shop inquiries + 1.8x shop inquiries
   + 1.0x ledger settlements + forum demand). Our own buyer's orders are not demand our shop can serve.
 - Stage 3 (Full Assortment Scale-Up): Expand across all active categories while enforcing a strict
   cash reserve floor (half the balance, at most 1,500,000, at least 200,000 above the bankruptcy line).
+- End of round: no buying in the last 36 hours (stock left when the round ends is worth 0 to net profit).
 
 Outputs a single JSON line: {"buy": [{"sku": "...", "qty": 1..20}, ...]} (at most 10 lines).
 """
@@ -18,14 +18,17 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import math
+import statistics
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from store import (
-    SAFE_FOOD_CATEGORIES,
+    ROUND_END_TS,
     SEED_GOODS_CATEGORIES,
+    STOP_BUYING_BEFORE_END_S,
     apply_ledger_rows,
     fetch_ledger_rows,
     load_catalog,
@@ -46,47 +49,47 @@ MAX_GOODS_STAGE3_PRICE = 650_000
 MIN_FOOD_LIST_PRICE = 10_000
 MAX_FOOD_LIST_PRICE = 120_000
 
+# Food that outlasts the round (two weeks): no storage fee and no breakage, so it is the cheap way to be visible in
+# many categories while we learn what sells. The kit lists a shop to a buyer only with stock of a SKU in the order's
+# acceptable price window (market_kit.py, offers), so being in a category means holding SKUs near its usual price.
+ROUND_HOURS = 336
+SEED_FOOD_CATEGORY_COUNT = 24
 
-def select_tiered_skus(
+
+def long_shelf_food_categories(cat_map: dict[str, list[dict[str, Any]]], n: int = SEED_FOOD_CATEGORY_COUNT) -> list[str]:
+    """The n food categories whose shelf life outlasts the round, most SKUs first."""
+    cats = [c for c, skus in cat_map.items()
+            if skus and skus[0].get("kind") == "food" and (skus[0].get("shelf_hours") or 0) >= ROUND_HOURS]
+    return sorted(cats, key=lambda c: -len(cat_map[c]))[:n]
+
+
+def category_medians(market_dir: Path, cat_map: dict[str, list[dict[str, Any]]]) -> dict[str, float]:
+    """median_price per category from demand.json (the market's), else the catalog median of the category."""
+    medians = {c: float(statistics.median(int(x.get("list_price", 0)) for x in skus))
+               for c, skus in cat_map.items() if skus}
+    for d in load_json_safe(market_dir / "demand.json", []) or []:
+        if isinstance(d, dict) and d.get("category") in medians and d.get("median_price"):
+            medians[d["category"]] = float(d["median_price"])
+    return medians
+
+
+def select_near_median(
     cat_skus: list[dict[str, Any]],
     held_skus: set[str],
+    median: float,
+    n: int,
     min_price: int,
     max_price: int,
-    tiers: tuple[float, ...] = (0.30, 0.55, 0.80),
 ) -> list[dict[str, Any]]:
-    """Pick representative SKUs at P30, P55, P80 price quantiles within [min_price, max_price]
-    so that any buyer order's 0.5x-1.5x acceptable window is covered by at least one SKU."""
-    eligible = [
-        x for x in cat_skus
-        if min_price <= int(x.get("list_price", 0)) <= max_price
-    ]
-    if not eligible:
-        eligible = sorted(cat_skus, key=lambda x: int(x.get("list_price", 0)))
-    else:
-        eligible.sort(key=lambda x: int(x.get("list_price", 0)))
-    if not eligible:
-        return []
-
-    picked: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for q in tiers:
-        idx = min(len(eligible) - 1, max(0, int(len(eligible) * q)))
-        # Search outward from idx for an unheld SKU first
-        best = None
-        for offset in range(len(eligible)):
-            for cand_idx in (idx + offset, idx - offset):
-                if 0 <= cand_idx < len(eligible):
-                    cand = eligible[cand_idx]
-                    sku = cand["sku"]
-                    if sku not in seen and sku not in held_skus:
-                        best = cand
-                        break
-            if best:
-                break
-        if best:
-            seen.add(best["sku"])
-            picked.append(best)
-    return picked
+    """The n unheld SKUs priced closest to the category median (by ratio): they fall inside the most orders'
+    0.5x-1.5x acceptable windows. Staying near the median (0.75x-1.33x) comes first; min_price/max_price only
+    narrow the choice when that still leaves SKUs near the median, so a cheap category is not skipped."""
+    unheld = [x for x in cat_skus if x["sku"] not in held_skus]
+    near = [x for x in unheld if 0.75 * median <= int(x.get("list_price", 0)) <= 1.33 * median]
+    bounded = [x for x in near if min_price <= int(x.get("list_price", 0)) <= max_price]
+    pool = bounded or [x for x in near if int(x.get("list_price", 0)) <= max_price] or near
+    pool.sort(key=lambda x: abs(math.log(max(1, int(x.get("list_price", 0))) / max(1.0, median))))
+    return pool[:n]
 
 
 def compute_category_demand_scores(
@@ -150,6 +153,10 @@ def build_restock_plan(market_dir: Path) -> dict[str, Any]:
     if balance < int(inv.get("bankrupt_line") or 0) and int(inv.get("bankruptcies_left") or 0) > 0 and not sellable:
         return {"buy": [], "bankrupt": True}
 
+    # Near the end of the round, stock bought now is unlikely to sell before it is worth 0: stop buying
+    if time.time() > ROUND_END_TS - STOP_BUYING_BEFORE_END_S:
+        return {"buy": []}
+
     # The ledger fetch (up to a few seconds) runs before taking the lock, so seller.py is not kept waiting
     rows = fetch_ledger_rows(int(load_hub().get("ledger_seq", 0)))
     with mutate_hub() as hub:
@@ -186,6 +193,7 @@ def plan_with_hub(
     cat_unit_counts: dict[str, int] = collections.Counter(u.get("category", "") for u in units)
 
     demand_scores = compute_category_demand_scores(hub, set(cat_map.keys()), forum_posts)
+    medians = category_medians(market_dir, cat_map)
 
     # Prioritize candidate categories:
     # 1. High-demand categories from Demand Radar (where score > 0 and stock < 4)
@@ -197,7 +205,7 @@ def plan_with_hub(
     ]
 
     candidate_categories: list[str] = []
-    for c in ranked_demand_cats + SEED_GOODS_CATEGORIES + SAFE_FOOD_CATEGORIES:
+    for c in ranked_demand_cats + SEED_GOODS_CATEGORIES + long_shelf_food_categories(cat_map):
         if c in cat_map and c not in candidate_categories:
             candidate_categories.append(c)
 
@@ -233,12 +241,12 @@ def plan_with_hub(
         if kind == "food" and shelf is not None and shelf < 96 and not is_hot:
             continue
 
+        median = medians.get(cat) or 0.0
         if kind == "goods":
-            tiers = (0.25, 0.55, 0.80) if cat in SEED_GOODS_CATEGORIES else (0.40, 0.70)
-            picks = select_tiered_skus(cat_skus, held_skus, MIN_GOODS_LIST_PRICE, max_goods_price, tiers)
+            n = 3 if cat in SEED_GOODS_CATEGORIES else 2
+            picks = select_near_median(cat_skus, held_skus, median, n, MIN_GOODS_LIST_PRICE, max_goods_price)
         else:
-            tiers = (0.35, 0.70)
-            picks = select_tiered_skus(cat_skus, held_skus, MIN_FOOD_LIST_PRICE, MAX_FOOD_LIST_PRICE, tiers)
+            picks = select_near_median(cat_skus, held_skus, median, 2, MIN_FOOD_LIST_PRICE, MAX_FOOD_LIST_PRICE)
 
         for sku_info in picks:
             if len(buy_orders) >= 10 or spent_est >= tick_budget or current_cat_qty >= max_cat_units:

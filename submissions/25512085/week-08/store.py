@@ -18,6 +18,7 @@ import statistics
 import threading
 import time
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -38,17 +39,8 @@ SEED_GOODS_CATEGORIES = [
     "조명/전기용품>조명>램프/전구/조명",
 ]
 
-# Long-shelf-life (720h = 30 days) food categories with zero storage fee and zero spoilage risk
-SAFE_FOOD_CATEGORIES = [
-    "식품>음료>주스/코코아/생수",
-    "식품>음료>커피/차",
-    "식품>시리얼/곡물/콩류>곡물",
-    "식품>김치/반찬/즉석요리>찌개/탕류/장류",
-    "식품>양념/조미료/소스>소스/양념/조미료",
-    "식품>육류>가공/조리 육류",
-    "식품>조리/가공 과일/야채/견과류>조리/가공 견과류",
-    "식품>기타 가공식품>기타 가공식품",
-]
+# Seed food categories are no longer a fixed list: restock.py picks the long-shelf ones from the catalog
+# (long_shelf_food_categories).
 
 
 # Goods break within GOODS_BREAK_WINDOW_H hours of the sale at these rates by grade: the instructor's figures in
@@ -56,6 +48,20 @@ SAFE_FOOD_CATEGORIES = [
 # (Safe-Care pricing) and market_buyer.py (whether to buy goods without a warranty).
 BREAK_RATE = {"A": 0.03, "B": 0.15, "C": 0.35}
 GOODS_BREAK_WINDOW_H = 6
+
+# Round 3 ends 2026-11-17 23:59 KST (week-08 page). Stock left then is worth 0 to net profit (agent.md: "stock
+# that never sells is a loss"), so restock stops buying near the end and seller.py clears stock in the last day.
+# MARKET_ROUND_END (epoch seconds) overrides it, for tests.
+ROUND_END_TS = float(os.environ.get("MARKET_ROUND_END") or
+                     datetime(2026, 11, 17, 23, 59, tzinfo=timezone(timedelta(hours=9))).timestamp())
+CLEARANCE_WINDOW_S = 24 * 3600
+STOP_BUYING_BEFORE_END_S = 36 * 3600
+
+
+def clearance_factor(now: float | None = None) -> float:
+    """1.0 until the last CLEARANCE_WINDOW_S of the round, then down linearly to 0.0 at the end."""
+    left = ROUND_END_TS - (time.time() if now is None else now)
+    return max(0.0, min(1.0, left / CLEARANCE_WINDOW_S))
 
 
 def default_hub() -> dict[str, Any]:

@@ -41,6 +41,7 @@ from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
 from store import (
     BREAK_RATE,
     GOODS_BREAK_WINDOW_H,
+    clearance_factor,
     get_sku_market_anchor,
     load_catalog,
     load_hub,
@@ -286,8 +287,9 @@ def care_terms(kind: str, warranty: int) -> dict[str, str]:
 
 
 def no_care_price(price: int, cost: int, break_rate: float) -> int:
-    """The same deal without Safe-Care: lower by the expected refund, never below cost x 1.10."""
-    return max(int(cost * 1.10), int(price * (1.0 - break_rate)))
+    """The same deal without Safe-Care: lower by the expected refund, not below cost x 1.10 (or below the price
+    itself, which can already be under that in the end-of-round clearance)."""
+    return max(min(int(cost * 1.10), price), int(price * (1.0 - break_rate)))
 
 
 def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) -> dict[str, Any]:
@@ -349,6 +351,14 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
     open_ask = max(open_ask, hard_floor)
     r1_target = min(open_ask, max(hard_floor, r1_target))
     r2_target = min(r1_target, max(hard_floor, r2_target))
+
+    # End-of-round clearance: stock left when the round ends is worth 0, so in the last day every price slides
+    # linearly toward a salvage price of a quarter of cost; selling below cost still beats keeping the unit.
+    f = clearance_factor()
+    if f < 1.0:
+        salvage = max(1, int(cost * 0.25))
+        open_ask, r1_target, r2_target, hard_floor = (
+            int(salvage + (p - salvage) * f) for p in (open_ask, r1_target, r2_target, hard_floor))
     disc_from_list = max(1, int(round((1.0 - open_ask / max(1, list_price)) * 100)))
     return {
         "open_ask": open_ask,
@@ -763,7 +773,7 @@ class Seller(AgentExecutor):
                 return
 
             cost = int(u.get("cost") or 100)
-            hard_floor = max(cost, int(deal.get("hard_floor") or cost))
+            hard_floor = int(deal.get("hard_floor") or cost)   # above cost except in the end-of-round clearance
             r1_target = int(deal.get("r1_target") or hard_floor)
             r2_target = int(deal.get("r2_target") or hard_floor)
 
@@ -790,7 +800,8 @@ class Seller(AgentExecutor):
                 or (deal["rounds"] >= 3 and offer >= hard_floor)
             )
 
-            if should_accept and offer >= cost:
+            # Never below cost, except in the end-of-round clearance, where the floor itself goes below cost
+            if should_accept and offer >= min(cost, hard_floor):
                 current_ask = in_mode(int(deal["ask"]))
                 final_price = min(current_ask, int(offer))
                 # Goods carry Safe-Care unless the buyer explicitly took the cheaper no-care price; food has none
