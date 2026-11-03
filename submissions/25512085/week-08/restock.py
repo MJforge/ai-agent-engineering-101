@@ -6,8 +6,8 @@ Implements the Coupang-style 3-Stage Scale-Up Strategy:
   (P25 / P50 / P75 SKUs) so our stock matches any buyer order's [0.5x, 1.5x] `acceptable` window,
   plus 720-hour shelf-life food categories (20% share).
 - Stage 2 (Demand-Driven Growth): Reinvest 75% of realized profit into expanding the inventory cap,
-  prioritizing categories with the highest Demand Score (2.5x missed shop inquiries + 1.5x buyer orders
-  + 1.0x ledger settlements + forum demand).
+  prioritizing categories with the highest Demand Score (3.0x missed shop inquiries + 1.8x shop inquiries
+  + 1.0x ledger settlements + forum demand). Our own buyer's orders are not demand our shop can serve.
 - Stage 3 (Full Assortment Scale-Up): Expand across all active categories while enforcing a strict
   cash reserve floor (half the balance, at most 1,500,000, at least 200,000 above the bankruptcy line).
 
@@ -94,11 +94,10 @@ def compute_category_demand_scores(
     all_categories: set[str],
     forum_posts: list[dict[str, Any]],
 ) -> dict[str, float]:
-    """Combine 1st-party shop inquiries, missed demand, buyer orders, ledger settles, and forum mentions."""
+    """Combine 1st-party shop inquiries, missed demand, ledger settles, and forum mentions."""
     radar = hub.get("demand_radar", {})
     inbound = radar.get("inbound_wants", {})
     missed = radar.get("missed_wants", {})
-    buyer_ord = radar.get("buyer_orders", {})
     settles = radar.get("market_settles", {})
 
     # Map leaf category names (e.g. "침구", "김치") to full category paths
@@ -121,7 +120,8 @@ def compute_category_demand_scores(
 
     add_signal(missed, 3.0)       # Highest priority: buyers knocked on our door and we had no stock!
     add_signal(inbound, 1.8)      # Buyers actively asking our shop
-    add_signal(buyer_ord, 1.5)    # Categories our own buyer was ordered to buy
+    # radar["buyer_orders"] (our own buyer's orders) is left out on purpose: a shop and a buyer with the same
+    # owner cannot settle with each other, so those categories are not demand our shop can sell into.
     add_signal(settles, 1.0)      # Confirmed market-wide settlements
 
     # Scan recent forum posts for category leaf mentions
