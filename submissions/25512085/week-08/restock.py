@@ -1,20 +1,8 @@
-"""Round 3 Supply & Capital Allocation Engine (restock.py).
+"""Conservative own-turnover restocking with a persistent 200,000-credit window cap.
 
-Implements the Coupang-style 3-Stage Scale-Up Strategy:
-- Supply windows: supply opens 3 minutes every 20 (agent.md); a plan is printed only while one is open or about to.
-- Seed (small): one SKU near the category median in 4 cheaper "goods" categories and in 10 food categories whose
-  shelf life outlasts the round, so the shop is visible from the first window (median-priced SKUs fall inside most
-  orders' [0.5x, 1.5x] `acceptable` window). What sells is then read from the public ledger (any shop's settled
-  deals), not learned by stocking widely: SKUs sold in the last 3 hours are bought first, deep enough to last
-  until the next window.
-- Stage 2 (Demand-Driven Growth): Reinvest 75% of realized profit into expanding the inventory cap,
-  prioritizing categories with the highest Demand Score (3.0x missed shop inquiries + 1.8x shop inquiries
-  + 1.0x ledger settlements + forum demand). Our own buyer's orders are not demand our shop can serve.
-- Stage 3 (Full Assortment Scale-Up): Expand across all active categories while enforcing a strict
-  cash reserve floor (half the balance, at most 1,500,000, at least 200,000 above the bankruptcy line).
-- End of round: no buying in the last 36 hours (stock left when the round ends is worth 0 to net profit).
-
-Outputs a single JSON line: {"buy": [{"sku": "...", "qty": 1..20}, ...]} (at most 10 lines).
+Market settlements select candidates, never purchase depth. Existing cash-floor,
+shelf-life, bankruptcy and end-of-round safeguards remain in force.
+Outputs one JSON line: {"buy": [{"sku": "...", "qty": 1..20}, ...]}.
 """
 from __future__ import annotations
 
@@ -34,10 +22,11 @@ from store import (
     STOP_BUYING_BEFORE_END_S,
     apply_ledger_rows,
     fetch_ledger_rows,
+    fetch_own_shop_urls,
     load_catalog,
     load_hub,
     load_inventory,
-     load_json_safe,
+    load_json_safe,
     mutate_hub,
     queue_forum_action,
     update_capital_stage,
@@ -59,12 +48,29 @@ ROUND_HOURS = 336
 SEED_FOOD_CATEGORY_COUNT = 10
 SEED_GOODS_COUNT = 4                # seed goods categories whose median list price is at most SEED_GOODS_MAX_MEDIAN
 SEED_GOODS_MAX_MEDIAN = 60_000
-RECENT_S = 3 * 3600                 # "selling now" = settled in the ledger within the last 3 hours
-HOT_CAP_GOODS, HOT_CAP_FOOD = 4, 8  # units per category once the ledger or our inquiries show demand
-HOT_SKU_MAX = 6                     # units per selling SKU: 1 + one per 3 recent market sales, up to this
+RECENT_S = 3 * 3600                 # Market signals rank cold-start candidates only.
 # Supply opens for 3 minutes every 20 (agent.md); outside a window the kit waits up to 90 s per line and skips it.
 # So plan only when a window is open or opens within this many seconds.
 WINDOW_LEAD_S = 60
+WINDOW_BUDGET = 200_000
+OWN_RECENT_S = 20 * 60
+TARGET_CAPS = {"G97cd0437": 2, "Gef4d3036": 2, "G0be9ed07": 2,
+               "Ge62449c9": 2, "G07ec17d5": 3}
+
+
+def supply_window(inv: dict[str, Any]) -> tuple[float, float] | None:
+    """Missing/invalid window metadata is not permission to buy."""
+    window = inv.get("restock") or {}
+    try:
+        opens, closes = float(window["opens_at"]), float(window["closes_at"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    now = time.time()
+    if not (math.isfinite(opens) and math.isfinite(closes) and opens < closes):
+        return None
+    if not opens - WINDOW_LEAD_S <= now < closes:
+        return None
+    return opens, closes
 
 
 def long_shelf_food_categories(cat_map: dict[str, list[dict[str, Any]]], n: int = SEED_FOOD_CATEGORY_COUNT) -> list[str]:
@@ -169,14 +175,16 @@ def build_restock_plan(market_dir: Path) -> dict[str, Any]:
     if time.time() > ROUND_END_TS - STOP_BUYING_BEFORE_END_S:
         return {"buy": []}
 
-    # Supply window: plan only while it is open or about to open (no "restock" field: let the kit try)
-    window = inv.get("restock") or {}
-    if window and not window.get("open") and float(window.get("opens_at") or 0) - time.time() > WINDOW_LEAD_S:
-        return {"buy": []}
-
     # The ledger fetch (up to a few seconds) runs before taking the lock, so seller.py is not kept waiting
-    rows = fetch_ledger_rows(int(load_hub().get("ledger_seq", 0)))
+    snapshot = load_hub()
+    rows = fetch_ledger_rows(int(snapshot.get("ledger_seq", 0)))
+    window = supply_window(inv)
+    # Backfill supplies on deployment/window transition even if a different hook consumed their seqs.
+    if window and str(window) not in snapshot.get("restock_windows", {}):
+        rows += fetch_ledger_rows(0)
+    own_urls = fetch_own_shop_urls()
     with mutate_hub() as hub:
+        hub["own_shop_urls"] = sorted(set(hub.get("own_shop_urls", [])) | set(own_urls))
         return plan_with_hub(hub, market_dir, catalog, inv, rows)
 
 
@@ -193,8 +201,20 @@ def plan_with_hub(
     forum_posts = load_json_safe(market_dir / "forum.json", []) or []
 
     stage = int(cs.get("stage", 1))
+    window = supply_window(inv)
+    if window is None or time.time() > ROUND_END_TS - STOP_BUYING_BEFORE_END_S:
+        return {"buy": []}
+    opens, closes = window
+    actual = sum(s["total"] for s in hub.get("own_supplies", {}).values()
+                 if opens <= s["ts"] < closes)
+    budget_state = hub.setdefault("restock_windows", {}).setdefault(
+        str(window), {"baseline_actual": actual, "reserved": 0})
+    # Failed plans stay reserved for this window. Actual successes replace, rather
+    # than double-charge, those estimates; deployment's prior actual spending stays charged.
+    used = max(actual, budget_state["baseline_actual"] + budget_state["reserved"])
     avail_budget = int(cs.get("available_budget", 0))
-    if avail_budget < 8_000:
+    tick_budget = min(avail_budget, max(0, WINDOW_BUDGET - used))
+    if tick_budget <= 0:
         return {"buy": []}
 
     # Group catalog SKUs by category
@@ -207,13 +227,12 @@ def plan_with_hub(
     # Analyze current active inventory
     units = [u for u in (inv.get("units") or []) if u.get("grade") != "expired"]
     held_skus = {u["sku"] for u in units if u.get("sku")}
-    cat_unit_counts: dict[str, int] = collections.Counter(u.get("category", "") for u in units)
 
-    # Recent market sales from the ledger (every shop's settled deals, ours included): what sells right now.
+    # Market sales rank candidates only; only our own shop's recent sales justify depth.
     now_s = time.time()
     radar = hub.get("demand_radar", {})
-    sku_recent = {s: n for s, ts in (radar.get("sku_sold_ts") or {}).items()
-                  if (n := sum(1 for t in ts if now_s - t <= RECENT_S)) > 0}
+    sku_recent = {s: n for s, ts in (radar.get("own_sku_sold_ts") or {}).items()
+                  if (n := sum(1 for t in ts if 0 <= now_s - t <= OWN_RECENT_S)) > 0}
     cat_recent = {c: n for c, ts in (radar.get("cat_sold_ts") or {}).items()
                   if (n := sum(1 for t in ts if now_s - t <= RECENT_S)) > 0}
 
@@ -234,13 +253,11 @@ def plan_with_hub(
     max_goods_price = MAX_GOODS_STAGE3_PRICE if stage >= 3 else MAX_GOODS_STAGE1_PRICE
     buy_orders: list[dict[str, Any]] = []
     spent_est = 0
-    tick_budget = int(avail_budget * (0.75 if len(units) < 10 else 0.50))
-    tick_budget = max(min(avail_budget, 250_000), tick_budget)
 
     def add_line(sku: str, qty: int) -> int:
         """Queue qty units of sku if the tick budget allows; returns how many were queued."""
         nonlocal spent_est
-        unit_cost = max(1, int(int(catalog.get(sku, {}).get("list_price", 0)) * 0.65))   # A grade costs 55-75%
+        unit_cost = max(1, math.ceil(int(catalog.get(sku, {}).get("list_price", 0)) * 0.75))
         qty = min(qty, 20, (tick_budget - spent_est) // unit_cost)
         if qty <= 0:
             return 0
@@ -250,39 +267,55 @@ def plan_with_hub(
         spent_est += unit_cost * qty
         return qty
 
-    for cat in candidate_categories:
-        if len(buy_orders) >= 10 or spent_est >= tick_budget:
+    # Known small baselines are targets, never orders to purchase regardless of stock.
+    candidates = list(TARGET_CAPS) + sorted(sku_recent, key=lambda s: -sku_recent[s])
+    for sku in dict.fromkeys(candidates):
+        if len(buy_orders) >= 10:
             break
-        cat_skus = cat_map[cat]
-        kind = cat_skus[0].get("kind", "goods")
-        shelf = cat_skus[0].get("shelf_hours")
-        is_hot = demand_scores.get(cat, 0) >= 2.0
-        # Perishable short-shelf food (< 96h) only when demand is observed
-        if kind == "food" and shelf is not None and shelf < 96 and not is_hot:
+        info = catalog.get(sku)
+        if not info:
             continue
-        cap = (HOT_CAP_GOODS if kind == "goods" else HOT_CAP_FOOD) if is_hot else (1 if kind == "goods" else 2)
-        cat_qty = cat_unit_counts.get(cat, 0)
+        count = sku_recent.get(sku, 0)
+        kind = info.get("kind", "goods")
+        if kind == "food" and info.get("shelf_hours") is not None and info["shelf_hours"] < 96 and not count:
+            continue
+        # No new SKU experiments while the shop has stock. An explicitly capped
+        # baseline is the only exception, not a licence for market-wide exploration.
+        if units and sku not in held_skus and sku not in TARGET_CAPS:
+            continue
+        cap = TARGET_CAPS.get(sku, 3 if kind == "goods" else 4)
+        target = cap if sku in TARGET_CAPS else min(cap, count + 1)
+        if count and sku in TARGET_CAPS:
+            target = min(cap, max(1, math.ceil(count * 1.25)))
+        if kind == "goods" and int(info.get("list_price", 0)) >= 80_000:
+            # High-ticket goods need demonstrated own turnover; never grow a
+            # position already at target. Worst-case unit cost still gates buys.
+            if not count or held_count[sku] >= cap:
+                continue
+        need = target - held_count[sku]
+        if need > 0:
+            add_line(sku, need)
 
-        # 1. SKUs of this category that sold recently: keep enough to last until the next supply window
-        sold_here = sorted((s for s in sku_recent if catalog.get(s, {}).get("category") == cat and
-                            int(catalog[s].get("list_price", 0)) <= (max_goods_price if kind == "goods" else MAX_FOOD_LIST_PRICE)),
-                           key=lambda s: -sku_recent[s])
-        for sku in sold_here:
-            if len(buy_orders) >= 10 or cat_qty >= cap:
+    # Only a genuinely empty shop may seed new categories. Market signals select
+    # candidates, but do not increase seed quantities or the shared window budget.
+    if not units:
+        for cat in candidate_categories:
+            if len(buy_orders) >= 10:
                 break
-            target = min(HOT_SKU_MAX, 1 + sku_recent[sku] // 3)
-            need = min(target - held_count[sku], cap - cat_qty)
-            if need > 0:
-                cat_qty += add_line(sku, need)
+            cat_skus = cat_map[cat]
+            kind = cat_skus[0].get("kind", "goods")
+            shelf = cat_skus[0].get("shelf_hours")
+            if kind == "food" and shelf is not None and shelf < 96:
+                continue
+            if any(catalog[s].get("category") == cat for s in held_skus if s in catalog):
+                continue
+            lo, hi = (MIN_GOODS_LIST_PRICE, min(max_goods_price, 79_999)) if kind == "goods" else (MIN_FOOD_LIST_PRICE, MAX_FOOD_LIST_PRICE)
+            for info in select_near_median(cat_skus, held_skus, medians.get(cat, 0), 1, lo, hi):
+                if int(info.get("list_price", 0)) > hi:
+                    continue
+                add_line(info["sku"], 1 if kind == "goods" else 2)
 
-        # 2. Otherwise a SKU near the category median, one unit (food: two), to be visible in this category
-        if not sold_here and cat_qty < cap:
-            median = medians.get(cat) or 0.0
-            lo, hi = (MIN_GOODS_LIST_PRICE, max_goods_price) if kind == "goods" else (MIN_FOOD_LIST_PRICE, MAX_FOOD_LIST_PRICE)
-            for sku_info in select_near_median(cat_skus, held_skus, median, 1, lo, hi):
-                if len(buy_orders) >= 10:
-                    break
-                cat_qty += add_line(sku_info["sku"], min(1 if kind == "goods" else 2, cap - cat_qty))
+    budget_state["reserved"] += spent_est
 
     # Optional Shop Forum promotion (max 1 post per 320s) when we have rich certified stock
     now = int(time.time())

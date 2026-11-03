@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import statistics
 import threading
@@ -307,6 +308,19 @@ def fetch_ledger_rows(seq: int, timeout: float = 4.0) -> list[dict[str, Any]]:
         return []
 
 
+def fetch_own_shop_urls(timeout: float = 2.0) -> list[str]:
+    """Public identity bootstrap only; callers must perform this outside the hub lock."""
+    try:
+        req = urllib.request.Request(f"{MARKET_URL}/api/shops", headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        shops = data.get("shops", []) if isinstance(data, dict) else data
+        return [str(s["url"]).rstrip("/") for s in shops
+                if s.get("name") == OWN_NAME and s.get("url")]
+    except Exception:
+        return []
+
+
 def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: dict[str, dict[str, Any]]) -> None:
     """Update demand_radar from rows fetched by fetch_ledger_rows. Call it inside mutate_hub.
     Counts only Round 3 'settle' entries: in Round 3 a deal counts only once it is settled, and the
@@ -318,6 +332,22 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
     last_seq = int(hub.get("ledger_seq", 0))
     seq = last_seq
     seen_seqs = set()
+
+    # Identity and supply accounting can be backfilled even when another hook advanced the cursor.
+    own_urls = set(hub.get("own_shop_urls") or [])
+    supplies = hub.setdefault("own_supplies", {})
+    for e in rows:
+        data = e.get("data") or {}
+        if e.get("kind") == "join" and data.get("role") == "shop" and data.get("name") == OWN_NAME:
+            url = data.get("url") or data.get("shop")
+            if url:
+                own_urls.add(str(url).rstrip("/"))
+        if e.get("kind") == "supply" and data.get("shop") == OWN_NAME:
+            total = data.get("total")
+            if isinstance(total, (int, float)) and total > 0 and e.get("ts") is not None:
+                supplies[str(e.get("seq"))] = {"ts": float(e["ts"]), "total": math.ceil(total),
+                                               "qty": data.get("qty")}
+    hub["own_shop_urls"] = sorted(own_urls)
 
     # Fast case-insensitive catalog lookup for canonical SKU & category
     cat_lookup: dict[str, tuple[str, str]] = {}
@@ -358,6 +388,11 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
 
         # When it sold, per SKU and per category, so restock can weigh recent sales (other shops' included)
         ts = float(e.get("ts") or time.time())
+        shop = str(data.get("shop") or data.get("seller") or "").rstrip("/")
+        if shop in own_urls:
+            own_ts = radar.setdefault("own_sku_sold_ts", {}).setdefault(canonical_sku, [])
+            own_ts.append(ts)
+            radar["own_sku_sold_ts"][canonical_sku] = own_ts[-200:]
         for key, bucket, keep in ((canonical_sku, "sku_sold_ts", 40), (cat, "cat_sold_ts", 200)):
             arr_ts = radar.setdefault(bucket, {}).setdefault(key, [])
             arr_ts.append(ts)
