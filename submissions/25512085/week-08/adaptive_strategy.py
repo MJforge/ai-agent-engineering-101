@@ -94,7 +94,7 @@ def decide_restock(hub, inv, now, *, inventory_fresh=False):
 
 def record_failure(hub, order, url, sku, reason, now):
     """One failure per order/pair, not one per counter/retry. No inferred shop guilt."""
-    if not order or reason not in ("price", "rejected", "timeout", "unsigned"):
+    if not order or reason not in ("price", "rejected", "timeout", "network-timeout", "unsigned"):
         return
     state = hub.setdefault("adaptive_strategy", {})
     events = [e for e in state.get("buyer_failures", []) if now - INTERVAL_S < e["ts"] <= now]
@@ -115,7 +115,7 @@ def refresh_buyer_policy(hub, now):
     grouped = {}
     for e in events:
         # Only transport/signature failures span SKUs. Price/stock stay pair-local.
-        scope = "" if e["reason"] in ("timeout", "unsigned") else e["sku"]
+        scope = "" if e["reason"] in ("network-timeout", "unsigned") else e["sku"]
         key = (e["url"], scope, e["reason"])
         grouped.setdefault(key, set()).add(e["order"])
     cooldowns = [{"url": url, "sku": sku, "reason": reason, "failures": len(orders),

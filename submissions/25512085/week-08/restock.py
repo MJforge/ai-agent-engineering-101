@@ -16,7 +16,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from adaptive_strategy import MAX_EXPLORATION_SKUS, MAX_WINDOW_BUDGET, decide_restock
+from adaptive_strategy import (
+    MAX_EXPLORATION_SKUS,
+    MAX_EXPLORATION_UNITS,
+    MAX_WINDOW_BUDGET,
+    decide_restock,
+)
 
 from store import (
     ROUND_END_TS,
@@ -280,13 +285,15 @@ def plan_with_hub(
         eff_window_budget = PROFITABLE_WINDOW_BUDGET if is_cash_rich else WINDOW_BUDGET
     exp_per_window = 8 if (is_cash_rich and is_full_catalog) else EXPLORATION_PER_WINDOW
     exp_skus_cap = 55 if (is_cash_rich and is_full_catalog) else EXPLORATION_SKUS
-    exp_units_cap = 95 if (is_cash_rich and is_full_catalog) else EXPLORATION_UNITS
+    exp_units_cap = MAX_EXPLORATION_UNITS if (is_cash_rich and is_full_catalog) else EXPLORATION_UNITS
     if is_cash_rich and is_full_catalog:
         exp_skus_cap = min(MAX_EXPLORATION_SKUS, max(exp_skus_cap, strategy.get("exploration_skus", exp_skus_cap)))
     # A policy/cash change never raises an already-started window's cap.
     eff_window_budget = min(eff_window_budget, MAX_WINDOW_BUDGET,
                             budget_state.setdefault("window_cap", eff_window_budget))
-    exploration_cap = int(eff_window_budget * .4 * max(.5, min(1., strategy.get("exploration_factor", 1.))))
+    # Core restoration is visited first. Maintain/expand retain the old residual
+    # budget (including a single high-price exploratory unit); recover alone halves it.
+    exploration_cap = int(eff_window_budget * max(.5, min(1., strategy.get("exploration_factor", 1.))))
     exploration_reserved = budget_state.setdefault("exploration_reserved", budget_state["reserved"])
     used = max(actual, budget_state["baseline_actual"] + budget_state["reserved"])
     avail_budget = int(cs.get("available_budget", 0))

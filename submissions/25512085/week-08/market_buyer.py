@@ -662,15 +662,13 @@ def run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         if order_data.get("acceptable"):
             request_timeout(1)  # Includes time spent waiting for/exiting the hub lock.
         selected = result.get("receipt") is not None
-        if (order_data.get("acceptable") and not selected and active.get("failure")
-                and (cleanup_deadline is None or time.monotonic() < cleanup_deadline)):
-            with mutate_hub() as current_hub:
-                record_failure(current_hub, order_data.get("order"), chosen_shop["url"],
-                               target_sku_info["sku"], active["failure"], time.time())
         return result
     except Exception as exc:
         if not order_data.get("acceptable"):
             raise
+        if isinstance(exc, TimeoutError) and active.get("id") and not active.get("failure"):
+            # Negotiation deadline is pair-local, not proof the whole shop's network failed.
+            active["failure"] = "timeout"
         return {"shop": chosen_shop["url"], "receipt": None, "stars": None,
                 "review": f"No deal: attempt failed ({type(exc).__name__}: {exc})."}
     finally:
@@ -692,6 +690,12 @@ def run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
                 pass
             finally:
                 REQUEST_DEADLINE.reset(cleanup_token)
+        # Local persistence must also retain expired attempts; no network is done
+        # under this lock, and a deadline failure never becomes a successful deal.
+        if order_data.get("acceptable") and not selected and active.get("failure"):
+            with mutate_hub() as current_hub:
+                record_failure(current_hub, order_data.get("order"), chosen_shop["url"],
+                               target_sku_info["sku"], active["failure"], time.time())
 
 
 def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
@@ -724,7 +728,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
     except Exception as e:
         review = f"No deal in 0 rounds: shop card endpoint failed ({type(e).__name__})."
         if isinstance(e, (TimeoutError, httpx.TimeoutException)):
-            active["failure"] = "timeout"
+            active["failure"] = "network-timeout"
         update_memory(memory, shop_name, {
             "item": item, "budget": budget, "price": None, "rounds": 0, "stars": 2, "outcome": "no-deal"
         })
@@ -761,7 +765,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
     except Exception as e:
         review = f"No deal in 0 rounds: shop did not respond to opening inquiry ({type(e).__name__})."
         if isinstance(e, (TimeoutError, httpx.TimeoutException)):
-            active["failure"] = "timeout"
+            active["failure"] = "network-timeout"
         update_memory(memory, shop_name, {
             "item": item, "budget": budget, "price": None, "rounds": 0, "stars": 2, "outcome": "no-deal"
         })
@@ -889,7 +893,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         except Exception as exc:
             failure_reason = f"counter RPC failed ({type(exc).__name__})"
             if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
-                active["failure"] = "timeout"
+                active["failure"] = "network-timeout"
             break
         if "error" in res:
             failure_reason = f"counter RPC error: {res['error']}"
@@ -1057,9 +1061,9 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         template = random.choice(FUNNY_NO_DEAL_REVIEWS)
         review = template.format(rounds=rounds, ask=seller_ask or "high", budget=budget)
         if is_round3:
-            if seller_ask is not None and seller_ask > offer_limit:
+            if not active.get("failure") and seller_ask is not None and seller_ask > offer_limit:
                 active["failure"] = "price"
-            elif task_state == "TASK_STATE_REJECTED":
+            elif not active.get("failure") and task_state == "TASK_STATE_REJECTED":
                 # A rejected SKU is not proof of globally empty stock.
                 active["failure"] = "rejected"
             if not failure_reason and task_state == "TASK_STATE_INPUT_REQUIRED":

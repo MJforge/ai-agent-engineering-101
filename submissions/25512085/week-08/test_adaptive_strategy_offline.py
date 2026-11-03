@@ -12,6 +12,7 @@ import market_buyer as buyer
 import adaptive_strategy as adaptive
 import restock
 import store
+import test_buyer_retry_offline as retry_tests
 
 NOW = 1_790_000_000
 
@@ -92,6 +93,8 @@ class AdaptiveRestockTests(unittest.TestCase):
 
     def test_expansion_reaches_sixty_not_unbounded_and_no_stocked_topup(self):
         catalog = self.catalog()
+        for info in catalog.values():
+            info["list_price"] = 100_000  # Existing full-catalog filter requires demand or high goods.
         self.inv["units"] = [{"sku": f"sku{i}", "grade": "A", "cost": 10_000,
                                "supplied_at": NOW-100} for i in range(55)]
         plan = self.plan(catalog)
@@ -101,15 +104,24 @@ class AdaptiveRestockTests(unittest.TestCase):
 
     def test_old_stock_reduces_exploration_only_and_preserves_core(self):
         catalog = self.catalog()
+        for info in catalog.values():
+            info["list_price"] = 300_000
         catalog["core"] = {"list_price": 200_000, "kind": "goods", "category": "core"}
         catalog["old"] = {"list_price": 600_000, "kind": "goods", "category": "old"}
         self.inv["units"] = [{"sku": "old", "grade": "A", "cost": 400_000,
                                "supplied_at": NOW-21601}]
+        baseline_hub = copy.deepcopy(self.hub)
         plan = self.plan(catalog)
         self.assertEqual(self.hub["adaptive_strategy"]["mode"], "recover")
         self.assertIn({"sku": "core", "qty": 1}, plan["buy"])
         window = next(iter(self.hub["restock_windows"].values()))
-        self.assertLessEqual(window["exploration_reserved"], 240_000)
+        self.assertLessEqual(window["exploration_reserved"], 600_000)
+        recover_buys = len(plan["buy"])
+        self.hub = baseline_hub
+        self.inv["units"][0]["supplied_at"] = NOW-100
+        normal = self.plan(catalog)
+        self.assertIn({"sku": "core", "qty": 1}, normal["buy"])
+        self.assertGreater(len(normal["buy"]), recover_buys)
 
     def test_cash_floor_and_absolute_window_cap(self):
         catalog = self.catalog()
@@ -178,7 +190,7 @@ class AdaptiveBuyerTests(unittest.TestCase):
         self.assertEqual(adaptive.filter_candidates(self.candidates(), self.hub, NOW), self.candidates()[1:])
 
     def test_timeout_shop_scope_and_twenty_minute_expiry(self):
-        self.fail("timeout")
+        self.fail("network-timeout")
         adaptive.refresh_buyer_policy(self.hub, NOW)
         self.assertEqual(adaptive.filter_candidates(self.candidates(), self.hub, NOW), self.candidates()[2:])
         self.assertEqual(adaptive.filter_candidates(self.candidates(), self.hub, NOW+1200), self.candidates())
@@ -226,6 +238,46 @@ class MissingStarsTests(unittest.TestCase):
             saved = json.loads(path.read_text(encoding="utf-8"))["shop"]
         self.assertEqual(saved.get("archived_count", 0), 0)
         self.assertEqual(len(saved["recent"]), 5)
+
+
+class AdaptiveBuyerHookTests(unittest.TestCase):
+    setUp = retry_tests.BuyerRetryTests.setUp
+    run_market = retry_tests.BuyerRetryTests.run_market
+
+    def test_unsigned_failures_persist_then_selector_skips_shop_after_refresh(self):
+        for i in range(3):
+            self.order["order"] = f"unique-{i}"
+            run = self.run_market(["unsigned"])
+            self.assertIsNone(run.result["receipt"])
+        events = self.hub["adaptive_strategy"]["buyer_failures"]
+        self.assertEqual(len(events), 3)
+        self.assertTrue(all(e["reason"] == "unsigned" for e in events))
+        with contextlib.redirect_stderr(io.StringIO()):
+            adaptive.refresh_buyer_policy(self.hub, self.now)
+        run = self.run_market(["valid", "valid"])
+        self.assertEqual(run.cards, [1])
+        self.assertEqual(run.result["accept"]["cert"], True)
+
+    def test_counter_timeout_classifies_transport_not_stale_ask_price(self):
+        run = self.run_market(["counter-timeout", "valid"])
+        self.assertIsNotNone(run.result["receipt"])
+        self.assertEqual(self.hub["adaptive_strategy"]["buyer_failures"][0]["reason"], "network-timeout")
+
+    def test_expired_negotiation_still_records_pair_local_timeout(self):
+        run = self.run_market(["working", "valid"], elapsed=10)
+        self.assertIsNotNone(run.result["receipt"])
+        event = self.hub["adaptive_strategy"]["buyer_failures"][0]
+        self.assertEqual(event["reason"], "timeout")
+        self.assertEqual(event["sku"], self.sku)
+
+    def test_record_buyer_order_refresh_uses_only_temp_hub(self):
+        path = self.tmp / "adaptive-hub.json"
+        store.save_hub(self.hub, path)
+        with contextlib.redirect_stderr(io.StringIO()):
+            result = store.record_buyer_order("food", path)
+        saved = store.load_hub(path)
+        self.assertEqual(result, saved["adaptive_strategy"])
+        self.assertEqual(saved["demand_radar"]["buyer_orders"]["food"], 1)
 
 
 if __name__ == "__main__":
