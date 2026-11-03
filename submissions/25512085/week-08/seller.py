@@ -167,9 +167,9 @@ def food_use_question(hours_left: float | None) -> str:
 
 def select_best_unit(units: list[dict[str, Any]], buyer_text: str) -> dict[str, Any] | None:
     """Select the best matching unit considering Food vs Non-Food and buyer intent:
-    - Food (perishable): Safe FEFO (First Expired, First Out) with a safety buffer
-      (hours_left >= 3.5h, Grade A/B) so aging food is cleared before spoiling, while
-      strictly passing the buyer's checkout accept filter (min_hours_left).
+    - Food (perishable): filter explicit use requirements plus checkout headroom
+      before applying existing grade/FEFO preferences. Unknown requirements must
+      be clarified by the session before any receipt can be signed.
     - Goods (non-food): High-grade (A > B > C) priority by default for safe 6h warranty
       and near-zero defect risk, unless buyer specifically requests cheap/bargain/C-grade."""
     if not units:
@@ -573,7 +573,7 @@ def extract_buyer_offer(text: str, current_ask: int = 0, list_price: int = 0, sk
     # 3. Strip time / warranty phrases: "6 hours", "6h", "24 hrs", "30 mins", "720h"
     cleaned = re.sub(_REQUIREMENT_KEY, "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(_DURATION, "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\b\d+(?:\.\d+)?\s*(?:mins?|minutes?|seconds?|분|초)(?![a-zA-Z])", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b\d+(?:\.\d+)?\s*(?:mins?|minutes?|m|seconds?|분|초)(?![a-zA-Z])", "", cleaned, flags=re.IGNORECASE)
 
     # 4. Strip quantity / unit phrases: "1 unit", "2 pcs", "1개", "1ea"
     cleaned = re.sub(r"\b\d+(?:\.\d+)?\s*(?:units?|pcs?|items?|pieces?|ml|kg|g|개|팩|ea)(?![a-zA-Z])", "", cleaned, flags=re.IGNORECASE)

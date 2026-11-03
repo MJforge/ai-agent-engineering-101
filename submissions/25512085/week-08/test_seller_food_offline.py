@@ -142,7 +142,8 @@ class FoodSafetyTests(unittest.TestCase):
 
     def test_price_parser_ignores_duration_and_product_numbers(self):
         for text in ("use within 72.0 h", "use_within_hours=360", "min_hours_left=360",
-                     "360시간 동안 먹을 예정", "15일 동안 먹", "milk 500ml 24팩", "360h"):
+                     "360시간 동안 먹을 예정", "15일 동안 먹", "milk 500ml 24팩", "360h",
+                     "30 m", "30 mins", "warranty 6h"):
             with self.subTest(text=text):
                 self.assertIsNone(seller.extract_buyer_offer(text))
         for text in ("use within 72.0 h; offer 36000", "use_within_hours=360; price 36000",
