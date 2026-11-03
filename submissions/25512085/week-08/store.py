@@ -54,6 +54,9 @@ GOODS_BREAK_WINDOW_H = 6
 # MARKET_ROUND_END (epoch seconds) overrides it, for tests.
 ROUND_END_TS = float(os.environ.get("MARKET_ROUND_END") or
                      datetime(2026, 11, 17, 23, 59, tzinfo=timezone(timedelta(hours=9))).timestamp())
+# Our agents' market name (the kit's --name): settle entries name the buyer by it, e.g. "buyer": "11im"
+OWN_NAME = os.environ.get("MARKET_AGENT_NAME", "mjforge")
+
 CLEARANCE_WINDOW_S = 24 * 3600
 STOP_BUYING_BEFORE_END_S = 36 * 3600
 
@@ -331,6 +334,9 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
 
         # Round 3 settle schema: {"kind": "settle", "data": {"order": "...", "amount": 8551, "item": "G1f5d00c7", ...}}
         if kind != "settle":
+            continue
+        # Our own buyer's purchases are not demand our shop can serve (same owner cannot settle with itself)
+        if data.get("buyer") == OWN_NAME:
             continue
         raw_sku = str(data.get("item") or data.get("sku") or "")
         amount = data.get("amount")

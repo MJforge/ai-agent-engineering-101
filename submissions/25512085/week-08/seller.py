@@ -11,6 +11,7 @@ Supports both:
 import argparse
 import base64
 import json
+import logging
 import math
 import os
 import random
@@ -61,6 +62,11 @@ PROMO_START_TS = time.time()
 ALL_ITEMS_SET = frozenset(RESERVES.keys())
 
 SHOP_NAME = os.environ.get("SHOP_NAME", "mjforge")
+
+# The a2a SDK's OpenTelemetry wrapper logs "Failed to detach context" with a full traceback whenever a finished
+# request's task is torn down (GeneratorExit). Requests and receipts are unaffected; the noise only buries the kit
+# log we submit. Hide that one logger; asyncio and our own errors still print.
+logging.getLogger("opentelemetry.context").setLevel(logging.CRITICAL)
 MARKET_NAME = os.environ.get("SHOP_MARKET_NAME", "mjforge")
 BASE_DIR = Path(__file__).resolve().parent
 MARKET_DIR = Path(os.environ.get("MARKET_DIR", str(BASE_DIR / ".market")))
