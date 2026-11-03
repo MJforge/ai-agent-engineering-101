@@ -728,7 +728,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
     except Exception as e:
         review = f"No deal in 0 rounds: shop card endpoint failed ({type(e).__name__})."
         if isinstance(e, (TimeoutError, httpx.TimeoutException)):
-            active["failure"] = "network-timeout"
+            active["failure"] = "network-timeout" if isinstance(e, httpx.TimeoutException) else "timeout"
         update_memory(memory, shop_name, {
             "item": item, "budget": budget, "price": None, "rounds": 0, "stars": 2, "outcome": "no-deal"
         })
@@ -765,7 +765,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
     except Exception as e:
         review = f"No deal in 0 rounds: shop did not respond to opening inquiry ({type(e).__name__})."
         if isinstance(e, (TimeoutError, httpx.TimeoutException)):
-            active["failure"] = "network-timeout"
+            active["failure"] = "network-timeout" if isinstance(e, httpx.TimeoutException) else "timeout"
         update_memory(memory, shop_name, {
             "item": item, "budget": budget, "price": None, "rounds": 0, "stars": 2, "outcome": "no-deal"
         })
@@ -893,7 +893,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         except Exception as exc:
             failure_reason = f"counter RPC failed ({type(exc).__name__})"
             if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
-                active["failure"] = "network-timeout"
+                active["failure"] = "network-timeout" if isinstance(exc, httpx.TimeoutException) else "timeout"
             break
         if "error" in res:
             failure_reason = f"counter RPC error: {res['error']}"

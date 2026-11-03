@@ -258,9 +258,15 @@ class AdaptiveBuyerHookTests(unittest.TestCase):
         self.assertEqual(run.cards, [1])
         self.assertEqual(run.result["accept"]["cert"], True)
 
-    def test_counter_timeout_classifies_transport_not_stale_ask_price(self):
+    def test_counter_timeout_never_becomes_stale_ask_price_failure(self):
         run = self.run_market(["counter-timeout", "valid"])
         self.assertIsNotNone(run.result["receipt"])
+        self.assertEqual(self.hub["adaptive_strategy"]["buyer_failures"][0]["reason"], "timeout")
+
+    def test_only_transport_timeout_is_shop_wide(self):
+        with patch.object(buyer, "rpc_call", side_effect=buyer.httpx.ReadTimeout("offline")):
+            run = self.run_market(["valid"])
+        self.assertIsNone(run.result["receipt"])
         self.assertEqual(self.hub["adaptive_strategy"]["buyer_failures"][0]["reason"], "network-timeout")
 
     def test_expired_negotiation_still_records_pair_local_timeout(self):
