@@ -243,6 +243,17 @@ class BuyerPriceTests(unittest.TestCase):
         result, _, _, _ = self.run_buyer(receipt=self.receipt(16000, claim="A"))
         self.assertIsNotNone(result["receipt"])
 
+    def test_goods_negotiation_caps_offers_and_rejects_zero_surplus(self):
+        self.order["kind"] = "goods"
+        result, offers, _, memory = self.run_buyer(ask=16700)
+        self.assertIsNone(result["receipt"])
+        self.assertEqual(len(offers), 3)
+        self.assertEqual(offers[-1], 14195)
+        self.assertTrue(all(0 < p <= 14195 for p in offers))
+        result, _, _, memory = self.run_buyer(receipt=self.receipt(16700, warranty_hours=6))
+        self.assertIsNone(result["receipt"])
+        self.assertEqual(memory["shop"]["recent"][-1]["outcome"], "declined-price-policy")
+
     def test_round2_negotiation_and_receipt_unchanged(self):
         result, offers, _, _ = self.run_buyer(ask=200, receipt=dict(self.receipt(200), item="lamp"),
                                              complete_after=3, budget=250, legacy=True)

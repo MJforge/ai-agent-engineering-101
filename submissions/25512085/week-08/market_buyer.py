@@ -47,6 +47,7 @@ MEMORY_FILE = Path("memory.json")
 MAX_RECENT_HISTORY = 5
 # Buyer policy choices, not market rules or empirically optimal discounts.
 FOOD_LIST_PRICE_PERCENT = 90
+GOODS_OFFER_CAP_PERCENT = 85
 COMPARABLE_WINDOW_S = 3 * 3600
 COMPARABLE_MIN_SAMPLES = 3
 REQUEST_DEADLINE = ContextVar("buyer_request_deadline", default=None)
@@ -307,6 +308,12 @@ def pick_round3_shop_and_sku(
             div_pen += 0.35
         if int(c.get("mem_count") or 0) >= 4:
             div_pen += 0.25
+        recent_entries = (memory.get(c["name"]) or {}).get("recent") or []
+        recent_fails = sum(
+            1 for r in recent_entries[-3:]
+            if r.get("outcome") in ("no-deal", "declined-price-policy", "declined-no-warranty")
+        )
+        div_pen += 0.22 * recent_fails
 
         for off in c.get("offers") or []:
             sku = off.get("sku", "")
@@ -323,7 +330,15 @@ def pick_round3_shop_and_sku(
             else:
                 feasibility_mult = 1.0
 
-            est_pay = min(budget, max(est_cost_floor, int(list_price * 0.80)))
+            settles = [
+                p for p in (hub.get("demand_radar", {}).get("sku_settles", {}).get(sku) or [])
+                if positive_number(p)
+            ]
+            if len(settles) >= 3:
+                hist_pay = int(statistics.median(settles[-15:]))
+                est_pay = min(budget, max(est_cost_floor, min(int(list_price * 0.80), hist_pay)))
+            else:
+                est_pay = min(budget, max(est_cost_floor, int(list_price * 0.80)))
             est_surplus = max(500, list_price - est_pay)
             # Combined utility: expected surplus * feasibility * trust weight
             trust_factor = max(0.5, min(1.3, (c["score"] / 4.2) - div_pen))
@@ -665,6 +680,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
     diagnostic(f"[choose] {shop_url} ({shop_name}): {reason}")
 
     is_round3_food = is_round3 and order_data.get("kind") == "food"
+    is_round3_goods = is_round3 and order_data.get("kind") == "goods"
     price_limit = budget
     food_accept = {}
     if is_round3_food:
@@ -746,6 +762,20 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
     rounds = 0
     step_inc = max(5, int(budget * 0.02)) if is_round3 else 5
 
+    offer_limit = price_limit
+    if is_round3_goods:
+        offer_limit = min(price_limit, max(1, math.floor(list_price * GOODS_OFFER_CAP_PERCENT / 100)))
+        settles = [
+            p for p in (hub.get("demand_radar", {}).get("sku_settles", {}).get(sku_code) or [])
+            if positive_number(p)
+        ]
+        if len(settles) >= 3:
+            comp_cap = max(
+                math.floor(list_price * 0.74),
+                math.floor(statistics.median(settles[-15:]) * 106 / 100),
+            )
+            offer_limit = min(offer_limit, comp_cap)
+
     failure_reason = ""
     while task_state == "TASK_STATE_INPUT_REQUIRED" and rounds < (3 if is_round3 else 5):
         if is_round3:
@@ -757,7 +787,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
 
         # Budget-Decoupled Negotiation:
         # Anchors offers to `reserve` (estimated supply cost) and `seller_ask`, NEVER leaking `budget * ratio`.
-        if seller_ask is not None and seller_ask <= price_limit:
+        if seller_ask is not None and seller_ask <= offer_limit:
             if seller_ask <= math.ceil(reserve * 1.05) or rounds >= 3:
                 offer = seller_ask
             elif rounds == 1:
@@ -766,8 +796,8 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
                 halfway = int(round(reserve + (seller_ask - reserve) * 0.55))
                 offer = min(seller_ask, max(last_offer + step_inc, halfway))
         else:
-            if last_offer >= price_limit and seller_ask is not None and seller_ask > price_limit:
-                diagnostic(f"Cannot agree: seller ask {seller_ask} > price limit {price_limit}")
+            if last_offer >= offer_limit and seller_ask is not None and seller_ask > offer_limit:
+                diagnostic(f"Cannot agree: seller ask {seller_ask} > price limit {offer_limit}")
                 if not is_round3:
                     try:
                         rpc_call(rpc_url, "CancelTask", {"id": task_id})
@@ -776,7 +806,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
                 failure_reason = "seller ask exceeds price limit"
                 break
 
-            ceiling = min(price_limit, seller_ask) if seller_ask else price_limit
+            ceiling = min(offer_limit, seller_ask) if seller_ask else offer_limit
             start_anchor = min(reserve, int(ceiling * 0.72)) if is_round3 else min(reserve, ceiling)
             if rounds == 1:
                 offer = start_anchor
@@ -810,7 +840,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
                     if suggested > last_offer:
                         offer = min(budget, suggested)
 
-        offer = min(price_limit, max(1, offer))
+        offer = min(offer_limit, max(1, offer))
         last_offer = offer
 
         # Send clean numeric offer (avoid extra numbers in the text so simple regex sellers parse `offer` accurately!)
@@ -871,7 +901,11 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
             # does not pin the kit's later checkout to that SKU: a different
             # acceptable SKU shipped there is a pre-existing integration limit.
             receipt_cap, food_accept = food_price_policy(catalog, hub, rec_item, budget, order_data, raw_receipt)
-        price_policy_declined = is_round3_food and (
+        elif is_round3_goods:
+            actual_lp = (catalog.get(rec_item) or {}).get("list_price") or list_price
+            if positive_number(actual_lp):
+                receipt_cap = min(budget, max(1, int(actual_lp) - 1))
+        price_policy_declined = (is_round3_food or is_round3_goods) and (
             receipt_cap is None or (positive_number(rec_price) and rec_price > receipt_cap))
         receipt_invalid = (
             not positive_number(rec_price)
