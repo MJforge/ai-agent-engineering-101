@@ -83,7 +83,10 @@ class BuyerRetryTests(unittest.TestCase):
             if state == "TASK_STATE_COMPLETED":
                 price = 20040 if action == "overpriced" else (action if isinstance(action, (int, float)) else 9000)
                 receipt = {"item": shop_skus[i] if shop_skus else self.sku,
-                           "price": price, "task": f"task-{i}", "shop": f"shop{i}"}
+                           "price": price, "task": f"task-{i}", "shop": f"shop{i}",
+                           "sig_seller": "offline-signature-placeholder"}
+                if action == "unsigned":
+                    receipt.pop("sig_seller")
                 if action == "forged-list":
                     receipt.update(price=20040, list_price=10000000)
                 if action == "warranty":

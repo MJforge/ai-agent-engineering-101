@@ -923,7 +923,8 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         rec_item = str(raw_receipt.get("item", "")).strip()
         rec_task = str(raw_receipt.get("task", ""))
         rec_shop = str(raw_receipt.get("shop", raw_receipt.get("seller", ""))).strip()
-        rec_sig = str(raw_receipt.get("sig_seller", "")).strip()
+        signature = raw_receipt.get("sig_seller")
+        rec_sig = signature.strip() if isinstance(signature, str) else ""
 
         if is_round3:
             item_matches = (rec_item == item) or (rec_item in acceptable_skus) or (rec_item.lower() == item_low)
@@ -954,7 +955,13 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
             or not rec_shop
         )
 
-        if receipt_invalid:
+        if is_round3 and not rec_sig:
+            final_receipt = None
+            recorded_price = None
+            stars = None
+            review = "No deal: unsigned receipt (missing sig_seller); trying another shop."
+            outcome = "unsigned-receipt"
+        elif receipt_invalid:
             stars = 1
             review = (
                 f"Invalid receipt! Agreed at {last_offer} (budget {budget}) in {rounds} round(s), "
@@ -972,7 +979,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         else:
             final_receipt = raw_receipt
             recorded_price = int(rec_price)
-            sig_note = "Ed25519 receipt verified" if rec_sig else "receipt fields checked"
+            sig_note = "seller signature present; kit verification pending" if rec_sig else "receipt fields checked"
             is_dumping_price = (not is_round3) and (recorded_price <= reserve + 1)
 
             if is_dumping_price and not has_service:

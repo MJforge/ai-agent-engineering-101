@@ -42,7 +42,9 @@ class BuyerPriceTests(unittest.TestCase):
         self.stack.enter_context(patch.object(buyer.time, "time", return_value=self.now))
 
     def receipt(self, price, **extra):
-        return dict(item=self.sku, price=price, task="task-1", shop="shop", **extra)
+        # Presence-only fixture: cryptographic verification belongs to the kit.
+        return dict(item=self.sku, price=price, task="task-1", shop="shop",
+                    **({"sig_seller": "offline-signature-placeholder"} | extra))
 
     def run_buyer(self, ask=20040, receipt=None, complete_after=0, budget=25000, legacy=False):
         shops_path = self.tmp / "shops.json"
