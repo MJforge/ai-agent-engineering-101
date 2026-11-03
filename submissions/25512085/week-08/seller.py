@@ -114,6 +114,57 @@ def compute_live_unit_grade(unit: dict[str, Any], catalog: dict[str, dict[str, A
 
 
 
+FOOD_CHECKOUT_BUFFER_H = 0.25
+_DURATION = r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>hours?|hrs?|h|days?|시간|일)(?![a-zA-Z])"
+_REQUIREMENT_KEY = r"\b(?:use_within_hours|min_hours_left)\s*[:=]\s*(\d+(?:\.\d+)?)"
+
+
+def extract_food_use_hours(text: str, awaiting_duration: bool = False) -> float | None:
+    """Read explicit use/shelf-life requirements, not arbitrary product/price numbers.
+
+    A bare duration is accepted only in reply to our use-period question. Multiple
+    explicit requirements use the longest period; warranty language is not food use.
+    """
+    text = (text or "").lower()
+    values = [float(m.group(1)) for m in re.finditer(_REQUIREMENT_KEY, text)]
+    for m in re.finditer(_DURATION, text):
+        before = re.split(r"[,;.!?\n]", text[:m.start()])[-1][-80:]
+        after = re.split(r"[,;!?\n]", text[m.end():])[0][:80]
+        bare = awaiting_duration and re.fullmatch(r"\s*" + _DURATION + r"\s*[.!]?\s*", text)
+        english = (
+            re.search(r"\buse\s+within\s*$", before)
+            or (re.search(r"\bat least\s*$", before) and re.match(r"\s*(?:of\s+)?shelf[ -]?life\b", after))
+            or re.search(r"\b(?:need|require)\b[^\d]*$", before)
+        )
+        korean = m.group("unit") in ("시간", "일") and re.match(r"[^\d,;.!?\n]{0,40}(?:필요|남아|사용|먹)", after)
+        warranty = re.search(r"warranty|guarantee|보증", before + after)
+        if bare or ((english or korean) and not warranty):
+            hours = float(m.group("value"))
+            if m.group("unit") in ("day", "days", "일"):
+                hours *= 24
+            values.append(hours)
+    finite = [v for v in values if math.isfinite(v) and v >= 0]
+    return max(finite) if finite else None
+
+
+def food_has_use_time(unit: dict[str, Any], required_hours: float) -> bool:
+    """Use unrounded live expiry when available, including checkout headroom."""
+    if unit.get("expires_at"):
+        left = (float(unit["expires_at"]) - time.time() - 15.0) / 3600.0
+    else:
+        left = float(unit.get("hours_left") or 0)
+    return left >= required_hours + FOOD_CHECKOUT_BUFFER_H
+
+
+def food_use_question(hours_left: float | None) -> str:
+    return (
+        f"Remaining shelf life is {hours_left}h (not a long-term guarantee). "
+        "How many hours/days must it remain usable? Reply e.g. 'use within 72h'. "
+        "The server does not disclose your order conditions, so I cannot infer your required use period. "
+        "No receipt can be signed until you provide it."
+    )
+
+
 def select_best_unit(units: list[dict[str, Any]], buyer_text: str) -> dict[str, Any] | None:
     """Select the best matching unit considering Food vs Non-Food and buyer intent:
     - Food (perishable): Safe FEFO (First Expired, First Out) with a safety buffer
@@ -123,8 +174,6 @@ def select_best_unit(units: list[dict[str, Any]], buyer_text: str) -> dict[str, 
       and near-zero defect risk, unless buyer specifically requests cheap/bargain/C-grade."""
     if not units:
         return None
-    if len(units) == 1:
-        return units[0]
 
     text_low = (buyer_text or "").lower()
     wants_cheap = any(
@@ -139,6 +188,11 @@ def select_best_unit(units: list[dict[str, Any]], buyer_text: str) -> dict[str, 
     is_food = any(u.get("kind") == "food" or u.get("expires_at") for u in units)
 
     if is_food:
+        required_hours = extract_food_use_hours(buyer_text)
+        if required_hours is not None:
+            units = [u for u in units if food_has_use_time(u, required_hours)]
+            if not units:
+                return None
         # Food handling (FEFO with safety buffer)
         if wants_cheap:
             # Buyer explicitly wants cheap/bargain food: prefer C -> B -> A,
@@ -227,7 +281,7 @@ def find_stock_unit(text: str, taken_units: set[str], inv: dict[str, Any], catal
         exact = [u for u in valid_units if str(u.get("sku", "")).lower() == wanted_sku]
         if exact:
             chosen = select_best_unit(exact, want)
-            return chosen, chosen.get("category") or wanted_sku
+            return chosen, (chosen or {}).get("category") or wanted_sku
         # If we do not have this exact SKU, resolve its category for demand radar,
         # but NEVER substitute a different SKU from the same category!
         # Arbitrary substitution causes ACP checkout failure because buyer orders specify
@@ -251,7 +305,7 @@ def find_stock_unit(text: str, taken_units: set[str], inv: dict[str, Any], catal
 
     if fit:
         chosen = select_best_unit(fit, want)
-        return chosen, chosen.get("category") or chosen.get("name", "")
+        return chosen, (chosen or fit[0]).get("category") or (chosen or fit[0]).get("name", "")
 
     # 3. Determine what category the buyer was asking for (for missed demand radar)
     detected_cat = ""
@@ -517,10 +571,12 @@ def extract_buyer_offer(text: str, current_ask: int = 0, list_price: int = 0, sk
     cleaned = re.sub(r"\b[gfGF][0-9a-fA-F]{7,10}\b", "", cleaned)
 
     # 3. Strip time / warranty phrases: "6 hours", "6h", "24 hrs", "30 mins", "720h"
-    cleaned = re.sub(r"\b\d+\s*(?:h|hr|hrs|hours?|m|min|mins?|seconds?|days?|일|시간|분|초)\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(_REQUIREMENT_KEY, "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(_DURATION, "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b\d+(?:\.\d+)?\s*(?:mins?|minutes?|seconds?|분|초)(?![a-zA-Z])", "", cleaned, flags=re.IGNORECASE)
 
     # 4. Strip quantity / unit phrases: "1 unit", "2 pcs", "1개", "1ea"
-    cleaned = re.sub(r"\b\d+\s*(?:units?|pcs?|items?|pieces?|개|ea)\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b\d+(?:\.\d+)?\s*(?:units?|pcs?|items?|pieces?|ml|kg|g|개|팩|ea)(?![a-zA-Z])", "", cleaned, flags=re.IGNORECASE)
 
     # 5. Intent patterns
     intent_patterns = [
@@ -611,7 +667,7 @@ class Seller(AgentExecutor):
 
                 if unit is None:
                     print(f"[stock-miss] Out of stock for buyer request: {text[:80]} (recorded demand: {demand_query})", flush=True)
-                    await up.reject(say("Sorry, we have none of that in stock right now."))
+                    await up.reject(say("Sorry, no matching stock meets your request (including any required shelf life plus checkout buffer). No receipt issued."))
                     return
 
                 hub = load_hub()
@@ -623,10 +679,17 @@ class Seller(AgentExecutor):
                 warranty = pricing["warranty_hours"]
                 hours_left = pricing["hours_left"]
                 list_price = pricing["list_price"]
+                is_food = unit.get("kind") == "food"
+                required_hours = extract_food_use_hours(text) if is_food else None
 
                 # Check if the buyer already included an initial offer price in their first message!
                 initial_offer = extract_buyer_offer(text, current_ask=ask, list_price=list_price, sku=unit["sku"])
-                if initial_offer and initial_offer >= ask:
+                if initial_offer and initial_offer >= ask and (not is_food or required_hours is not None):
+                    # Recheck live expiry immediately before the opening receipt path.
+                    grade, hours_left = compute_live_unit_grade(unit, catalog)
+                    if is_food and (grade == "expired" or not food_has_use_time(unit, required_hours)):
+                        await up.reject(say("Required use period exceeds remaining shelf life plus checkout buffer; transaction cancelled. No receipt issued."))
+                        return
                     # Instant 1-message close if buyer offered at or above our opening ask!
                     final_price = ask
                     # Instantly lock in committed_units so no concurrent buyer can grab this unit during checkout
@@ -674,6 +737,11 @@ class Seller(AgentExecutor):
                     f"({pricing['disc_pct']}% below list price {list_price}).{care_note} "
                     f"Send your offer as a number or reply {ask} for an instant Ed25519-signed receipt."
                 )
+                if is_food and required_hours is None:
+                    opening_msg = (
+                        f"{unit['name']} (sku={unit['sku']}), asking price {ask}. "
+                        + food_use_question(hours_left)
+                    )
                 print(
                     f"[r3-quote] {unit['sku']} ({unit['name']}): cost={unit['cost']}, list={list_price}, "
                     f"grade={grade}, ask={ask}, r1_target={r1_target}, floor={hard_floor}, warranty={warranty}h",
@@ -697,6 +765,8 @@ class Seller(AgentExecutor):
                     "rounds": 0,
                     "created_at": now_ts,
                     "offers": [],
+                    "required_use_hours": required_hours,
+                    "awaiting_use_period": is_food and required_hours is None,
                 }
                 await up.requires_input(say(opening_msg))
                 return
@@ -753,6 +823,25 @@ class Seller(AgentExecutor):
         # up to ~3 s to every turn, and could leave codex processes running after a timeout on a 1 GB VM. The
         # model is used outside the negotiation path instead, where latency does not matter.
         text_low = text.lower()
+        if deal.get("mode") == "round3_stock" and deal["unit"].get("kind") == "food":
+            required_hours = extract_food_use_hours(text, awaiting_duration=deal.get("awaiting_use_period", False))
+            if required_hours is not None:
+                previous = deal.get("required_use_hours")
+                deal["required_use_hours"] = max(previous, required_hours) if previous is not None else required_hours
+                deal["awaiting_use_period"] = False
+            live_grade, hours_left = compute_live_unit_grade(deal["unit"], load_catalog(MARKET_DIR))
+            required_hours = deal.get("required_use_hours")
+            if live_grade == "expired" or (required_hours is not None and not food_has_use_time(deal["unit"], required_hours)):
+                self.open.pop(task.id, None)
+                await up.reject(say(
+                    f"Remaining shelf life {hours_left}h cannot meet required use period {required_hours}h "
+                    "plus checkout buffer; transaction cancelled, unit released. No receipt issued."
+                ))
+                return
+            if required_hours is None:
+                deal["awaiting_use_period"] = True
+                await up.requires_input(say(food_use_question(hours_left)))
+                return
         drops_care = any(w in text_low for w in NO_CARE_WORDS)
         wants_w = not drops_care and any(kw in text_low for kw in ("warranty", "guarantee", "service", "care", "보증"))
         offer = extract_buyer_offer(
@@ -808,6 +897,14 @@ class Seller(AgentExecutor):
 
             # Never below cost, except in the end-of-round clearance, where the floor itself goes below cost
             if should_accept and offer >= min(cost, hard_floor):
+                # Recheck immediately before signing, even if the requirement was known earlier.
+                if u.get("kind") == "food":
+                    live_grade, hours_left = compute_live_unit_grade(u, catalog)
+                    required_hours = deal.get("required_use_hours")
+                    if required_hours is None or live_grade == "expired" or not food_has_use_time(u, required_hours):
+                        self.open.pop(task.id, None)
+                        await up.reject(say("Required use period is unknown or exceeds remaining shelf life plus checkout buffer; transaction cancelled. No receipt issued."))
+                        return
                 current_ask = in_mode(int(deal["ask"]))
                 final_price = min(current_ask, int(offer))
                 # Goods carry Safe-Care unless the buyer explicitly took the cheaper no-care price; food has none
