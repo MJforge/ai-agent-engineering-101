@@ -133,6 +133,12 @@ def load_memory() -> dict:
     return {}
 
 
+def valid_stars(value: Any) -> bool:
+    """Unpaid/no-deal entries have null stars, not a synthetic three-star review."""
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and 1 <= value <= 5)
+
+
 def update_memory(memory: dict, shop_name: str, entry: dict) -> None:
     """Store up to 5 recent trades per shop; roll older entries into archived_avg_stars."""
     rec = memory.get(shop_name, {
@@ -150,7 +156,9 @@ def update_memory(memory: dict, shop_name: str, entry: dict) -> None:
         oldest = recent.pop(0)
         old_cnt = rec.get("archived_count", 0)
         old_avg = rec.get("archived_avg_stars", 0.0)
-        old_stars = float(oldest.get("stars", 3))
+        if not valid_stars(oldest.get("stars")):
+            continue
+        old_stars = float(oldest["stars"])
         new_cnt = old_cnt + 1
         rec["archived_count"] = new_cnt
         rec["archived_avg_stars"] = round((old_avg * old_cnt + old_stars) / new_cnt, 2)
@@ -180,14 +188,15 @@ def summarize_shop(shop: dict, memory: dict, board_row: dict | None = None, hub_
     board_row = board_row or {}
     hub_trust = (hub_trust or {}).get(url) or {}
 
-    ext_stars = [r.get("stars") for r in reviews if isinstance(r.get("stars"), (int, float))]
+    ext_stars = [r["stars"] for r in reviews if valid_stars(r.get("stars"))]
     ext_avg = round(sum(ext_stars) / len(ext_stars), 2) if ext_stars else board_row.get("stars")
 
     # Detect actual receipt mismatch flags while ignoring prompt-injection advertisements
     bad_keywords = ("receipt said", "receipt says", "higher than", "overcharged", "rip-off", "scam", "forged", "dishonest")
     ext_scam_flags = sum(
         1 for r in reviews
-        if (r.get("stars", 5) <= 2 and any(k in str(r.get("review", "")).lower() for k in bad_keywords))
+        if (valid_stars(r.get("stars")) and r["stars"] <= 2
+            and any(k in str(r.get("review", "")).lower() for k in bad_keywords))
     )
 
     mem = memory.get(name, {})
@@ -197,9 +206,10 @@ def summarize_shop(shop: dict, memory: dict, board_row: dict | None = None, hub_
     last_ts = float(mem.get("last_visited_ts", 0.0))
 
     total_mem_cnt = arch_cnt + len(recent)
-    if total_mem_cnt > 0:
-        total_stars = arch_avg * arch_cnt + sum(r.get("stars", 3) for r in recent)
-        mem_avg = round(total_stars / total_mem_cnt, 2)
+    rated = [r["stars"] for r in recent if valid_stars(r.get("stars"))]
+    if arch_cnt + len(rated) > 0:
+        total_stars = arch_avg * arch_cnt + sum(rated)
+        mem_avg = round(total_stars / (arch_cnt + len(rated)), 2)
     else:
         mem_avg = None
 
