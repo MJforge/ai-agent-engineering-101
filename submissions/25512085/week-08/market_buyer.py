@@ -18,6 +18,7 @@ import math
 import os
 import random
 import re
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,10 @@ BASE_DIR = Path(__file__).resolve().parent
 MARKET_DIR = Path(os.environ.get("MARKET_DIR", str(BASE_DIR / ".market")))
 MEMORY_FILE = Path("memory.json")
 MAX_RECENT_HISTORY = 5
+# Buyer policy choices, not market rules or empirically optimal discounts.
+FOOD_LIST_PRICE_PERCENT = 90
+COMPARABLE_WINDOW_S = 3 * 3600
+COMPARABLE_MIN_SAMPLES = 3
 RESERVES = {"lamp": 100, "chair": 180, "bookshelf": 260}
 SERVICE_KEYWORDS = (
     "warranty", "service", "refund", "guarantee", "quality", "support",
@@ -277,6 +282,8 @@ def pick_round3_shop_and_sku(
         for off in c.get("offers") or []:
             sku = off.get("sku", "")
             sku_meta = catalog.get(sku) or {}
+            if order_data.get("kind") == "food" and not positive_number(sku_meta.get("list_price")):
+                continue
             list_price = int(sku_meta.get("list_price") or budget)
             # A shop can sell a SKU if its cost (~60-70% of list_price) is <= our budget.
             # If list_price is way above budget (e.g. > 1.55x budget), the shop's cost floor may exceed our budget.
@@ -380,6 +387,63 @@ def build_accept_policy(order_data: dict[str, Any], agreed_price: int, list_pric
     return policy
 
 
+def positive_number(value: Any) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value > 0)
+
+
+def similar_food_remaining(sample_hours: float, target_hours: float, required_hours: float) -> bool:
+    """Compare shelf life at each sale, not today's aged historical inventory.
+
+    Require the use window plus checkout margin, the same doubling bucket, and
+    at most 25% difference. Clearance/short-life prices must not anchor fresh food.
+    """
+    minimum = required_hours + 0.25
+    return (sample_hours >= minimum and target_hours >= minimum
+            and int(math.log2(sample_hours)) == int(math.log2(target_hours))
+            and 0.8 * target_hours <= sample_hours <= 1.25 * target_hours)
+
+
+def food_price_policy(catalog: dict, hub: dict, sku: str, budget: int, order: dict,
+                      receipt: dict | None = None, now: float | None = None) -> tuple[int | None, dict]:
+    """Local-only cap. Unknown catalog price means defer, never budget*1.2.
+
+    Before negotiation there is no guaranteed grade/expiry, so use only the 90%
+    list cap. Receipt claims are *hints*, not certificates: comparable tightening
+    is conditional on kit cert + exact grade + minimum shelf-life acceptance.
+    Unknown grades never become C here (unlike goods break-risk pessimism).
+    """
+    lp = (catalog.get(sku) or {}).get("list_price")
+    if not positive_number(lp):
+        return None, {}
+    cap = min(budget, math.floor(lp * FOOD_LIST_PRICE_PERCENT / 100))
+    receipt = receipt or {}
+    grade = receipt.get("claim")
+    expiry = receipt.get("expires_at")
+    now = time.time() if now is None else now
+    if grade not in ("A", "B", "C") or not positive_number(expiry):
+        return cap, {}
+    hours = (expiry - now) / 3600
+    required = float(order.get("use_within_hours") or 1.0)
+    if hours < required + 0.25:
+        return cap, {}
+    prices = []
+    for row in (hub.get("demand_radar", {}).get("sku_comparables", {}).get(sku) or []):
+        ts, amount, exp = row.get("ts"), row.get("amount"), row.get("expires_at")
+        if (not positive_number(ts) or not 0 <= now - ts <= COMPARABLE_WINDOW_S
+                or not positive_number(amount) or row.get("grade") != grade
+                or not positive_number(exp)):
+            continue
+        if similar_food_remaining((exp - ts) / 3600, hours, required):
+            prices.append(amount)
+    if len(prices) < COMPARABLE_MIN_SAMPLES:
+        return cap, {}
+    tightened = min(cap, math.floor(statistics.median(prices) * 110 / 100))
+    # Enforce the hint's lower bound through the kit, not through trust in text.
+    # A longer actual shelf life is safe; it never increases our price ceiling.
+    return tightened, {"grades": [grade], "min_hours_left": math.ceil(hours * 100) / 100}
+
+
 def rpc_call(url: str, method: str, params: dict) -> dict:
     body = {
         "jsonrpc": "2.0",
@@ -479,6 +543,16 @@ def main():
     shop_url = chosen_shop.get("url", "").rstrip("/")
     print(f"[choose] {shop_url} ({shop_name}): {reason}", flush=True)
 
+    is_round3_food = is_round3 and order_data.get("kind") == "food"
+    price_limit = budget
+    food_accept = {}
+    if is_round3_food:
+        price_limit, _ = food_price_policy(catalog, hub, target_sku_info["sku"], budget, order_data)
+        if price_limit is None or price_limit < 1:
+            print(json.dumps({"shop": shop_url, "receipt": None, "stars": None,
+                              "review": "No deal: food catalog list price is unknown."}), flush=True)
+            return
+
     # 1. Fetch Agent Card
     card_url = f"{shop_url}/.well-known/agent-card.json"
     try:
@@ -557,7 +631,7 @@ def main():
 
         # Budget-Decoupled Negotiation:
         # Anchors offers to `reserve` (estimated supply cost) and `seller_ask`, NEVER leaking `budget * ratio`.
-        if seller_ask is not None and seller_ask <= budget:
+        if seller_ask is not None and seller_ask <= price_limit:
             if seller_ask <= math.ceil(reserve * 1.05) or rounds >= 3:
                 offer = seller_ask
             elif rounds == 1:
@@ -566,15 +640,17 @@ def main():
                 halfway = int(round(reserve + (seller_ask - reserve) * 0.55))
                 offer = min(seller_ask, max(last_offer + step_inc, halfway))
         else:
-            if last_offer >= budget and seller_ask is not None and seller_ask > budget:
-                print(f"Cannot agree: seller ask {seller_ask} > budget {budget}", flush=True)
+            if last_offer >= price_limit and seller_ask is not None and seller_ask > price_limit:
+                print(f"Cannot agree: seller ask {seller_ask} > price limit {price_limit}", flush=True)
                 try:
                     rpc_call(rpc_url, "CancelTask", {"id": task_id})
                 except Exception:
                     pass
+                if is_round3_food:
+                    task_state = "TASK_STATE_CANCELED"
                 break
 
-            ceiling = min(budget, seller_ask) if seller_ask else budget
+            ceiling = min(price_limit, seller_ask) if seller_ask else price_limit
             start_anchor = min(reserve, int(ceiling * 0.72)) if is_round3 else min(reserve, ceiling)
             if rounds == 1:
                 offer = start_anchor
@@ -608,7 +684,7 @@ def main():
                     if suggested > last_offer:
                         offer = min(budget, suggested)
 
-        offer = min(budget, max(1, offer))
+        offer = min(price_limit, max(1, offer))
         last_offer = offer
 
         # Send clean numeric offer (avoid extra numbers in the text so simple regex sellers parse `offer` accurately!)
@@ -641,6 +717,12 @@ def main():
         if task_state in ("TASK_STATE_COMPLETED", "TASK_STATE_REJECTED", "TASK_STATE_CANCELED"):
             break
 
+    if is_round3_food and task_state == "TASK_STATE_INPUT_REQUIRED":
+        try:
+            rpc_call(rpc_url, "CancelTask", {"id": task_id})
+        except Exception:
+            pass
+
     # 3. Inspect result & receipt
     raw_receipt = extract_receipt_data(task) if task_state == "TASK_STATE_COMPLETED" else None
     combined_service_text = (" ".join(seller_texts) + " " + card_desc + " " + json.dumps(raw_receipt or {})).lower()
@@ -659,10 +741,18 @@ def main():
         else:
             item_matches = not rec_item or (rec_item.lower() == item_low)
 
+        receipt_cap = budget
+        if is_round3_food:
+            # Recompute on the actual shipped SKU, never category/target fallback.
+            receipt_cap, food_accept = food_price_policy(catalog, hub, rec_item, budget, order_data, raw_receipt)
+        price_policy_declined = is_round3_food and (
+            receipt_cap is None or (positive_number(rec_price) and rec_price > receipt_cap))
         receipt_invalid = (
             not isinstance(rec_price, (int, float))
             or rec_price > budget
-            or (last_offer > 0 and rec_price > last_offer)
+            # A price-policy rejection is not evidence of dishonesty. Still reject
+            # above-agreement receipts within policy, and all structural/budget errors.
+            or (last_offer > 0 and rec_price > last_offer and not price_policy_declined)
             or not item_matches
             or (task_id and rec_task and rec_task != str(task_id))
             or not rec_shop
@@ -677,6 +767,12 @@ def main():
             final_receipt = None
             outcome = "rip-off"
             recorded_price = rec_price if isinstance(rec_price, (int, float)) else None
+        elif price_policy_declined:
+            final_receipt = None
+            recorded_price = rec_price
+            stars = 3
+            review = f"No deal: declined-price-policy for {rec_item} at {rec_price} (cap {receipt_cap})."
+            outcome = "declined-price-policy"
         else:
             final_receipt = raw_receipt
             recorded_price = int(rec_price)
@@ -775,6 +871,7 @@ def main():
     if is_round3 and final_receipt is not None and recorded_price is not None:
         result_line["accept"] = build_accept_policy(order_data, recorded_price, list_price,
                                                     float(final_receipt.get("warranty_hours") or 0))
+        result_line["accept"].update(food_accept)
 
     print(json.dumps(result_line, ensure_ascii=False), flush=True)
 

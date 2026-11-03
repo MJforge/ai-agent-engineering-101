@@ -79,6 +79,7 @@ def default_hub() -> dict[str, Any]:
             "buyer_orders": {},       # category -> count of orders received by our buyer
             "market_settles": {},     # category -> count of settled deals on ledger
             "sku_settles": {},        # sku -> list of recent settled prices (max 30)
+            "sku_comparables": {},    # sku -> structured settle observations (max 50)
             "recent_refs": [],        # recent ledger seqs for forum citations (max 25)
         },
         "capital_stage": {
@@ -316,6 +317,7 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
     radar = hub["demand_radar"]
     last_seq = int(hub.get("ledger_seq", 0))
     seq = last_seq
+    seen_seqs = set()
 
     # Fast case-insensitive catalog lookup for canonical SKU & category
     cat_lookup: dict[str, tuple[str, str]] = {}
@@ -324,8 +326,9 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
 
     for e in rows:
         s_id = int(e.get("seq", 0))
-        if s_id <= last_seq:
+        if s_id <= last_seq or s_id in seen_seqs:
             continue
+        seen_seqs.add(s_id)
         if s_id > seq:
             seq = s_id
 
@@ -366,6 +369,18 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
         arr.append(int(amount))
         if len(arr) > 30:
             radar["sku_settles"][canonical_sku] = arr[-30:]
+
+        # Preserve public settle metadata, not seller claims or inferred grades/expiry.
+        # Missing fields stay unknown: old state needs no migration and cannot become
+        # a misleading price comparable merely because it has a numeric price history.
+        observations = radar.setdefault("sku_comparables", {}).setdefault(canonical_sku, [])
+        observations.append({
+            "ts": e.get("ts"), "amount": amount, "grade": data.get("grade"),
+            "expires_at": data.get("expires_at"), "shelf_hours": data.get("shelf_hours"),
+            "shop": data.get("shop") or data.get("seller"),
+            "order": data.get("order"), "seq": s_id,
+        })
+        radar["sku_comparables"][canonical_sku] = observations[-50:]
 
         refs = radar.setdefault("recent_refs", [])
         if s_id not in refs:
