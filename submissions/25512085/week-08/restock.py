@@ -143,6 +143,7 @@ def compute_category_demand_scores(
     all_categories: set[str],
     forum_posts: list[dict[str, Any]],
     cat_recent: dict[str, int] | None = None,
+    catalog: dict[str, Any] | None = None,
 ) -> dict[str, float]:
     """Combine 1st-party shop inquiries, missed demand, recent ledger settles, and forum mentions."""
     radar = hub.get("demand_radar", {})
@@ -151,11 +152,15 @@ def compute_category_demand_scores(
     settles = cat_recent or {}
 
     # Map leaf category names (e.g. "침구", "김치") to full category paths
-    leaf_to_full: dict[str, list[str]] = collections.defaultdict(list)
+    leaf_to_full: dict[str, set[str]] = collections.defaultdict(set)
     for c in all_categories:
         leaf = c.split(">")[-1].strip().lower()
-        leaf_to_full[leaf].append(c)
-        leaf_to_full[c.lower()].append(c)
+        leaf_to_full[leaf].add(c)
+        leaf_to_full[c.strip().lower()].add(c)
+    for sku, info in (catalog or {}).items():
+        category = info.get("category")
+        if category in all_categories:
+            leaf_to_full[str(sku).lower()].add(category)
 
     scores: dict[str, float] = {c: 0.0 for c in all_categories}
 
@@ -309,7 +314,7 @@ def plan_with_hub(
         if recent_cnt > 0 and str(key).lower() in sku_ci_map:
             missed_skus_1h[sku_ci_map[str(key).lower()]] += recent_cnt
     for key, cnt in (radar.get("missed_wants") or {}).items():
-        if int(cnt or 0) > 0 and str(key).lower() in sku_ci_map:
+        if key not in missed_ts_map and int(cnt or 0) > 0 and str(key).lower() in sku_ci_map:
             c_sku = sku_ci_map[str(key).lower()]
             missed_skus_1h[c_sku] = max(missed_skus_1h[c_sku], int(cnt))
     own_urls_set = set(hub.get("own_shop_urls") or [])
@@ -327,7 +332,7 @@ def plan_with_hub(
             if tok.lower() in sku_ci_map:
                 missed_skus_1h[sku_ci_map[tok.lower()]] += 1
 
-    demand_scores = compute_category_demand_scores(hub, set(cat_map.keys()), forum_posts, cat_recent)
+    demand_scores = compute_category_demand_scores(hub, set(cat_map.keys()), forum_posts, cat_recent, catalog)
     medians = {c: float(statistics.median(int(x.get("list_price", 0)) for x in skus))
                for c, skus in cat_map.items()}
     held_count = collections.Counter(u.get("sku") for u in units)

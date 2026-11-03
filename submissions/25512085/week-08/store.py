@@ -524,8 +524,10 @@ def record_inbound_inquiry(category_or_item: str, matched: bool, path: Path = ST
             missed_ts[category_or_item] = arr[-50:]
             if raw_text:
                 import re
-                for m in re.findall(r"\b([gfGF][0-9a-fA-F]{7,10})\b", raw_text):
+                for m in set(re.findall(r"\b([gfGF][0-9a-fA-F]{7,10})\b", raw_text.lower())):
                     k = m.lower()
+                    if k == category_or_item.lower():
+                        continue
                     s_arr = [t for t in missed_ts.get(k, []) if 0 <= now - float(t) <= 7200]
                     s_arr.append(now)
                     missed_ts[k] = s_arr[-50:]
