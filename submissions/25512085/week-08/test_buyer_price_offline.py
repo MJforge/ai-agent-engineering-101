@@ -166,7 +166,9 @@ class BuyerPriceTests(unittest.TestCase):
     def test_recent_same_grade_similar_life_median_plus_ten_percent(self):
         cap, accept = self.policy()
         self.assertEqual(cap, 11000)
-        self.assertEqual(accept, {"grades": ["A"], "min_hours_left": 48})
+        self.assertEqual(accept["grades"], ["A"])
+        self.assertAlmostEqual(accept["min_hours_left"], 38.4)
+        self.assertGreater(48 - 10 / 3600, accept["min_hours_left"])
         result, _, _, memory = self.run_buyer(receipt=self.receipt(12000, claim="A", expires_at=self.now + 48 * 3600))
         self.assertIsNone(result["receipt"])
         self.assertFalse(memory["shop"]["dishonest"])
@@ -174,7 +176,9 @@ class BuyerPriceTests(unittest.TestCase):
     def test_comparable_accept_pins_untrusted_claim_for_kit(self):
         self.policy()
         result, _, _, _ = self.run_buyer(receipt=self.receipt(10000, claim="A", expires_at=self.now + 48 * 3600))
-        self.assertEqual(result["accept"], {"cert": True, "grades": ["A"], "min_hours_left": 48})
+        self.assertTrue(result["accept"]["cert"])
+        self.assertEqual(result["accept"]["grades"], ["A"])
+        self.assertAlmostEqual(result["accept"]["min_hours_left"], 38.4)
 
     def test_unknown_negotiation_grade_and_expiry_do_not_mix_prices(self):
         self.assertEqual(self.policy(receipt=False), (15030, {}))

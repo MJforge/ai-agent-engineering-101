@@ -441,7 +441,10 @@ def food_price_policy(catalog: dict, hub: dict, sku: str, budget: int, order: di
     tightened = min(cap, math.floor(statistics.median(prices) * 110 / 100))
     # Enforce the hint's lower bound through the kit, not through trust in text.
     # A longer actual shelf life is safe; it never increases our price ceiling.
-    return tightened, {"grades": [grade], "min_hours_left": math.ceil(hours * 100) / 100}
+    # Use the comparison bucket's lower bound, not the unit's current remaining
+    # hours: the latter would fail as soon as time passes before checkout.
+    minimum_hours = max(required + 0.25, 0.8 * hours, 2 ** int(math.log2(hours)))
+    return tightened, {"grades": [grade], "min_hours_left": minimum_hours}
 
 
 def rpc_call(url: str, method: str, params: dict) -> dict:
