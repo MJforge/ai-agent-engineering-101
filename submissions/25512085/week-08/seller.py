@@ -260,6 +260,24 @@ def find_stock_unit(text: str, taken_units: set[str], inv: dict[str, Any], catal
     return None, detected_cat
 
 
+# 안심케어 (Safe-Care) = the 6 h warranty on goods: if the unit breaks within it, the market refunds the full price
+# from our balance. Goods break within 6 h of the sale at these rates by grade: the instructor's figures in class
+# (2026-11-03). The market's agent.md and the week-09 page do not publish them.
+BREAK_RATE = {"A": 0.03, "B": 0.15, "C": 0.35}
+CARE_HOURS = 6
+# Without Safe-Care we expect to keep the whole price, so the fair discount is the expected refund: price x break rate.
+# Grade C is always sold with Safe-Care: without it a third of those buyers would lose the whole price.
+NO_CARE_GRADES = ("A", "B")
+NO_CARE_WORDS = ("without care", "without safe-care", "without safecare", "no care", "no safe-care",
+                 "without warranty", "no warranty", "without the warranty", "안심케어 없이", "안심케어 미포함",
+                 "케어 없이", "보증 없이", "보증 빼고", "미포함")
+
+
+def no_care_price(price: int, cost: int, break_rate: float) -> int:
+    """The same deal without Safe-Care: lower by the expected refund, never below cost x 1.10."""
+    return max(int(cost * 1.10), int(price * (1.0 - break_rate)))
+
+
 def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) -> dict[str, Any]:
     """Compute High-Anchor opening ask, Fast-Close r1_target, hard reserve floor, and warranty_hours
     for a Round 3 stock unit."""
@@ -274,9 +292,10 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
 
     if kind == "goods":
         # Non-food ("goods"): Grade is permanent (A/B/C), no expiration, 1%/day storage fee.
-        # Goods can break up to 6 hours after sale. If warranty is given and unit breaks, full price is refunded!
-        # Therefore, hard floor must strictly guarantee >= 18% margin to hedge against defects.
-        hard_floor = max(cost + 50, int(cost * 1.18))
+        # Prices here include Safe-Care. Expected profit with it is (1 - break_rate) x price - cost, so the floor
+        # covers the expected refund plus 10%: B >= cost x 1.29, C >= cost x 1.69; A keeps the 18% margin floor.
+        break_rate = BREAK_RATE.get(grade, BREAK_RATE["C"])
+        hard_floor = max(cost + 50, int(cost * 1.18), int(cost / (1.0 - break_rate) * 1.10))
         if grade == "A":
             # High anchor: 94~97% of list_price (gives buyer strong discount satisfaction)
             open_ask = max(int(cost * 1.35), min(int(list_price * 0.96), max(market_anchor, int(list_price * 0.92))))
@@ -284,20 +303,19 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
             r1_target = max(int(cost * 1.25), int(round(cost + (open_ask - cost) * 0.55)))
             # Turn 2 mid-step: keeps margin healthy (>20%) while making significant concession
             r2_target = max(hard_floor, int(round(cost + (open_ask - cost) * 0.28)))
-            default_warranty = 6
         elif grade == "B":
             # Grade B cost is only 40-60% of list_price -> strong margin potential
             open_ask = max(int(cost * 1.38), int(list_price * 0.88))
             r1_target = max(int(cost * 1.25), int(list_price * 0.76))
             r2_target = max(hard_floor, int(list_price * 0.68))
-            default_warranty = 6
         else:
             # Grade C (refurb): cost is 25-45% of list_price
             open_ask = max(int(cost * 1.45), int(list_price * 0.82))
             r1_target = max(int(cost * 1.28), int(list_price * 0.70))
             r2_target = max(hard_floor, int(list_price * 0.60))
-            default_warranty = 3
+        default_warranty = CARE_HOURS
     else:
+        break_rate = 0.0
         # Perishable/Non-perishable Food ("food"): no storage fee, markdown dynamically as shelf life drops
         if grade == "A":
             hard_floor = max(cost + 20, int(cost * 1.10))
@@ -316,6 +334,7 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
             r2_target = hard_floor
         default_warranty = 0
 
+    open_ask = max(open_ask, hard_floor)
     r1_target = min(open_ask, max(hard_floor, r1_target))
     r2_target = min(r1_target, max(hard_floor, r2_target))
     disc_from_list = max(1, int(round((1.0 - open_ask / max(1, list_price)) * 100)))
@@ -329,6 +348,7 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
         "grade": grade,
         "hours_left": hours_left,
         "warranty_hours": default_warranty,
+        "break_rate": break_rate,
         "disc_pct": disc_from_list,
     }
 
@@ -612,12 +632,17 @@ class Seller(AgentExecutor):
                 ]
                 if hours_left is not None:
                     spec_parts.append(f"shelf_life_left={hours_left}h")
-                if warranty > 0:
-                    spec_parts.append(f"warranty={warranty}h")
 
+                care_note = ""
+                if unit.get("kind") == "goods":
+                    care_note = (f" Price includes Safe-Care (안심케어): if it breaks within {CARE_HOURS} h of the sale, "
+                                 f"the market refunds you the full price.")
+                    if grade in NO_CARE_GRADES:
+                        care_note += (f" Without Safe-Care: {no_care_price(ask, unit['cost'], pricing['break_rate'])}"
+                                      f" (no refund); say 'without care' to take that option.")
                 opening_msg = (
                     f"{unit['name']} ({', '.join(spec_parts)}): asking price {ask} "
-                    f"({pricing['disc_pct']}% below list price {list_price}). "
+                    f"({pricing['disc_pct']}% below list price {list_price}).{care_note} "
                     f"Send your offer as a number or reply {ask} for an instant Ed25519-signed receipt."
                 )
                 print(
@@ -625,7 +650,6 @@ class Seller(AgentExecutor):
                     f"grade={grade}, ask={ask}, r1_target={r1_target}, floor={hard_floor}, warranty={warranty}h",
                     flush=True,
                 )
-                wants_warranty = any(kw in text.lower() for kw in ("warranty", "guarantee", "service", "care", "보증"))
                 # Immediate Opening Ask Lock: unit is bound to this task so concurrent buyers cannot touch it
                 self.open[task.id] = {
                     "mode": "round3_stock",
@@ -638,7 +662,9 @@ class Seller(AgentExecutor):
                     "list_price": list_price,
                     "grade": grade,
                     "warranty_hours": warranty,
-                    "wants_warranty": wants_warranty,
+                    "break_rate": pricing["break_rate"],
+                    "no_care": (unit.get("kind") == "goods" and grade in NO_CARE_GRADES
+                                and any(w in text.lower() for w in NO_CARE_WORDS)),
                     "rounds": 0,
                     "created_at": now_ts,
                     "offers": [],
@@ -697,7 +723,9 @@ class Seller(AgentExecutor):
         # Parsed by rules only. The per-turn Codex CLI call (2.5 s timeout) was unlikely to answer in time, added
         # up to ~3 s to every turn, and could leave codex processes running after a timeout on a 1 GB VM. The
         # model is used outside the negotiation path instead, where latency does not matter.
-        wants_w = any(kw in text.lower() for kw in ("warranty", "guarantee", "service", "care", "보증"))
+        text_low = text.lower()
+        drops_care = any(w in text_low for w in NO_CARE_WORDS)
+        wants_w = not drops_care and any(kw in text_low for kw in ("warranty", "guarantee", "service", "care", "보증"))
         offer = extract_buyer_offer(
             text,
             current_ask=int(deal.get("ask") or 100),
@@ -711,8 +739,6 @@ class Seller(AgentExecutor):
 
         deal["rounds"] += 1
         deal.setdefault("offers", []).append(offer)
-        if wants_w:
-            deal["wants_warranty"] = True
 
         if deal.get("mode") == "round3_stock":
             u = deal["unit"]
@@ -724,10 +750,21 @@ class Seller(AgentExecutor):
                 return
 
             cost = int(u.get("cost") or 100)
-            list_price = int(deal.get("list_price") or u.get("list_price") or cost * 1.5)
             hard_floor = max(cost, int(deal.get("hard_floor") or cost))
             r1_target = int(deal.get("r1_target") or hard_floor)
             r2_target = int(deal.get("r2_target") or hard_floor)
+
+            # Safe-Care choice: the buyer drops it by saying so (grades A/B only) and asking for it brings it back.
+            # The stored targets include Safe-Care; without it every target is lower by the expected refund.
+            is_goods = u.get("kind") == "goods"
+            if is_goods and drops_care and deal.get("grade") in NO_CARE_GRADES:
+                deal["no_care"] = True
+            elif wants_w:
+                deal["no_care"] = False
+            no_care = bool(is_goods and deal.get("no_care"))
+            b = float(deal.get("break_rate") or 0.0)
+            in_mode = (lambda p: no_care_price(p, cost, b)) if no_care else (lambda p: p)
+            hard_floor, r1_target, r2_target = in_mode(hard_floor), in_mode(r1_target), in_mode(r2_target)
 
             # Balanced 3-Turn Concession Policy:
             # Closes fast (max 2~3 turns) before buyer walkaway/speed-penalty while preserving healthy margin & warranty hedging:
@@ -741,23 +778,10 @@ class Seller(AgentExecutor):
             )
 
             if should_accept and offer >= cost:
-                final_price = min(int(deal["ask"]), int(offer)) if offer > deal["ask"] else int(offer)
-                
-                # Smart Warranty Policy:
-                # 1. If buyer explicitly asks for warranty OR pays fair price (>= 75% list or >= cost*1.22):
-                #    Grant full 6h warranty (ensures 100% ACP payment success and prevents checkout refusal!)
-                # 2. On Grade A goods (70% of inventory, defect rate < 3%): always grant 6h warranty because defect risk is negligible
-                #    and getting deals settled (>= 20 deals) is top priority.
-                # 3. Only on heavily discounted Grade B/C (refurb/damaged) goods where buyer did NOT ask for warranty:
-                #    Drop warranty to 0h to eliminate defect refund exposure.
-                wants_w = bool(deal.get("wants_warranty"))
-                if u.get("kind") == "goods":
-                    if live_grade == "A" or wants_w or final_price >= int(list_price * 0.75) or final_price >= int(cost * 1.22):
-                        warranty = 6
-                    else:
-                        warranty = 0
-                else:
-                    warranty = 0
+                current_ask = in_mode(int(deal["ask"]))
+                final_price = min(current_ask, int(offer))
+                # Goods carry Safe-Care unless the buyer explicitly took the cheaper no-care price; food has none
+                warranty = CARE_HOURS if is_goods and not no_care else 0
 
                 receipt = {
                     "shop": SHOP_NAME,
@@ -798,17 +822,23 @@ class Seller(AgentExecutor):
             # After Turn 1: counter with r1_target
             # After Turn 2: counter with r2_target (moderate concession to encourage close on Turn 2/3)
             # After Turn 3+: counter with hard_floor
-            if deal["rounds"] == 1:
-                new_ask = max(hard_floor, r1_target)
-            elif deal["rounds"] == 2:
-                new_ask = max(hard_floor, r2_target)
-            else:
-                new_ask = hard_floor
-            deal["ask"] = new_ask
+            # deal["ask"] stays in Safe-Care terms; the message quotes the price for the option the buyer is on
+            care_targets = (int(deal.get("r1_target") or 0), int(deal.get("r2_target") or 0), int(deal.get("hard_floor") or 0))
+            step = care_targets[0] if deal["rounds"] == 1 else (care_targets[1] if deal["rounds"] == 2 else care_targets[2])
+            deal["ask"] = max(care_targets[2], step)
+            new_ask = in_mode(deal["ask"])
 
+            if not is_goods:
+                terms = ""
+            elif no_care:
+                terms = f" without Safe-Care (no refund if it breaks); with Safe-Care it is {deal['ask']}"
+            else:
+                terms = f" with Safe-Care ({CARE_HOURS} h full refund if it breaks)"
+                if deal.get("grade") in NO_CARE_GRADES:
+                    terms += f"; without Safe-Care {no_care_price(deal['ask'], cost, b)}"
             await up.requires_input(say(
                 f"Special concession — {u['name']} ({u['sku']}, grade={live_grade}, cert=true): "
-                f"asking price {new_ask}. Reply with an offer or accept {new_ask} to close now."
+                f"asking price {new_ask}{terms}. Reply with an offer or accept {new_ask} to close now."
             ))
             return
             return

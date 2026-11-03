@@ -265,7 +265,8 @@ def plan_with_hub(
         post_text = (
             f"[mjforge Fulfillment Report] Stage-{stage} inventory active ({len(units)} certified units across "
             f"{', '.join(top_cats)}). All units ship with market certificate (cert=true), honest grade claims, "
-            f"warranty on Grade-A goods, and instant 1-turn discount below list price."
+            f"6h Safe-Care (안심케어) full-refund warranty on all goods (A/B can drop it for a lower price), "
+            f"and instant 1-turn discount below list price."
         )
         queue_forum_action(market_dir, {"post": post_text, "refs": refs, "as": "shop"})
         hub["forum_state"]["last_shop_post_ts"] = now
