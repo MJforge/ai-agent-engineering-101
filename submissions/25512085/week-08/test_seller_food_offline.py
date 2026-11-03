@@ -2,7 +2,6 @@
 
 Only a unique temporary directory is written; no market, CLI, or existing key/state is used.
 """
-import asyncio
 import base64
 from contextlib import ExitStack
 from pathlib import Path
@@ -96,7 +95,18 @@ class FoodSafetyTests(unittest.TestCase):
     def turn(self, message, task_id="task-1"):
         context = SimpleNamespace(current_task=SimpleNamespace(id=task_id, context_id="ctx"), message=message)
         queue = FakeQueue()
-        asyncio.run(self.agent.execute(context, queue))
+        # All fake I/O awaits complete inline. Drive the real execute coroutine
+        # directly: Windows asyncio.run creates a socketpair even with no network I/O.
+        coroutine = self.agent.execute(context, queue)
+        try:
+            try:
+                coroutine.send(None)
+            except StopIteration:
+                pass
+            else:
+                self.fail("Unexpected external asynchronous I/O")
+        finally:
+            coroutine.close()
         return queue.events
 
     def assertNoReceipt(self, events):
@@ -219,12 +229,13 @@ class FoodSafetyTests(unittest.TestCase):
         self.assertFalse(self.agent.open)
 
     def test_live_expiry_rechecked(self):
-        self.inventory["units"] = [self.food(72.5)]
+        self.inventory["units"] = [self.food(72.26)]
         self.turn("f00000001 use within 72h")
-        self.now += 0.3 * 3600
+        self.now += 0.02 * 3600  # 72s: below the existing 90s negotiation TTL.
         events = self.turn("offer 36000")
         self.assertNoReceipt(events)
         self.assertEqual(events[0][0], "reject")
+        self.assertIn("unit released", events[0][1])
         self.assertFalse(self.agent.open)
 
     def test_explicit_period_and_price_answer_closes_at_price_not_hours(self):
