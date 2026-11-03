@@ -47,7 +47,7 @@ MEMORY_FILE = Path("memory.json")
 MAX_RECENT_HISTORY = 5
 # Buyer policy choices, not market rules or empirically optimal discounts.
 FOOD_LIST_PRICE_PERCENT = 90
-GOODS_OFFER_CAP_PERCENT = 85
+GOODS_OFFER_CAP_PERCENT = 92
 COMPARABLE_WINDOW_S = 3 * 3600
 COMPARABLE_MIN_SAMPLES = 3
 REQUEST_DEADLINE = ContextVar("buyer_request_deadline", default=None)
@@ -205,6 +205,7 @@ def summarize_shop(shop: dict, memory: dict, board_row: dict | None = None, hub_
 
     dishonest_claims = int(hub_trust.get("dishonest", 0))
     honest_claims = int(hub_trust.get("honest", 0))
+    settled_cnt = int(hub_trust.get("settled", 0))
     broken_cnt = int(hub_trust.get("broken", 0))
     refuses_cnt = int(hub_trust.get("refuses", 0))
 
@@ -227,9 +228,9 @@ def summarize_shop(shop: dict, memory: dict, board_row: dict | None = None, hub_
         score -= 5.0
 
     # Apply Round 3 empirical trust adjustments from state_hub.json
-    score += min(1.0, honest_claims * 0.15)
+    score += min(1.2, (honest_claims + settled_cnt) * 0.20)
     score -= broken_cnt * 0.6
-    score -= refuses_cnt * 0.4
+    score -= refuses_cnt * 1.2
 
     return {
         "name": name,
@@ -293,8 +294,10 @@ def pick_round3_shop_and_sku(
     for c in summaries:
         c["offers"] = [off for off in c["offers"] if off.get("sku") in acceptable]
 
-    # Filter to shops that actually have matching in-stock offers for this order
-    stocked = [c for c in summaries if c.get("offers") and not c["dishonest"]]
+    # Filter to shops that actually have matching in-stock offers for this order.
+    # Prefer student shops over house shops (which rarely complete Round 3 ACP checkout).
+    student_stocked = [c for c in summaries if c.get("offers") and not c["dishonest"] and not c["is_house"]]
+    stocked = student_stocked or [c for c in summaries if c.get("offers") and not c["dishonest"]]
     if not stocked:
         stocked = [c for c in summaries if c.get("offers")]
 
@@ -341,7 +344,9 @@ def pick_round3_shop_and_sku(
                 est_pay = min(budget, max(est_cost_floor, int(list_price * 0.80)))
             est_surplus = max(500, list_price - est_pay)
             # Combined utility: expected surplus * feasibility * trust weight
-            trust_factor = max(0.5, min(1.3, (c["score"] / 4.2) - div_pen))
+            trust_factor = max(0.5, min(1.4, (c["score"] / 4.2) - div_pen))
+            if int(c.get("deals") or 0) >= 20:
+                trust_factor *= 1.15
             utility = est_surplus * feasibility_mult * trust_factor
             best_candidates.append((utility, c, {"sku": sku, "name": off.get("name", sku), "list_price": list_price, "est_cost": est_cost_floor}))
 
