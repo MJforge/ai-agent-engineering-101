@@ -482,6 +482,8 @@ def plan_with_hub(
             break
         if cat in expanded:
             continue
+        if is_cash_rich and is_full_catalog and demand_scores.get(cat, 0) <= 0 and not cat_has_high_goods.get(cat, False):
+            continue
         held_bands = {price_band(int(catalog[s].get("list_price", 0)), medians[cat])
                       for s in held_skus if s in catalog and catalog[s].get("category") == cat}
         pool = [x for x in cat_map[cat] if x["sku"] not in held_skus and eligible(x)
