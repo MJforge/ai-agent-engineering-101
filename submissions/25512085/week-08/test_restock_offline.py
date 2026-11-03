@@ -1,0 +1,183 @@
+"""Offline restock regressions. All writes use a unique temporary directory."""
+import contextlib
+import math
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import restock
+import store
+
+
+NOW = 1_790_000_000
+URL = "https://own.invalid"
+
+
+class RestockTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="restock-offline-")
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name)
+        self.hub = store.default_hub()
+        self.catalog = {
+            sku: {"kind": "goods" if i > 1 else "food", "category": f"cat{i}",
+                  "list_price": 20_001, "shelf_hours": 400}
+            for i, sku in enumerate(restock.TARGET_CAPS)
+        }
+        self.catalog["G07ec17d5"]["list_price"] = 279_000
+        self.inv = {"balance": 5_000_000, "units": [],
+                    "restock": {"open": True, "opens_at": NOW - 20, "closes_at": NOW + 160}}
+        self.enter = contextlib.ExitStack()
+        self.addCleanup(self.enter.close)
+        self.enter.enter_context(patch.object(restock.time, "time", return_value=NOW))
+        self.enter.enter_context(patch.object(restock, "ROUND_END_TS", NOW + 10_000_000))
+        self.enter.enter_context(patch.object(restock, "queue_forum_action"))
+        # A missed mock must never contact the market.
+        self.enter.enter_context(patch.object(store.urllib.request, "urlopen", side_effect=AssertionError("network forbidden")))
+
+    def stock(self, sku, n):
+        self.inv["units"] += [{"sku": sku, "category": self.catalog[sku]["category"],
+                               "grade": "A", "cost": 10_000} for _ in range(n)]
+
+    def plan(self, rows=()):
+        return restock.plan_with_hub(self.hub, self.path, self.catalog, self.inv, list(rows))
+
+    def cost(self, plan):
+        return sum(math.ceil(self.catalog[b["sku"]]["list_price"] * .75) * b["qty"]
+                   for b in plan["buy"])
+
+    def settle(self, seq, shop=URL, buyer="other", sku="G97cd0437", ts=NOW):
+        return {"seq": seq, "ts": ts, "kind": "settle",
+                "data": {"shop": shop, "buyer": buyer, "item": sku, "amount": 1000}}
+
+    def test_own_identity_join_other_shop_and_own_buyer(self):
+        rows = [{"seq": 1, "kind": "join", "data": {"role": "shop", "name": store.OWN_NAME, "url": URL}}]
+        rows += [self.settle(2), self.settle(3, shop="https://other.invalid"),
+                 self.settle(4, buyer=store.OWN_NAME), self.settle(5, ts=NOW-1201)]
+        self.plan(rows)
+        self.plan(rows)  # stale cursor must not count again
+        radar = self.hub["demand_radar"]
+        self.assertEqual(len(radar["own_sku_sold_ts"]["G97cd0437"]), 2)
+        self.assertEqual(len(radar["sku_sold_ts"]["G97cd0437"]), 3)
+        self.assertEqual(sum(0 <= NOW-t <= 1200 for t in radar["own_sku_sold_ts"]["G97cd0437"]), 1)
+
+    def test_unknown_shop_never_own_and_historical_join(self):
+        self.plan([self.settle(10)])
+        self.assertFalse(self.hub["demand_radar"].get("own_sku_sold_ts"))
+        self.plan([{"seq": 1, "kind": "join", "data": {
+            "role": "shop", "name": store.OWN_NAME, "url": URL}}, self.settle(11)])
+        self.assertEqual(self.hub["own_shop_urls"], [URL])
+        self.assertEqual(len(self.hub["demand_radar"]["own_sku_sold_ts"]["G97cd0437"]), 1)
+
+    def test_requested_current_stocks(self):
+        for sku, n in zip(restock.TARGET_CAPS, [0, 1, 1, 2, 4]):
+            self.stock(sku, n)
+        buys = {x["sku"]: x["qty"] for x in self.plan()["buy"]}
+        self.assertEqual([buys.get(s, 0) for s in restock.TARGET_CAPS], [2, 1, 1, 0, 0])
+
+    def test_sufficient_food_no_expansion_from_market(self):
+        for i, name in enumerate(["kimchi", "water", "dumpling", "snack"]):
+            self.catalog[name] = {"kind": "food", "category": name, "list_price": 10_000, "shelf_hours": 400}
+            self.stock(name, 8)
+        for sku, n in restock.TARGET_CAPS.items():
+            self.stock(sku, n)
+        rows = [self.settle(i+1, shop="https://other.invalid", sku="water") for i in range(100)]
+        self.assertEqual(self.plan(rows)["buy"], [])
+
+    def test_own_turnover_caps_and_short_shelf(self):
+        for sku, n in restock.TARGET_CAPS.items():
+            self.stock(sku, n)
+        for sku, kind, qty in [("food", "food", 1), ("goods", "goods", 1), ("short", "food", 1)]:
+            self.catalog[sku] = {"kind": kind, "category": sku, "list_price": 1000,
+                                 "shelf_hours": 12 if sku == "short" else 400}
+            self.stock(sku, qty)
+        self.hub["demand_radar"]["own_sku_sold_ts"] = {
+            "food": [NOW]*30, "goods": [NOW]*30, "short": [NOW-1201]*30}
+        buys = {b["sku"]: b["qty"] for b in self.plan()["buy"]}
+        self.assertEqual(buys, {"food": 3, "goods": 2})
+
+    def test_high_ticket_and_unknown_new_sku_blocked(self):
+        self.stock("G97cd0437", 2)
+        self.hub["demand_radar"]["own_sku_sold_ts"] = {"G07ec17d5": [NOW]*50, "new": [NOW]*50}
+        self.catalog["new"] = {"kind": "goods", "category": "new", "list_price": 1000}
+        self.assertNotIn("G07ec17d5", [b["sku"] for b in self.plan()["buy"]])
+        self.assertNotIn("new", [b["sku"] for b in self.plan()["buy"]])
+
+    def test_repeat_restart_and_next_window(self):
+        path = self.path / "hub.json"
+        total = 0
+        for _ in range(15):
+            total += self.cost(self.plan())
+            store.save_hub(self.hub, path)
+            self.hub = store.load_hub(path)
+        self.assertLessEqual(total, 200_000)
+        self.assertTrue(total > 0)
+        self.inv["restock"] = {"open": True, "opens_at": NOW-10, "closes_at": NOW+170}
+        self.assertTrue(self.plan()["buy"])
+
+    def test_midwindow_supply_backfill_and_dedup(self):
+        self.hub["ledger_seq"] = 100
+        rows = [{"seq": 2, "ts": NOW-5, "kind": "supply",
+                 "data": {"shop": store.OWN_NAME, "total": 210_000, "qty": 10}}]
+        self.assertEqual(self.plan(rows)["buy"], [])
+        self.assertEqual(self.plan(rows)["buy"], [])
+        self.assertEqual(len(self.hub["own_supplies"]), 1)
+
+    def test_success_does_not_double_charge_reservation(self):
+        first = self.cost(self.plan())
+        row = {"seq": 1, "ts": NOW, "kind": "supply",
+               "data": {"shop": store.OWN_NAME, "total": first, "qty": 1}}
+        second = self.cost(self.plan([row]))
+        self.assertLessEqual(first + second, 200_000)
+        self.assertEqual(next(iter(self.hub["restock_windows"].values()))["reserved"], first+second)
+
+    def test_closed_observes_and_missing_window_fails_closed(self):
+        self.hub["own_shop_urls"] = [URL]
+        self.inv["restock"]["opens_at"] = NOW + 600
+        self.inv["restock"]["closes_at"] = NOW + 780
+        self.assertEqual(self.plan([self.settle(1)])["buy"], [])
+        self.assertTrue(self.hub["demand_radar"]["own_sku_sold_ts"])
+        del self.inv["restock"]
+        self.assertEqual(self.plan()["buy"], [])
+
+    def test_cold_start_and_cash_floor(self):
+        plan = self.plan()
+        self.assertTrue(plan["buy"])
+        self.assertLessEqual(self.cost(plan), 200_000)
+        self.assertTrue(all(1 <= b["qty"] <= 20 for b in plan["buy"]))
+        self.inv["balance"] = 600_000
+        self.assertEqual(self.plan()["buy"], [])
+
+    def test_build_bootstrap_outside_lock_and_bankruptcy_endstop(self):
+        locked = []
+        @contextlib.contextmanager
+        def mutate():
+            locked.append(True)
+            try:
+                yield self.hub
+            finally:
+                locked.pop()
+        def urls():
+            self.assertFalse(locked)
+            return [URL, "https://old.invalid"]
+        def rows(*args):
+            self.assertFalse(locked)
+            return [self.settle(1)]
+        with patch.object(restock, "load_catalog", return_value=self.catalog), \
+             patch.object(restock, "load_inventory", return_value=self.inv), \
+             patch.object(restock, "load_hub", return_value=self.hub), \
+             patch.object(restock, "mutate_hub", mutate), \
+             patch.object(restock, "fetch_own_shop_urls", side_effect=urls), \
+             patch.object(restock, "fetch_ledger_rows", side_effect=rows):
+            restock.build_restock_plan(self.path)
+            self.assertEqual(self.hub["own_shop_urls"], sorted([URL, "https://old.invalid"]))
+            self.assertTrue(self.hub["demand_radar"]["own_sku_sold_ts"])
+            with patch.object(restock, "ROUND_END_TS", NOW):
+                self.assertEqual(restock.build_restock_plan(self.path), {"buy": []})
+            self.inv.update(balance=100, bankrupt_line=500_000, bankruptcies_left=1)
+            self.assertEqual(restock.build_restock_plan(self.path), {"buy": [], "bankrupt": True})
+
+
+if __name__ == "__main__":
+    unittest.main()
