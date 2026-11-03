@@ -1,4 +1,4 @@
-"""Conservative own-turnover restocking with a persistent 200,000-credit window cap.
+"""Own-turnover restoration, then bounded assortment; persistent 200k/450k windows.
 
 Market settlements select candidates, never purchase depth. Existing cash-floor,
 shelf-life, bankruptcy and end-of-round safeguards remain in force.
@@ -65,6 +65,21 @@ HIGH_VALUE_CAPS = {
     "Ge62449c9": 3,  # 87,900 Hotel comforter (#5 market revenue SKU)
     "G200e39a3": 3,  # 37,900 Kimchi 10kg (#6 market revenue SKU)
 }
+EXPLORATION_SKUS = 35
+EXPLORATION_UNITS = 80
+EXPLORATION_PER_WINDOW = 4
+
+
+def price_covered(info: dict[str, Any], held: set[str], catalog: dict[str, Any]) -> bool:
+    """Coverage follows the buyer's reference-price window, not SKU identity."""
+    ref = int(info.get("list_price", 0))
+    return any(catalog.get(s, {}).get("category") == info.get("category")
+               and .5 * ref <= int(catalog[s].get("list_price", 0)) <= 1.5 * ref
+               for s in held if s in catalog)
+
+
+def price_band(price: int, median: float) -> int:
+    return 0 if price <= .67 * median else 1 if price <= 1.5 * median else 2
 
 
 def supply_window(inv: dict[str, Any]) -> tuple[float, float] | None:
@@ -157,7 +172,8 @@ def compute_category_demand_scores(
     # Scan recent forum posts for category leaf mentions
     for post in (forum_posts or [])[:40]:
         txt = str(post.get("text") or "").lower()
-        if not txt:
+        # Untrusted prose only supplies a weak category hint, never price/quantity.
+        if not txt or not any(word in txt for word in ("구합니다", "구매 희망", "삽니다")):
             continue
         for leaf, full_list in leaf_to_full.items():
             if len(leaf) >= 2 and leaf in txt:
@@ -211,7 +227,16 @@ def plan_with_hub(
     rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """The plan itself. Runs inside mutate_hub, which saves the hub on return: do not save it here."""
+    # Keep evidence of previously verified own sales before store's short tail is
+    # pruned. Only catalog SKUs qualify; this is not a market-demand prediction.
+    proven = set(hub.get("restock_proven_skus", []))
+    proven.update(s for s, times in hub.get("demand_radar", {}).get("own_sku_sold_ts", {}).items()
+                  if times)
+    proven.update(e.get("sku") for e in hub.get("own_sale_events", {}).values())
     apply_ledger_rows(hub, rows, catalog)
+    proven.update(s for s, times in hub.get("demand_radar", {}).get("own_sku_sold_ts", {}).items()
+                  if times)
+    hub["restock_proven_skus"] = sorted(s for s in proven if s in catalog)
     cs = update_capital_stage(hub, inv)
     forum_posts = load_json_safe(market_dir / "forum.json", []) or []
 
@@ -255,15 +280,15 @@ def plan_with_hub(
     sku_market_recent = {s: n for s, ts in (radar.get("sku_sold_ts") or {}).items()
                          if (n := sum(1 for t in ts if 0 <= now_s - t <= RECENT_S)) > 0}
     cat_recent = {c: n for c, ts in (radar.get("cat_sold_ts") or {}).items()
-                  if (n := sum(1 for t in ts if now_s - t <= RECENT_S)) > 0}
+                  if (n := sum(1 for t in ts if 0 <= now_s - t <= RECENT_S)) > 0}
 
     demand_scores = compute_category_demand_scores(hub, set(cat_map.keys()), forum_posts, cat_recent)
-    medians = category_medians(market_dir, cat_map)
+    medians = {c: float(statistics.median(int(x.get("list_price", 0)) for x in skus))
+               for c, skus in cat_map.items()}
     held_count = collections.Counter(u.get("sku") for u in units)
 
-    # Candidate categories: what the ledger and our inquiries say sells first, then a small seed so the shop is
-    # visible from the first window: SEED_GOODS_COUNT cheaper goods categories and SEED_FOOD_CATEGORY_COUNT
-    # long-shelf food categories, one SKU near the category median each. The seed grows from ledger data, not up front.
+    # Prefer observed demand, then the original small long-shelf/cheap seed set.
+    # This is a tie-break preference, not a restriction on catalog categories.
     ranked_demand_cats = [
         c for c, sc in sorted(
             demand_scores.items(),
@@ -279,39 +304,47 @@ def plan_with_hub(
     max_goods_price = MAX_GOODS_STAGE3_PRICE if stage >= 3 else MAX_GOODS_STAGE1_PRICE
     buy_orders: list[dict[str, Any]] = []
     spent_est = 0
+    planned = budget_state.setdefault("planned_skus", {})
+    expanded = budget_state.setdefault("assortment_categories", [])
+    # Reservations count as coverage even when inventory publication is delayed.
+    held_skus.update(s for s in planned if s in catalog)
+    projected_units = len(units) + sum(max(0, n - held_count[s]) for s, n in planned.items())
 
-    def add_line(sku: str, qty: int) -> int:
+    def add_line(sku: str, qty: int, limit: int) -> int:
         """Queue qty units of sku if the tick budget allows; returns how many were queued."""
-        nonlocal spent_est
+        nonlocal spent_est, projected_units
+        if sku in planned or any(b["sku"] == sku for b in buy_orders):
+            return 0
         unit_cost = max(1, math.ceil(int(catalog.get(sku, {}).get("list_price", 0)) * 0.75))
-        qty = min(qty, 20, (tick_budget - spent_est) // unit_cost)
+        qty = min(qty, 20, (min(tick_budget, limit) - spent_est) // unit_cost)
         if qty <= 0:
             return 0
         buy_orders.append({"sku": sku, "qty": qty})
         held_skus.add(sku)
         held_count[sku] += qty
         spent_est += unit_cost * qty
+        projected_units += qty
+        planned[sku] = qty
         return qty
 
     # Known small baselines are targets, never orders to purchase regardless of stock.
     active_caps = {**TARGET_CAPS, **HIGH_VALUE_CAPS} if is_cash_rich else TARGET_CAPS
-    if is_cash_rich:
-        def rev_priority(s: str) -> float:
-            lp = int(catalog.get(s, {}).get("list_price", 0))
-            if lp > max_goods_price:
-                return -1.0
-            own_n = sku_recent.get(s, 0)
-            mkt_n = sku_market_recent.get(s, 0)
-            return (own_n * 2.5 + mkt_n + (1.5 if s in HIGH_VALUE_CAPS else 0.5)) * lp
+    hot_market_skus = [s for s, n in sku_market_recent.items()
+                       if is_cash_rich and n >= 2
+                       and catalog.get(s, {}).get("kind", "goods") == "goods"
+                       and 35_000 <= int(catalog.get(s, {}).get("list_price", 0)) <= max_goods_price]
+    candidates = sorted(set(active_caps) | set(sku_recent) | set(hot_market_skus),
+                        key=lambda s: (held_count[s] > 0,
+                                       not (s in active_caps and (s in proven or sku_market_recent.get(s, 0) >= 2)),
+                                       -sku_recent.get(s, 0),
+                                       -sku_market_recent.get(s, 0) * int(catalog.get(s, {}).get("list_price", 0)), s))
+    core_limit = min(tick_budget, max(0, int(eff_window_budget * .6) - used))
+    high_unit_allowed = not budget_state.get("high_unit_allowance", False)
 
-        hot_market_skus = [
-            s for s, n in sku_market_recent.items()
-            if n >= 2 and 35_000 <= int(catalog.get(s, {}).get("list_price", 0)) <= max_goods_price
-        ]
-        pool = list(active_caps) + list(sku_recent) + hot_market_skus
-        candidates = sorted(dict.fromkeys(pool), key=lambda s: -rev_priority(s))
-    else:
-        candidates = list(TARGET_CAPS) + sorted(sku_recent, key=lambda s: -sku_recent[s])
+    def eligible(info: dict[str, Any], own: bool = False) -> bool:
+        lp = int(info.get("list_price", 0))
+        return (0 < lp <= (max_goods_price if info.get("kind", "goods") == "goods" else MAX_FOOD_LIST_PRICE)
+                and not (info.get("kind") == "food" and (info.get("shelf_hours") or 0) < 96 and not own))
 
     for sku in dict.fromkeys(candidates):
         if len(buy_orders) >= 10:
@@ -320,50 +353,65 @@ def plan_with_hub(
         if not info:
             continue
         count = sku_recent.get(sku, 0)
-        mkt_count = sku_market_recent.get(sku, 0)
         kind = info.get("kind", "goods")
         lp = int(info.get("list_price", 0))
-        if lp > (max_goods_price if kind == "goods" else MAX_FOOD_LIST_PRICE):
+        if not eligible(info, sku in proven):
             continue
-        if kind == "food" and info.get("shelf_hours") is not None and info["shelf_hours"] < 96 and not count:
-            continue
-        # No new SKU experiments while the shop has stock, unless cash-rich & proven high-value target/market hit.
-        if units and sku not in held_skus and sku not in active_caps and not (is_cash_rich and mkt_count >= 2 and lp >= 35_000):
-            continue
-        cap = active_caps.get(sku, 3 if kind == "goods" else 4)
-        target = cap if sku in active_caps else min(cap, count + 1)
-        if count and sku in active_caps:
-            target = min(cap, max(1, math.ceil(count * 1.25)))
-        if kind == "goods" and lp >= 80_000:
-            if is_cash_rich and (sku in HIGH_VALUE_CAPS or mkt_count >= 2):
-                # Allow 1 seed unit when out of stock so we break the 0-stock deadlock, up to cap when selling
-                target = min(cap, max(1, count + (1 if mkt_count >= 3 else 0)))
-                if held_count[sku] >= target:
-                    continue
-            elif not count or held_count[sku] >= cap:
-                continue
-        need = target - held_count[sku]
+        cap = min(active_caps.get(sku, 3 if kind == "goods" else 4), 3 if kind == "goods" else 4)
+        if held_count[sku]:
+            # Market popularity or rich cash never justifies topping up stocked SKUs.
+            need = min(cap, math.ceil(count * 1.25)) - held_count[sku] if count > held_count[sku] else 0
+        elif count:
+            need = min(2, cap, math.ceil(count * 1.25))
+        elif (sku in active_caps and (sku in proven or sku_market_recent.get(sku, 0) >= 2)) or sku in hot_market_skus:
+            need = 1
+        else:
+            need = 0
         if need > 0:
-            add_line(sku, need)
+            experiment = sku not in active_caps and sku not in proven
+            if experiment and (
+                    len(held_skus) >= EXPLORATION_SKUS or projected_units >= EXPLORATION_UNITS
+                    or len(expanded) >= EXPLORATION_PER_WINDOW or info.get("category") in expanded
+                    or price_covered(info, held_skus, catalog)):
+                continue
+            cost = math.ceil(lp * .75)
+            limit = core_limit
+            # One expensive unit may cross the 60% partition, but leaves 50k
+            # for breadth in a rich window (e.g. the 423,810 mattress).
+            allowance = (is_cash_rich and high_unit_allowed and not held_count[sku]
+                         and cost > core_limit - spent_est
+                         and spent_est + cost <= tick_budget - 50_000)
+            if allowance:
+                limit = spent_est + cost
+            if add_line(sku, 1 if allowance else need, limit):
+                if experiment:
+                    expanded.append(info.get("category"))
+                if allowance:
+                    high_unit_allowed = False
+                    budget_state["high_unit_allowance"] = True
 
-    # Only a genuinely empty shop may seed new categories. Market signals select
-    # candidates, but do not increase seed quantities or the shared window budget.
-    if not units:
-        for cat in candidate_categories:
-            if len(buy_orders) >= 10:
+    # Soft caps stop experiments, not proven/core stockout restoration above.
+    # Rank all categories: absent category first, then an uncovered price band.
+    covered_cats = {catalog[s].get("category") for s in held_skus if s in catalog}
+    ranked = sorted(cat_map, key=lambda c: (c in covered_cats, -demand_scores.get(c, 0),
+                                          c not in candidate_categories, c))
+    for cat in ranked:
+        if (len(buy_orders) >= 10 or len(expanded) >= EXPLORATION_PER_WINDOW
+                or len(held_skus) >= EXPLORATION_SKUS or projected_units >= EXPLORATION_UNITS):
+            break
+        if cat in expanded:
+            continue
+        held_bands = {price_band(int(catalog[s].get("list_price", 0)), medians[cat])
+                      for s in held_skus if s in catalog and catalog[s].get("category") == cat}
+        pool = [x for x in cat_map[cat] if x["sku"] not in held_skus and eligible(x)
+                and x["sku"] not in TARGET_CAPS and x["sku"] not in HIGH_VALUE_CAPS
+                and not price_covered(x, held_skus, catalog)
+                and price_band(int(x.get("list_price", 0)), medians[cat]) not in held_bands]
+        pool.sort(key=lambda x: (abs(math.log(max(1, int(x.get("list_price", 0))) / max(1., medians[cat]))), x["sku"]))
+        for info in pool:
+            if add_line(info["sku"], 1, tick_budget):
+                expanded.append(cat)
                 break
-            cat_skus = cat_map[cat]
-            kind = cat_skus[0].get("kind", "goods")
-            shelf = cat_skus[0].get("shelf_hours")
-            if kind == "food" and shelf is not None and shelf < 96:
-                continue
-            if any(catalog[s].get("category") == cat for s in held_skus if s in catalog):
-                continue
-            lo, hi = (MIN_GOODS_LIST_PRICE, min(max_goods_price, 79_999)) if kind == "goods" else (MIN_FOOD_LIST_PRICE, MAX_FOOD_LIST_PRICE)
-            for info in select_near_median(cat_skus, held_skus, medians.get(cat, 0), 1, lo, hi):
-                if int(info.get("list_price", 0)) > hi:
-                    continue
-                add_line(info["sku"], 1 if kind == "goods" else 2)
 
     budget_state["reserved"] += spent_est
 
