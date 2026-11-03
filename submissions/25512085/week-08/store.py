@@ -347,6 +347,14 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
         # Update category demand volume
         radar["market_settles"][cat] = radar["market_settles"].get(cat, 0) + 1
 
+        # When it sold, per SKU and per category, so restock can weigh recent sales (other shops' included)
+        ts = float(e.get("ts") or time.time())
+        for key, bucket, keep in ((canonical_sku, "sku_sold_ts", 40), (cat, "cat_sold_ts", 200)):
+            arr_ts = radar.setdefault(bucket, {}).setdefault(key, [])
+            arr_ts.append(ts)
+            if len(arr_ts) > keep:
+                radar[bucket][key] = arr_ts[-keep:]
+
         # Update SKU price history
         arr = radar["sku_settles"].setdefault(canonical_sku, [])
         arr.append(int(amount))

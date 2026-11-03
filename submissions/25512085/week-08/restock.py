@@ -1,9 +1,12 @@
 """Round 3 Supply & Capital Allocation Engine (restock.py).
 
 Implements the Coupang-style 3-Stage Scale-Up Strategy:
-- Stage 1 (Seed): within a 2,500,000 stock cap, a few units in 9 "goods" categories plus 2 units in each of the
-  24 food categories whose shelf life outlasts the round, picking SKUs priced nearest the category's
-  median_price so they fall inside most orders' [0.5x, 1.5x] `acceptable` window.
+- Supply windows: supply opens 3 minutes every 20 (agent.md); a plan is printed only while one is open or about to.
+- Seed (small): one SKU near the category median in 4 cheaper "goods" categories and in 10 food categories whose
+  shelf life outlasts the round, so the shop is visible from the first window (median-priced SKUs fall inside most
+  orders' [0.5x, 1.5x] `acceptable` window). What sells is then read from the public ledger (any shop's settled
+  deals), not learned by stocking widely: SKUs sold in the last 3 hours are bought first, deep enough to last
+  until the next window.
 - Stage 2 (Demand-Driven Growth): Reinvest 75% of realized profit into expanding the inventory cap,
   prioritizing categories with the highest Demand Score (3.0x missed shop inquiries + 1.8x shop inquiries
   + 1.0x ledger settlements + forum demand). Our own buyer's orders are not demand our shop can serve.
@@ -53,7 +56,15 @@ MAX_FOOD_LIST_PRICE = 120_000
 # many categories while we learn what sells. The kit lists a shop to a buyer only with stock of a SKU in the order's
 # acceptable price window (market_kit.py, offers), so being in a category means holding SKUs near its usual price.
 ROUND_HOURS = 336
-SEED_FOOD_CATEGORY_COUNT = 24
+SEED_FOOD_CATEGORY_COUNT = 10
+SEED_GOODS_COUNT = 4                # seed goods categories whose median list price is at most SEED_GOODS_MAX_MEDIAN
+SEED_GOODS_MAX_MEDIAN = 60_000
+RECENT_S = 3 * 3600                 # "selling now" = settled in the ledger within the last 3 hours
+HOT_CAP_GOODS, HOT_CAP_FOOD = 4, 8  # units per category once the ledger or our inquiries show demand
+HOT_SKU_MAX = 6                     # units per selling SKU: 1 + one per 3 recent market sales, up to this
+# Supply opens for 3 minutes every 20 (agent.md); outside a window the kit waits up to 90 s per line and skips it.
+# So plan only when a window is open or opens within this many seconds.
+WINDOW_LEAD_S = 60
 
 
 def long_shelf_food_categories(cat_map: dict[str, list[dict[str, Any]]], n: int = SEED_FOOD_CATEGORY_COUNT) -> list[str]:
@@ -96,12 +107,13 @@ def compute_category_demand_scores(
     hub: dict[str, Any],
     all_categories: set[str],
     forum_posts: list[dict[str, Any]],
+    cat_recent: dict[str, int] | None = None,
 ) -> dict[str, float]:
-    """Combine 1st-party shop inquiries, missed demand, ledger settles, and forum mentions."""
+    """Combine 1st-party shop inquiries, missed demand, recent ledger settles, and forum mentions."""
     radar = hub.get("demand_radar", {})
     inbound = radar.get("inbound_wants", {})
     missed = radar.get("missed_wants", {})
-    settles = radar.get("market_settles", {})
+    settles = cat_recent or {}
 
     # Map leaf category names (e.g. "침구", "김치") to full category paths
     leaf_to_full: dict[str, list[str]] = collections.defaultdict(list)
@@ -125,7 +137,7 @@ def compute_category_demand_scores(
     add_signal(inbound, 1.8)      # Buyers actively asking our shop
     # radar["buyer_orders"] (our own buyer's orders) is left out on purpose: a shop and a buyer with the same
     # owner cannot settle with each other, so those categories are not demand our shop can sell into.
-    add_signal(settles, 1.0)      # Confirmed market-wide settlements
+    add_signal(settles, 1.0)      # Market-wide settlements in the last RECENT_S (any shop)
 
     # Scan recent forum posts for category leaf mentions
     for post in (forum_posts or [])[:40]:
@@ -155,6 +167,11 @@ def build_restock_plan(market_dir: Path) -> dict[str, Any]:
 
     # Near the end of the round, stock bought now is unlikely to sell before it is worth 0: stop buying
     if time.time() > ROUND_END_TS - STOP_BUYING_BEFORE_END_S:
+        return {"buy": []}
+
+    # Supply window: plan only while it is open or about to open (no "restock" field: let the kit try)
+    window = inv.get("restock") or {}
+    if window and not window.get("open") and float(window.get("opens_at") or 0) - time.time() > WINDOW_LEAD_S:
         return {"buy": []}
 
     # The ledger fetch (up to a few seconds) runs before taking the lock, so seller.py is not kept waiting
@@ -192,77 +209,80 @@ def plan_with_hub(
     held_skus = {u["sku"] for u in units if u.get("sku")}
     cat_unit_counts: dict[str, int] = collections.Counter(u.get("category", "") for u in units)
 
-    demand_scores = compute_category_demand_scores(hub, set(cat_map.keys()), forum_posts)
+    # Recent market sales from the ledger (every shop's settled deals, ours included): what sells right now.
+    now_s = time.time()
+    radar = hub.get("demand_radar", {})
+    sku_recent = {s: n for s, ts in (radar.get("sku_sold_ts") or {}).items()
+                  if (n := sum(1 for t in ts if now_s - t <= RECENT_S)) > 0}
+    cat_recent = {c: n for c, ts in (radar.get("cat_sold_ts") or {}).items()
+                  if (n := sum(1 for t in ts if now_s - t <= RECENT_S)) > 0}
+
+    demand_scores = compute_category_demand_scores(hub, set(cat_map.keys()), forum_posts, cat_recent)
     medians = category_medians(market_dir, cat_map)
+    held_count = collections.Counter(u.get("sku") for u in units)
 
-    # Prioritize candidate categories:
-    # 1. High-demand categories from Demand Radar (where score > 0 and stock < 4)
-    # 2. Stage 1 core high-margin non-food ("goods") categories
-    # 3. Long-shelf-life (720h) safe food categories
-    ranked_demand_cats = [
-        c for c, sc in sorted(demand_scores.items(), key=lambda x: -x[1])
-        if sc > 0 and cat_unit_counts.get(c, 0) < (5 if stage >= 2 else 3)
-    ]
-
+    # Candidate categories: what the ledger and our inquiries say sells first, then a small seed so the shop is
+    # visible from the first window: SEED_GOODS_COUNT cheaper goods categories and SEED_FOOD_CATEGORY_COUNT
+    # long-shelf food categories, one SKU near the category median each. The seed grows from ledger data, not up front.
+    ranked_demand_cats = [c for c, sc in sorted(demand_scores.items(), key=lambda x: -x[1]) if sc > 0]
+    seed_goods = [c for c in SEED_GOODS_CATEGORIES if c in cat_map and medians.get(c, 0) <= SEED_GOODS_MAX_MEDIAN][:SEED_GOODS_COUNT]
     candidate_categories: list[str] = []
-    for c in ranked_demand_cats + SEED_GOODS_CATEGORIES + long_shelf_food_categories(cat_map):
+    for c in ranked_demand_cats + seed_goods + long_shelf_food_categories(cat_map):
         if c in cat_map and c not in candidate_categories:
             candidate_categories.append(c)
-
-    # In Stage 2/3, also include remaining goods categories with moderate prices
-    if stage >= 2:
-        for c, skus in sorted(cat_map.items(), key=lambda x: -len(x[1])):
-            if c not in candidate_categories:
-                candidate_categories.append(c)
 
     max_goods_price = MAX_GOODS_STAGE3_PRICE if stage >= 3 else MAX_GOODS_STAGE1_PRICE
     buy_orders: list[dict[str, Any]] = []
     spent_est = 0
-
-    # Target at most 65% of remaining available budget in a single 60s tick to pace capital smoothly
     tick_budget = int(avail_budget * (0.75 if len(units) < 10 else 0.50))
     tick_budget = max(min(avail_budget, 250_000), tick_budget)
+
+    def add_line(sku: str, qty: int) -> int:
+        """Queue qty units of sku if the tick budget allows; returns how many were queued."""
+        nonlocal spent_est
+        unit_cost = max(1, int(int(catalog.get(sku, {}).get("list_price", 0)) * 0.65))   # A grade costs 55-75%
+        qty = min(qty, 20, (tick_budget - spent_est) // unit_cost)
+        if qty <= 0:
+            return 0
+        buy_orders.append({"sku": sku, "qty": qty})
+        held_skus.add(sku)
+        held_count[sku] += qty
+        spent_est += unit_cost * qty
+        return qty
 
     for cat in candidate_categories:
         if len(buy_orders) >= 10 or spent_est >= tick_budget:
             break
-
-        current_cat_qty = cat_unit_counts.get(cat, 0)
-        is_hot = demand_scores.get(cat, 0) >= 2.0
-        max_cat_units = 5 if (stage >= 2 and is_hot) else (3 if cat in SEED_GOODS_CATEGORIES else 2)
-        if current_cat_qty >= max_cat_units:
-            continue
-
         cat_skus = cat_map[cat]
         kind = cat_skus[0].get("kind", "goods")
         shelf = cat_skus[0].get("shelf_hours")
-
-        # Perishable short-shelf food (< 96h) is only stocked JIT when active demand is observed!
+        is_hot = demand_scores.get(cat, 0) >= 2.0
+        # Perishable short-shelf food (< 96h) only when demand is observed
         if kind == "food" and shelf is not None and shelf < 96 and not is_hot:
             continue
+        cap = (HOT_CAP_GOODS if kind == "goods" else HOT_CAP_FOOD) if is_hot else (1 if kind == "goods" else 2)
+        cat_qty = cat_unit_counts.get(cat, 0)
 
-        median = medians.get(cat) or 0.0
-        if kind == "goods":
-            n = 3 if cat in SEED_GOODS_CATEGORIES else 2
-            picks = select_near_median(cat_skus, held_skus, median, n, MIN_GOODS_LIST_PRICE, max_goods_price)
-        else:
-            picks = select_near_median(cat_skus, held_skus, median, 2, MIN_FOOD_LIST_PRICE, MAX_FOOD_LIST_PRICE)
-
-        for sku_info in picks:
-            if len(buy_orders) >= 10 or spent_est >= tick_budget or current_cat_qty >= max_cat_units:
+        # 1. SKUs of this category that sold recently: keep enough to last until the next supply window
+        sold_here = sorted((s for s in sku_recent if catalog.get(s, {}).get("category") == cat and
+                            int(catalog[s].get("list_price", 0)) <= (max_goods_price if kind == "goods" else MAX_FOOD_LIST_PRICE)),
+                           key=lambda s: -sku_recent[s])
+        for sku in sold_here:
+            if len(buy_orders) >= 10 or cat_qty >= cap:
                 break
-            list_p = int(sku_info.get("list_price", 0))
-            # Estimated supply cost is ~62% of list_price on average
-            est_unit_cost = max(1, int(list_p * 0.65))
-            if spent_est + est_unit_cost > tick_budget:
-                continue
+            target = min(HOT_SKU_MAX, 1 + sku_recent[sku] // 3)
+            need = min(target - held_count[sku], cap - cat_qty)
+            if need > 0:
+                cat_qty += add_line(sku, need)
 
-            # Buy 1 unit for high-ticket goods (>80k) to maximize SKU diversity, or up to 2 for hot/lower-ticket items
-            qty = 2 if (is_hot and list_p <= 60_000 and spent_est + 2 * est_unit_cost <= tick_budget) else 1
-            buy_orders.append({"sku": sku_info["sku"], "qty": qty})
-            held_skus.add(sku_info["sku"])
-            spent_est += est_unit_cost * qty
-            current_cat_qty += qty
+        # 2. Otherwise a SKU near the category median, one unit (food: two), to be visible in this category
+        if not sold_here and cat_qty < cap:
+            median = medians.get(cat) or 0.0
+            lo, hi = (MIN_GOODS_LIST_PRICE, max_goods_price) if kind == "goods" else (MIN_FOOD_LIST_PRICE, MAX_FOOD_LIST_PRICE)
+            for sku_info in select_near_median(cat_skus, held_skus, median, 1, lo, hi):
+                if len(buy_orders) >= 10:
+                    break
+                cat_qty += add_line(sku_info["sku"], min(1 if kind == "goods" else 2, cap - cat_qty))
 
     # Optional Shop Forum promotion (max 1 post per 320s) when we have rich certified stock
     now = int(time.time())
