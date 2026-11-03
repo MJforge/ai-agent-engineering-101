@@ -95,7 +95,7 @@ class BuyerPriceTests(unittest.TestCase):
     def test_16700_food_never_offers_over_15030_and_cancels(self):
         result, offers, methods, memory = self.run_buyer()
         self.assertIsNone(result["receipt"])
-        self.assertEqual(len(offers), 4)
+        self.assertEqual(len(offers), 3)  # Round 3 reserves time for alternative shops.
         self.assertEqual(offers[-1], 15030)
         self.assertTrue(all(0 < p <= 15030 for p in offers))
         self.assertNotIn(20040, offers)  # ask is within budget, but no turn-3 auto-accept
@@ -115,7 +115,10 @@ class BuyerPriceTests(unittest.TestCase):
                             (20040, 1000000), (None, 25000), (20040, 8000)]:
             with self.subTest(ask=ask, budget=budget):
                 result, offers, _, _ = self.run_buyer(ask=ask, budget=budget)
-                self.assertTrue(offers)
+                if ask is None:
+                    self.assertEqual(offers, [])  # Unparseable quote now retries immediately.
+                else:
+                    self.assertTrue(offers)
                 self.assertTrue(all(0 < p <= min(15030, budget) for p in offers))
                 self.assertIsNone(result["receipt"])
 

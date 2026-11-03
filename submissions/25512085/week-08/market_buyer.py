@@ -13,6 +13,7 @@ Supports both:
 - Rounds 0-2 Legacy Compatibility (`lamp`, `chair`, `bookshelf`): passes `market_test_week07.py` 25/25.
 """
 import argparse
+from contextvars import ContextVar
 import json
 import math
 import os
@@ -48,6 +49,30 @@ MAX_RECENT_HISTORY = 5
 FOOD_LIST_PRICE_PERCENT = 90
 COMPARABLE_WINDOW_S = 3 * 3600
 COMPARABLE_MIN_SAMPLES = 3
+REQUEST_DEADLINE = ContextVar("buyer_request_deadline", default=None)
+
+
+def diagnostic(message: str) -> None:
+    """Escape even seller-controlled newlines; never emit a forged JSON line."""
+    print(json.dumps(f"[buyer] {message}", ensure_ascii=False), file=sys.stderr, flush=True)
+
+
+def request_timeout(default: float) -> float:
+    """Round 2 keeps its timeouts; Round 3 shares a monotonic wall-clock budget.
+
+    HTTPX timeouts bound transport phases, not an uninterruptible OS call or a
+    trickling response's total duration. Reject late receipts below as well;
+    a hard process wall-clock kill must be enforced by the calling kit.
+    """
+    deadline = REQUEST_DEADLINE.get()
+    if deadline is None:
+        return default
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("buyer deadline exhausted")
+    return min(default, remaining)
+
+
 RESERVES = {"lamp": 100, "chair": 180, "bookshelf": 260}
 SERVICE_KEYWORDS = (
     "warranty", "service", "refund", "guarantee", "quality", "support",
@@ -83,7 +108,7 @@ def call_harness(prompt: str) -> str:
             with open(tmp_path, "r", encoding="utf-8") as f:
                 return f.read().strip()
     except Exception as e:
-        print(f"[Buyer Harness Warning]: {e}", file=sys.stderr)
+        diagnostic(f"[Buyer Harness Warning]: {e}")
         if p:
             try:
                 p.kill()
@@ -135,13 +160,13 @@ def update_memory(memory: dict, shop_name: str, entry: dict) -> None:
     try:
         MEMORY_FILE.write_text(json.dumps(memory, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     except Exception as e:
-        print(f"[Memory Warning]: {e}", file=sys.stderr)
+        diagnostic(f"[Memory Warning]: {e}")
 
 
 def fetch_board_stats() -> dict[str, dict]:
     market_url = os.environ.get("MARKET_URL", "https://market.ourolabs.ai").rstrip("/")
     try:
-        r = httpx.get(f"{market_url}/api/board", timeout=2.5).json()
+        r = httpx.get(f"{market_url}/api/board", timeout=request_timeout(2.5)).json()
         return {s["name"]: s for s in r.get("shops", []) if isinstance(s, dict) and "name" in s}
     except Exception:
         return {}
@@ -226,18 +251,18 @@ def summarize_shop(shop: dict, memory: dict, board_row: dict | None = None, hub_
     }
 
 
-def check_acp_support(shop_url: str, timeout: float = 2.0) -> bool:
+def check_acp_support(shop_url: str, timeout: float = 2.0) -> bool | None:
     """Probe /.well-known/acp.json to verify if a shop runs kit v3/v4 ACP checkout."""
     base = shop_url.rstrip("/")
     try:
-        r = httpx.get(f"{base}/.well-known/acp.json", timeout=timeout)
+        r = httpx.get(f"{base}/.well-known/acp.json", timeout=request_timeout(timeout))
         if r.status_code != 200:
-            return False
+            return False if r.status_code in (404, 405, 410) else None
         data = r.json()
         services = (data.get("capabilities") or {}).get("services") or []
         return data.get("protocol") == "acp" and "checkout" in services
     except Exception:
-        return False
+        return None  # Transport failure is not proof of unsupported ACP.
 
 
 def pick_round3_shop_and_sku(
@@ -253,6 +278,10 @@ def pick_round3_shop_and_sku(
     Therefore, among shops holding in-stock `offers` for this order's `acceptable` SKUs,
     we prioritize (shop, sku) pairs with the highest expected surplus = `list_price - expected_pay`
     where `expected_pay <= budget`, adjusted by shop honesty/trust score and anti-collusion diversity."""
+    acceptable = set(order_data.get("acceptable") or [])
+    shops = [s for s in shops if any(off.get("sku") in acceptable for off in s.get("offers") or [])]
+    if not shops:
+        return None, None, "No shop currently holds in-stock acceptable SKUs."
     board_map = fetch_board_stats()
     hub_trust = hub.get("shop_trust") or {}
     summaries = [summarize_shop(s, memory, board_map.get(s.get("name", "")), hub_trust) for s in shops]
@@ -303,19 +332,29 @@ def pick_round3_shop_and_sku(
 
     if best_candidates:
         best_candidates.sort(key=lambda x: x[0], reverse=True)
-        # Verify ACP readiness among top candidates
-        for util, cand_summary, sku_target in best_candidates[:8]:
-            if check_acp_support(cand_summary["url"]):
+        # One SKU per URL; explicitly unsupported ACP must never be a fallback.
+        seen_urls = set()
+        uncertain = None
+        for util, cand_summary, sku_target in best_candidates:
+            url = cand_summary["url"]
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            request_timeout(2.0)
+            support = check_acp_support(url)
+            if support is True:
                 shop_obj = next((s for s in shops if s["url"].rstrip("/") == cand_summary["url"]), shops[0])
                 reason = (
                     f"[R3-Surplus-Max] Picked {cand_summary['name']} holding SKU {sku_target['sku']} "
                     f"(list_price={sku_target['list_price']}, budget={budget}, trust={cand_summary['score']})"
                 )
                 return shop_obj, sku_target, reason
-        # If probe timed out, use top candidate directly
-        _, cand_summary, sku_target = best_candidates[0]
-        shop_obj = next((s for s in shops if s["url"].rstrip("/") == cand_summary["url"]), shops[0])
-        return shop_obj, sku_target, f"[R3-Surplus-Fallback] Picked {cand_summary['name']} for SKU {sku_target['sku']}"
+            if support is None and uncertain is None:
+                uncertain = (cand_summary, sku_target)
+        if uncertain is not None:
+            cand_summary, sku_target = uncertain
+            shop_obj = next(s for s in shops if s["url"].rstrip("/") == cand_summary["url"])
+            return shop_obj, sku_target, f"[R3-Surplus-Fallback] ACP probe inconclusive for {cand_summary['name']}"
 
     # No shop currently holds in-stock SKUs matching this order's acceptable list.
     # Do NOT fall back to picking an arbitrary shop without an acceptable SKU, as doing so leads to
@@ -455,7 +494,7 @@ def rpc_call(url: str, method: str, params: dict) -> dict:
         "params": params,
     }
     headers = {"A2A-Version": "1.0", "Content-Type": "application/json"}
-    resp = httpx.post(url, json=body, headers=headers, timeout=45)
+    resp = httpx.post(url, json=body, headers=headers, timeout=request_timeout(45))
     data = resp.json()
     if "error" in data:
         return {"error": data["error"]}
@@ -517,6 +556,10 @@ def main():
     order_data = load_json_safe(order_path, {}) if order_path and order_path.exists() else {}
     acceptable_skus = order_data.get("acceptable") or []
     is_round3 = bool(acceptable_skus)
+    # Start before local setup/selection so probing cannot spend an extra 90s.
+    deadline = time.monotonic() + 90
+    if is_round3 and positive_number(order_data.get("expires_at")):
+        deadline = min(deadline, time.monotonic() + order_data["expires_at"] - time.time() - 5)
 
     memory = load_memory()
     hub = load_hub()
@@ -525,26 +568,101 @@ def main():
 
     if is_round3:
         record_buyer_order(order_data.get("category") or item)
-        chosen_shop, target_sku_info, reason = pick_round3_shop_and_sku(
-            shops, memory, hub, catalog, order_data, budget
-        )
-        if chosen_shop is None:
-            # Cleanly close as no-deal without falsely blaming or penalizing any shop
-            print(f"[skip] {reason}", flush=True)
-            print(json.dumps({
-                "shop": "",
-                "receipt": None,
-                "stars": None,
-                "review": f"No deal: no shop currently has acceptable SKUs in stock for {item}.",
-            }, ensure_ascii=False), flush=True)
-            return
+        result = run_round3(shops, memory, hub, catalog, order_data, item, budget, deadline)
     else:
         target_sku_info = None
         chosen_shop, reason = pick_shop(shops, memory, item_low, budget)
+        result = run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
+                             order_data, item, budget)
+    # Exactly one receipt leaves the hook. Checkout/accept/signature verification
+    # happens in the kit AFTER buyer exit, so failures there cannot retry here.
+    print(json.dumps(result, ensure_ascii=False), flush=True)
+
+
+def run_round3(shops, memory, hub, catalog, order_data, item, budget, deadline):
+    result = {"shop": "", "receipt": None, "stars": None,
+              "review": "No deal: no shop currently has acceptable SKUs in stock."}
+    remaining_shops = list(shops)
+    token = REQUEST_DEADLINE.set(deadline)
+    try:
+        for attempt in range(1, 4):
+            try:
+                request_timeout(1)
+                chosen, sku, reason = pick_round3_shop_and_sku(
+                    remaining_shops, memory, hub, catalog, order_data, budget)
+                if chosen is None:
+                    diagnostic(f"[retry] no candidates: {reason}")
+                    break
+                url = chosen.get("url", "").rstrip("/")
+                remaining_shops = [s for s in remaining_shops if s.get("url", "").rstrip("/") != url]
+                diagnostic(f"[attempt {attempt}/3] {chosen.get('name')} {url} SKU={sku['sku']}")
+                shop_deadline = min(deadline, time.monotonic() + 25)
+                # Reserve the last 3s of the shop's 25s window for cancellation.
+                shop_token = REQUEST_DEADLINE.set(shop_deadline - 3)
+                try:
+                    result = run_attempt(chosen, sku, reason, memory, hub, catalog,
+                                         order_data, item, budget, cleanup_deadline=shop_deadline)
+                finally:
+                    REQUEST_DEADLINE.reset(shop_token)
+                if result.get("receipt") is not None:
+                    diagnostic(f"[attempt {attempt}/3] receipt selected (checkout still pending)")
+                    break
+                diagnostic(f"[attempt {attempt}/3] failed: {result['review']}")
+            except TimeoutError:
+                diagnostic(f"[attempt {attempt}/3] stopped: total/order deadline exhausted")
+                result["review"] = "No deal: total/order deadline exhausted."
+                break
+    finally:
+        REQUEST_DEADLINE.reset(token)
+    return result
+
+
+def run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
+                order_data, item, budget, cleanup_deadline=None):
+    active = {}
+    selected = False
+    try:
+        result = _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
+                              order_data, item, budget, active)
+        if order_data.get("acceptable"):
+            request_timeout(1)  # Includes time spent waiting for/exiting the hub lock.
+        selected = result.get("receipt") is not None
+        return result
+    except Exception as exc:
+        if not order_data.get("acceptable"):
+            raise
+        return {"shop": chosen_shop["url"], "receipt": None, "stars": None,
+                "review": f"No deal: attempt failed ({type(exc).__name__}: {exc})."}
+    finally:
+        if not selected and active.get("pending") is not None:
+            # Remove only this attempt's record, not a concurrent replacement.
+            with mutate_hub() as current_hub:
+                pending = current_hub.get("pending_deals", {})
+                key = str(order_data.get("order"))
+                if pending.get(key) == active["pending"]:
+                    del pending[key]
+        if (order_data.get("acceptable") and active.get("id")
+                and active.get("state") not in ("TASK_STATE_COMPLETED", "TASK_STATE_REJECTED", "TASK_STATE_CANCELED")):
+            cleanup_token = REQUEST_DEADLINE.set(cleanup_deadline if cleanup_deadline is not None
+                                                  else REQUEST_DEADLINE.get())
+            try:
+                # Reserved cleanup time never extends the total/order deadline.
+                rpc_call(active["url"], "CancelTask", {"id": active["id"]})
+            except Exception:
+                pass
+            finally:
+                REQUEST_DEADLINE.reset(cleanup_token)
+
+
+def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
+                 order_data, item, budget, active):
+    acceptable_skus = order_data.get("acceptable") or []
+    is_round3 = bool(acceptable_skus)
+    item_low = item.lower()
 
     shop_name = chosen_shop.get("name", "unknown")
     shop_url = chosen_shop.get("url", "").rstrip("/")
-    print(f"[choose] {shop_url} ({shop_name}): {reason}", flush=True)
+    diagnostic(f"[choose] {shop_url} ({shop_name}): {reason}")
 
     is_round3_food = is_round3 and order_data.get("kind") == "food"
     price_limit = budget
@@ -552,14 +670,13 @@ def main():
     if is_round3_food:
         price_limit, _ = food_price_policy(catalog, hub, target_sku_info["sku"], budget, order_data)
         if price_limit is None or price_limit < 1:
-            print(json.dumps({"shop": shop_url, "receipt": None, "stars": None,
-                              "review": "No deal: food catalog list price is unknown."}), flush=True)
-            return
+            return {"shop": shop_url, "receipt": None, "stars": None,
+                    "review": "No deal: food catalog list price is unknown."}
 
     # 1. Fetch Agent Card
     card_url = f"{shop_url}/.well-known/agent-card.json"
     try:
-        card_resp = httpx.get(card_url, timeout=12)
+        card_resp = httpx.get(card_url, timeout=request_timeout(12))
         card = card_resp.json()
         interfaces = card.get("supportedInterfaces") or []
         rpc_url = interfaces[0].get("url") if interfaces else f"{shop_url}/"
@@ -568,8 +685,7 @@ def main():
         update_memory(memory, shop_name, {
             "item": item, "budget": budget, "price": None, "rounds": 0, "stars": 2, "outcome": "no-deal"
         })
-        print(json.dumps({"shop": chosen_shop["url"], "receipt": None, "stars": 2, "review": review}, ensure_ascii=False), flush=True)
-        return
+        return {"shop": chosen_shop["url"], "receipt": None, "stars": 2, "review": review}
 
     # 2. First message: specify exact SKU & name in Round 3, or item in Round 0-2
     if is_round3 and target_sku_info:
@@ -596,27 +712,28 @@ def main():
         "parts": [{"text": opening_text}],
     }
     try:
+        if is_round3:
+            request_timeout(1)
         res = rpc_call(rpc_url, "SendMessage", {"message": msg})
     except Exception as e:
         review = f"No deal in 0 rounds: shop did not respond to opening inquiry ({type(e).__name__})."
         update_memory(memory, shop_name, {
             "item": item, "budget": budget, "price": None, "rounds": 0, "stars": 2, "outcome": "no-deal"
         })
-        print(json.dumps({"shop": chosen_shop["url"], "receipt": None, "stars": 2, "review": review}, ensure_ascii=False), flush=True)
-        return
+        return {"shop": chosen_shop["url"], "receipt": None, "stars": 2, "review": review}
 
     if "error" in res:
         review = f"No deal in 0 rounds: seller returned RPC error {res['error']}."
         update_memory(memory, shop_name, {
             "item": item, "budget": budget, "price": None, "rounds": 0, "stars": 2, "outcome": "no-deal"
         })
-        print(json.dumps({"shop": chosen_shop["url"], "receipt": None, "stars": 2, "review": review}, ensure_ascii=False), flush=True)
-        return
+        return {"shop": chosen_shop["url"], "receipt": None, "stars": 2, "review": review}
 
     task = res.get("task", res)
     task_id = task.get("id")
     task_status = task.get("status", {})
     task_state = task_status.get("state")
+    active.update(url=rpc_url, id=task_id, state=task_state)
     min_valid_p = 500 if is_round3 else 50
     max_valid_p = max(budget * 4, list_price * 2, 1000)
     seller_ask = extract_last_number(task, min_valid_p, max_valid_p)
@@ -629,7 +746,13 @@ def main():
     rounds = 0
     step_inc = max(5, int(budget * 0.02)) if is_round3 else 5
 
-    while task_state == "TASK_STATE_INPUT_REQUIRED" and rounds < 5:
+    failure_reason = ""
+    while task_state == "TASK_STATE_INPUT_REQUIRED" and rounds < (3 if is_round3 else 5):
+        if is_round3:
+            request_timeout(1)
+            if seller_ask is None:
+                failure_reason = "seller price could not be parsed"
+                break
         rounds += 1
 
         # Budget-Decoupled Negotiation:
@@ -644,13 +767,13 @@ def main():
                 offer = min(seller_ask, max(last_offer + step_inc, halfway))
         else:
             if last_offer >= price_limit and seller_ask is not None and seller_ask > price_limit:
-                print(f"Cannot agree: seller ask {seller_ask} > price limit {price_limit}", flush=True)
-                try:
-                    rpc_call(rpc_url, "CancelTask", {"id": task_id})
-                except Exception:
-                    pass
-                if is_round3_food:
-                    task_state = "TASK_STATE_CANCELED"
+                diagnostic(f"Cannot agree: seller ask {seller_ask} > price limit {price_limit}")
+                if not is_round3:
+                    try:
+                        rpc_call(rpc_url, "CancelTask", {"id": task_id})
+                    except Exception:
+                        pass
+                failure_reason = "seller ask exceeds price limit"
                 break
 
             ceiling = min(price_limit, seller_ask) if seller_ask else price_limit
@@ -660,7 +783,7 @@ def main():
             elif rounds == 2:
                 offer = max(last_offer + step_inc, int(round(start_anchor + (ceiling - start_anchor) * 0.45)))
             elif rounds == 3:
-                offer = max(last_offer + step_inc, int(round(start_anchor + (ceiling - start_anchor) * 0.80)))
+                offer = ceiling if is_round3 else max(last_offer + step_inc, int(round(start_anchor + (ceiling - start_anchor) * 0.80)))
             else:
                 offer = ceiling
 
@@ -704,14 +827,18 @@ def main():
         }
         try:
             res = rpc_call(rpc_url, "SendMessage", {"message": follow_up})
-        except Exception:
+        except Exception as exc:
+            failure_reason = f"counter RPC failed ({type(exc).__name__})"
             break
         if "error" in res:
+            failure_reason = f"counter RPC error: {res['error']}"
             break
 
         task = res.get("task", res)
         task_status = task.get("status", {})
         task_state = task_status.get("state")
+        task_id = task.get("id") or task_id
+        active.update(id=task_id, state=task_state)
         seller_ask = extract_last_number(task, min_valid_p, max_valid_p)
         seller_texts.append(
             " ".join(p.get("text", "") for p in task_status.get("message", {}).get("parts", []))
@@ -719,12 +846,6 @@ def main():
 
         if task_state in ("TASK_STATE_COMPLETED", "TASK_STATE_REJECTED", "TASK_STATE_CANCELED"):
             break
-
-    if is_round3_food and task_state == "TASK_STATE_INPUT_REQUIRED":
-        try:
-            rpc_call(rpc_url, "CancelTask", {"id": task_id})
-        except Exception:
-            pass
 
     # 3. Inspect result & receipt
     raw_receipt = extract_receipt_data(task) if task_state == "TASK_STATE_COMPLETED" else None
@@ -746,12 +867,15 @@ def main():
 
         receipt_cap = budget
         if is_round3_food:
-            # Recompute on the actual shipped SKU, never category/target fallback.
+            # Recompute on the receipt SKU, never category/target fallback. This
+            # does not pin the kit's later checkout to that SKU: a different
+            # acceptable SKU shipped there is a pre-existing integration limit.
             receipt_cap, food_accept = food_price_policy(catalog, hub, rec_item, budget, order_data, raw_receipt)
         price_policy_declined = is_round3_food and (
             receipt_cap is None or (positive_number(rec_price) and rec_price > receipt_cap))
         receipt_invalid = (
-            not isinstance(rec_price, (int, float))
+            not positive_number(rec_price)
+            or (isinstance(rec_price, float) and not rec_price.is_integer())
             or rec_price > budget
             # A price-policy rejection is not evidence of dishonesty. Still reject
             # above-agreement receipts within policy, and all structural/budget errors.
@@ -821,31 +945,6 @@ def main():
                     )
                     outcome = "declined-no-warranty"
 
-            # Round 3: an agreed receipt is not a purchase yet. The kit still has to verify the signatures and
-            # pay through ACP, and it runs review.py only for paid deals. Park the deal under its order id;
-            # review.py turns it into a purchase record and a shop-memory entry once the payment settled.
-            if is_round3 and final_receipt is not None:
-                matched_sku = rec_item if rec_item in catalog else (target_sku_info["sku"] if target_sku_info else rec_item)
-                sku_meta = catalog.get(matched_sku) or {}
-                now_ts = int(time.time())
-                with mutate_hub() as hub:
-                    pending = hub.setdefault("pending_deals", {})
-                    pending[str(order_data.get("order"))] = {
-                        "order": order_data.get("order"),
-                        "sku": matched_sku,
-                        "name": sku_meta.get("name") or (target_sku_info["name"] if target_sku_info else item),
-                        "category": sku_meta.get("category") or order_data.get("category") or item,
-                        "shop_url": shop_url,
-                        "shop_name": shop_name,
-                        "price": recorded_price,
-                        "list_price": int(sku_meta.get("list_price") or list_price),
-                        "warranty_hours": raw_receipt.get("warranty_hours") or 0,
-                        "ts": now_ts,
-                        "memory": {"item": item, "budget": budget, "price": recorded_price, "rounds": rounds},
-                    }
-                    # Unpaid deals never reach review.py; drop them once they are 6 hours old
-                    for k in [k for k, v in pending.items() if now_ts - int(v.get("ts") or 0) > 21600]:
-                        del pending[k]
     else:
         final_receipt = None
         recorded_price = None
@@ -853,6 +952,10 @@ def main():
         stars = 3 if (seller_ask and seller_ask <= int(budget * 1.15) and has_service) else 2
         template = random.choice(FUNNY_NO_DEAL_REVIEWS)
         review = template.format(rounds=rounds, ask=seller_ask or "high", budget=budget)
+        if is_round3:
+            if not failure_reason and task_state == "TASK_STATE_INPUT_REQUIRED":
+                failure_reason = f"counter limit reached (ask {seller_ask}, price limit {price_limit})"
+            review += f" Reason: {failure_reason or task_state or 'missing receipt'}."
 
     # A Round 3 agreed deal enters shop memory from review.py, only after it is paid
     if not (is_round3 and final_receipt is not None):
@@ -875,8 +978,29 @@ def main():
         result_line["accept"] = build_accept_policy(order_data, recorded_price, list_price,
                                                     float(final_receipt.get("warranty_hours") or 0))
         result_line["accept"].update(food_accept)
+        # This is only a pending checkout, not a paid purchase or successful memory.
+        # Build/validate everything before writing a single final candidate.
+        request_timeout(1)
+        matched_sku = rec_item if rec_item in catalog else target_sku_info["sku"]
+        sku_meta = catalog.get(matched_sku) or {}
+        now_ts = int(time.time())
+        with mutate_hub() as hub:
+            request_timeout(1)  # Lock acquisition can itself take several seconds.
+            pending = hub.setdefault("pending_deals", {})
+            pending[str(order_data.get("order"))] = {
+                "order": order_data.get("order"), "sku": matched_sku,
+                "name": sku_meta.get("name") or target_sku_info["name"],
+                "category": sku_meta.get("category") or order_data.get("category") or item,
+                "shop_url": shop_url, "shop_name": shop_name, "price": recorded_price,
+                "list_price": int(sku_meta.get("list_price") or list_price),
+                "warranty_hours": raw_receipt.get("warranty_hours") or 0, "ts": now_ts,
+                "memory": {"item": item, "budget": budget, "price": recorded_price, "rounds": rounds},
+            }
+            active["pending"] = pending[str(order_data.get("order"))].copy()
+            for k in [k for k, v in pending.items() if now_ts - int(v.get("ts") or 0) > 21600]:
+                del pending[k]
 
-    print(json.dumps(result_line, ensure_ascii=False), flush=True)
+    return result_line
 
 
 if __name__ == "__main__":
