@@ -185,6 +185,12 @@ def build_restock_plan(market_dir: Path) -> dict[str, Any]:
     own_urls = fetch_own_shop_urls()
     with mutate_hub() as hub:
         hub["own_shop_urls"] = sorted(set(hub.get("own_shop_urls", [])) | set(own_urls))
+        # A deployment's truncated ledger tail cannot prove this window's prior
+        # spending. Sacrifice the first window (including a true cold start), and
+        # persist the block across restarts. Never prune window entries.
+        if window and not hub.get("restock_windows"):
+            hub.setdefault("restock_windows", {})[str(window)] = {
+                "baseline_actual": 0, "reserved": WINDOW_BUDGET, "blocked": True}
         return plan_with_hub(hub, market_dir, catalog, inv, rows)
 
 
@@ -209,6 +215,8 @@ def plan_with_hub(
                  if opens <= s["ts"] < closes)
     budget_state = hub.setdefault("restock_windows", {}).setdefault(
         str(window), {"baseline_actual": actual, "reserved": 0})
+    if budget_state.get("blocked"):
+        return {"buy": []}
     # Failed plans stay reserved for this window. Actual successes replace, rather
     # than double-charge, those estimates; deployment's prior actual spending stays charged.
     used = max(actual, budget_state["baseline_actual"] + budget_state["reserved"])

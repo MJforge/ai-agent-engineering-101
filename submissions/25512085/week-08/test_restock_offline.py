@@ -43,6 +43,11 @@ class RestockTests(unittest.TestCase):
     def plan(self, rows=()):
         return restock.plan_with_hub(self.hub, self.path, self.catalog, self.inv, list(rows))
 
+    def own_sales(self, by_sku):
+        self.hub["own_sale_events"] = {
+            str(i): {"sku": sku, "ts": ts}
+            for i, (sku, ts) in enumerate((sku, ts) for sku, times in by_sku.items() for ts in times)}
+
     def cost(self, plan):
         return sum(math.ceil(self.catalog[b["sku"]]["list_price"] * .75) * b["qty"]
                    for b in plan["buy"])
@@ -92,14 +97,13 @@ class RestockTests(unittest.TestCase):
             self.catalog[sku] = {"kind": kind, "category": sku, "list_price": 1000,
                                  "shelf_hours": 12 if sku == "short" else 400}
             self.stock(sku, qty)
-        self.hub["demand_radar"]["own_sku_sold_ts"] = {
-            "food": [NOW]*30, "goods": [NOW]*30, "short": [NOW-1201]*30}
+        self.own_sales({"food": [NOW]*30, "goods": [NOW]*30, "short": [NOW-1201]*30})
         buys = {b["sku"]: b["qty"] for b in self.plan()["buy"]}
         self.assertEqual(buys, {"food": 3, "goods": 2})
 
     def test_high_ticket_and_unknown_new_sku_blocked(self):
         self.stock("G97cd0437", 2)
-        self.hub["demand_radar"]["own_sku_sold_ts"] = {"G07ec17d5": [NOW]*50, "new": [NOW]*50}
+        self.own_sales({"G07ec17d5": [NOW]*50, "new": [NOW]*50})
         self.catalog["new"] = {"kind": "goods", "category": "new", "list_price": 1000}
         self.assertNotIn("G07ec17d5", [b["sku"] for b in self.plan()["buy"]])
         self.assertNotIn("new", [b["sku"] for b in self.plan()["buy"]])
@@ -123,6 +127,55 @@ class RestockTests(unittest.TestCase):
         self.assertEqual(self.plan(rows)["buy"], [])
         self.assertEqual(self.plan(rows)["buy"], [])
         self.assertEqual(len(self.hub["own_supplies"]), 1)
+
+    def test_bootstrap_blocks_unknown_prior_spend_persistently_then_next_window(self):
+        path = self.path / "hub.json"
+        # The missing prior supply may already exceed 200k; a latest-400 fetch
+        # returning no supply is not evidence of a zero-spend baseline.
+        with patch.object(restock, "load_catalog", return_value=self.catalog), \
+             patch.object(restock, "load_inventory", return_value=self.inv), \
+             patch.object(restock, "load_hub", side_effect=lambda: store.load_hub(path)), \
+             patch.object(restock, "mutate_hub", side_effect=lambda: store.mutate_hub(path)), \
+             patch.object(restock, "fetch_own_shop_urls", return_value=[URL]), \
+             patch.object(restock, "fetch_ledger_rows", return_value=[]):
+            self.assertEqual(restock.build_restock_plan(self.path), {"buy": []})
+            first_window = str(restock.supply_window(self.inv))
+            state = store.load_hub(path)
+            self.assertTrue(state["restock_windows"][first_window]["blocked"])
+            self.assertEqual(restock.build_restock_plan(self.path), {"buy": []})
+            with patch.object(restock.time, "time", return_value=NOW+1200):
+                self.inv["restock"] = {"open": True, "opens_at": NOW+1180, "closes_at": NOW+1360}
+                total = sum(self.cost(restock.build_restock_plan(self.path)) for _ in range(15))
+                self.assertGreater(total, 0)
+                self.assertLessEqual(total, restock.WINDOW_BUDGET)
+            self.assertTrue(store.load_hub(path)["restock_windows"][first_window]["blocked"])
+
+    def test_old_cursor_sales_backfilled_by_seq_without_market_duplicates(self):
+        rows = [self.settle(10), self.settle(11), self.settle(12, buyer=store.OWN_NAME),
+                self.settle(13, shop="https://other.invalid")]
+        store.apply_ledger_rows(self.hub, rows, self.catalog)
+        self.assertFalse(self.hub["demand_radar"]["own_sku_sold_ts"])
+        market_before = dict(self.hub["demand_radar"]["market_settles"])
+        # Identity becomes known only after the shared cursor passed these sales.
+        self.hub["own_shop_urls"] = [URL]
+        rows += [self.settle(1, ts=NOW-1801)]
+        store.apply_ledger_rows(self.hub, rows+rows, self.catalog)
+        self.assertEqual(self.hub["demand_radar"]["own_sku_sold_ts"]["G97cd0437"], [NOW, NOW])
+        self.assertEqual(set(self.hub["own_sale_events"]), {"10", "11"})
+        store.apply_ledger_rows(self.hub, rows, self.catalog)
+        self.assertEqual(len(self.hub["own_sale_events"]), 2)
+        self.assertEqual(self.hub["demand_radar"]["market_settles"], market_before)
+        self.assertEqual(self.hub["ledger_seq"], 13)
+        with patch.object(store.time, "time", return_value=NOW+1801):
+            store.apply_ledger_rows(self.hub, [], self.catalog)
+        self.assertEqual(self.hub["own_sale_events"], {})
+        self.assertEqual(self.hub["demand_radar"]["own_sku_sold_ts"], {})
+
+    def test_own_sale_seq_storage_bounded(self):
+        self.hub["own_shop_urls"] = [URL]
+        store.apply_ledger_rows(self.hub, [self.settle(i) for i in range(1, 2006)], self.catalog)
+        self.assertEqual(len(self.hub["own_sale_events"]), 2000)
+        self.assertEqual(len(self.hub["demand_radar"]["own_sku_sold_ts"]["G97cd0437"]), 2000)
 
     def test_success_does_not_double_charge_reservation(self):
         first = self.cost(self.plan())

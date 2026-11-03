@@ -327,7 +327,8 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
     settle entry always names the shipped SKU and its 'amount'. 'result' entries are skipped because a
     verified receipt is not a settlement, its item may be the order's category, and counting it too
     would count each settled deal twice. Rounds 1/2 have no settle entries.
-    Rows at or below hub["ledger_seq"] are skipped, so rows fetched with a stale seq are never counted twice."""
+    Market aggregates skip rows at/below ledger_seq; own sales use separate seq keys
+    so identity bootstrap can recover sales already consumed by another hook."""
     radar = hub["demand_radar"]
     last_seq = int(hub.get("ledger_seq", 0))
     seq = last_seq
@@ -353,6 +354,32 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
     cat_lookup: dict[str, tuple[str, str]] = {}
     for c_sku, c_info in catalog.items():
         cat_lookup[c_sku.lower()] = (c_sku, c_info.get("category") or "general")
+
+    # Own sales are independent of the shared market cursor. Keep 20 minutes plus
+    # a 10-minute margin, bounded to 2,000 distinct seqs (not timestamps).
+    now = time.time()
+    own_sales = hub.setdefault("own_sale_events", {})
+    for e in rows:
+        data = e.get("data") or {}
+        shop = str(data.get("shop") or data.get("seller") or "").rstrip("/")
+        raw_sku = str(data.get("item") or data.get("sku") or "")
+        amount = data.get("amount")
+        if (e.get("kind") != "settle" or shop not in own_urls or data.get("buyer") == OWN_NAME
+                or not raw_sku or not isinstance(amount, (int, float)) or amount <= 0
+                or e.get("seq") is None or e.get("ts") is None):
+            continue
+        ts = float(e["ts"])
+        if now - 1800 <= ts <= now:
+            sku = cat_lookup.get(raw_sku.lower(), (raw_sku, "general"))[0]
+            own_sales[str(int(e["seq"]))] = {"sku": sku, "ts": ts}
+    own_sales = dict(sorted(((seq, sale) for seq, sale in own_sales.items()
+                             if now - 1800 <= sale["ts"] <= now),
+                            key=lambda pair: (pair[1]["ts"], int(pair[0])))[-2000:])
+    hub["own_sale_events"] = own_sales
+    own_sold_ts: dict[str, list[float]] = {}
+    for sale in own_sales.values():
+        own_sold_ts.setdefault(sale["sku"], []).append(sale["ts"])
+    radar["own_sku_sold_ts"] = own_sold_ts
 
     for e in rows:
         s_id = int(e.get("seq", 0))
@@ -388,11 +415,6 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
 
         # When it sold, per SKU and per category, so restock can weigh recent sales (other shops' included)
         ts = float(e.get("ts") or time.time())
-        shop = str(data.get("shop") or data.get("seller") or "").rstrip("/")
-        if shop in own_urls:
-            own_ts = radar.setdefault("own_sku_sold_ts", {}).setdefault(canonical_sku, [])
-            own_ts.append(ts)
-            radar["own_sku_sold_ts"][canonical_sku] = own_ts[-200:]
         for key, bucket, keep in ((canonical_sku, "sku_sold_ts", 40), (cat, "cat_sold_ts", 200)):
             arr_ts = radar.setdefault(bucket, {}).setdefault(key, [])
             arr_ts.append(ts)
