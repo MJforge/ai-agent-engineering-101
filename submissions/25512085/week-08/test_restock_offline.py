@@ -231,6 +231,17 @@ class RestockTests(unittest.TestCase):
             self.inv.update(balance=100, bankrupt_line=500_000, bankruptcies_left=1)
             self.assertEqual(restock.build_restock_plan(self.path), {"buy": [], "bankrupt": True})
 
+    def test_cash_rich_unlocks_high_value_revenue_leaders(self):
+        self.inv["balance"] = 6_000_000
+        self.catalog["G1515d951"] = {
+            "kind": "goods", "category": "mattress", "list_price": 423_810
+        }
+        self.stock("G97cd0437", 1)
+        plan = self.plan()
+        bought_skus = [b["sku"] for b in plan["buy"]]
+        self.assertIn("G1515d951", bought_skus)
+        self.assertLessEqual(self.cost(plan), restock.PROFITABLE_WINDOW_BUDGET)
+
 
 if __name__ == "__main__":
     unittest.main()

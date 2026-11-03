@@ -35,7 +35,7 @@ from store import (
 # Optimal unit list_price range for Stage 1/2 goods: avoids locking 2M+ in a single sofa/PC
 # while delivering high absolute profit and revenue per deal.
 MIN_GOODS_LIST_PRICE = 12_000
-MAX_GOODS_STAGE1_PRICE = 360_000
+MAX_GOODS_STAGE1_PRICE = 450_000
 MAX_GOODS_STAGE3_PRICE = 650_000
 
 MIN_FOOD_LIST_PRICE = 10_000
@@ -53,9 +53,18 @@ RECENT_S = 3 * 3600                 # Market signals rank cold-start candidates 
 # So plan only when a window is open or opens within this many seconds.
 WINDOW_LEAD_S = 60
 WINDOW_BUDGET = 200_000
+PROFITABLE_WINDOW_BUDGET = 450_000  # Unlocked once cash balance >= 5,500,000 so 279k-424k mattresses can be stocked
 OWN_RECENT_S = 20 * 60
 TARGET_CAPS = {"G97cd0437": 2, "Gef4d3036": 2, "G0be9ed07": 2,
                "Ge62449c9": 2, "G07ec17d5": 3}
+HIGH_VALUE_CAPS = {
+    "G1515d951": 2,  # 423,810 Queen hybrid mattress (#1 market revenue SKU)
+    "G07ec17d5": 3,  # 279,000 SS hybrid spring mattress (#2 market revenue SKU)
+    "G2cb8041b": 2,  # 296,000 Office mesh chair (#3 market revenue SKU)
+    "G5cd4ffbc": 2,  # 199,000 Microfiber comforter set (#4 market revenue SKU)
+    "Ge62449c9": 3,  # 87,900 Hotel comforter (#5 market revenue SKU)
+    "G200e39a3": 3,  # 37,900 Kimchi 10kg (#6 market revenue SKU)
+}
 
 
 def supply_window(inv: dict[str, Any]) -> tuple[float, float] | None:
@@ -219,9 +228,11 @@ def plan_with_hub(
         return {"buy": []}
     # Failed plans stay reserved for this window. Actual successes replace, rather
     # than double-charge, those estimates; deployment's prior actual spending stays charged.
+    is_cash_rich = int(inv.get("balance") or 0) >= 5_500_000
+    eff_window_budget = PROFITABLE_WINDOW_BUDGET if is_cash_rich else WINDOW_BUDGET
     used = max(actual, budget_state["baseline_actual"] + budget_state["reserved"])
     avail_budget = int(cs.get("available_budget", 0))
-    tick_budget = min(avail_budget, max(0, WINDOW_BUDGET - used))
+    tick_budget = min(avail_budget, max(0, eff_window_budget - used))
     if tick_budget <= 0:
         return {"buy": []}
 
@@ -241,6 +252,8 @@ def plan_with_hub(
     radar = hub.get("demand_radar", {})
     sku_recent = {s: n for s, ts in (radar.get("own_sku_sold_ts") or {}).items()
                   if (n := sum(1 for t in ts if 0 <= now_s - t <= OWN_RECENT_S)) > 0}
+    sku_market_recent = {s: n for s, ts in (radar.get("sku_sold_ts") or {}).items()
+                         if (n := sum(1 for t in ts if 0 <= now_s - t <= RECENT_S)) > 0}
     cat_recent = {c: n for c, ts in (radar.get("cat_sold_ts") or {}).items()
                   if (n := sum(1 for t in ts if now_s - t <= RECENT_S)) > 0}
 
@@ -251,7 +264,12 @@ def plan_with_hub(
     # Candidate categories: what the ledger and our inquiries say sells first, then a small seed so the shop is
     # visible from the first window: SEED_GOODS_COUNT cheaper goods categories and SEED_FOOD_CATEGORY_COUNT
     # long-shelf food categories, one SKU near the category median each. The seed grows from ledger data, not up front.
-    ranked_demand_cats = [c for c, sc in sorted(demand_scores.items(), key=lambda x: -x[1]) if sc > 0]
+    ranked_demand_cats = [
+        c for c, sc in sorted(
+            demand_scores.items(),
+            key=lambda x: -(x[1] * (math.sqrt(max(15_000.0, medians.get(x[0], 30_000.0))) if is_cash_rich else 1.0)),
+        ) if sc > 0
+    ]
     seed_goods = [c for c in SEED_GOODS_CATEGORIES if c in cat_map and medians.get(c, 0) <= SEED_GOODS_MAX_MEDIAN][:SEED_GOODS_COUNT]
     candidate_categories: list[str] = []
     for c in ranked_demand_cats + seed_goods + long_shelf_food_categories(cat_map):
@@ -276,7 +294,25 @@ def plan_with_hub(
         return qty
 
     # Known small baselines are targets, never orders to purchase regardless of stock.
-    candidates = list(TARGET_CAPS) + sorted(sku_recent, key=lambda s: -sku_recent[s])
+    active_caps = {**TARGET_CAPS, **HIGH_VALUE_CAPS} if is_cash_rich else TARGET_CAPS
+    if is_cash_rich:
+        def rev_priority(s: str) -> float:
+            lp = int(catalog.get(s, {}).get("list_price", 0))
+            if lp > max_goods_price:
+                return -1.0
+            own_n = sku_recent.get(s, 0)
+            mkt_n = sku_market_recent.get(s, 0)
+            return (own_n * 2.5 + mkt_n + (1.5 if s in HIGH_VALUE_CAPS else 0.5)) * lp
+
+        hot_market_skus = [
+            s for s, n in sku_market_recent.items()
+            if n >= 2 and 35_000 <= int(catalog.get(s, {}).get("list_price", 0)) <= max_goods_price
+        ]
+        pool = list(active_caps) + list(sku_recent) + hot_market_skus
+        candidates = sorted(dict.fromkeys(pool), key=lambda s: -rev_priority(s))
+    else:
+        candidates = list(TARGET_CAPS) + sorted(sku_recent, key=lambda s: -sku_recent[s])
+
     for sku in dict.fromkeys(candidates):
         if len(buy_orders) >= 10:
             break
@@ -284,21 +320,27 @@ def plan_with_hub(
         if not info:
             continue
         count = sku_recent.get(sku, 0)
+        mkt_count = sku_market_recent.get(sku, 0)
         kind = info.get("kind", "goods")
+        lp = int(info.get("list_price", 0))
+        if lp > (max_goods_price if kind == "goods" else MAX_FOOD_LIST_PRICE):
+            continue
         if kind == "food" and info.get("shelf_hours") is not None and info["shelf_hours"] < 96 and not count:
             continue
-        # No new SKU experiments while the shop has stock. An explicitly capped
-        # baseline is the only exception, not a licence for market-wide exploration.
-        if units and sku not in held_skus and sku not in TARGET_CAPS:
+        # No new SKU experiments while the shop has stock, unless cash-rich & proven high-value target/market hit.
+        if units and sku not in held_skus and sku not in active_caps and not (is_cash_rich and mkt_count >= 2 and lp >= 35_000):
             continue
-        cap = TARGET_CAPS.get(sku, 3 if kind == "goods" else 4)
-        target = cap if sku in TARGET_CAPS else min(cap, count + 1)
-        if count and sku in TARGET_CAPS:
+        cap = active_caps.get(sku, 3 if kind == "goods" else 4)
+        target = cap if sku in active_caps else min(cap, count + 1)
+        if count and sku in active_caps:
             target = min(cap, max(1, math.ceil(count * 1.25)))
-        if kind == "goods" and int(info.get("list_price", 0)) >= 80_000:
-            # High-ticket goods need demonstrated own turnover; never grow a
-            # position already at target. Worst-case unit cost still gates buys.
-            if not count or held_count[sku] >= cap:
+        if kind == "goods" and lp >= 80_000:
+            if is_cash_rich and (sku in HIGH_VALUE_CAPS or mkt_count >= 2):
+                # Allow 1 seed unit when out of stock so we break the 0-stock deadlock, up to cap when selling
+                target = min(cap, max(1, count + (1 if mkt_count >= 3 else 0)))
+                if held_count[sku] >= target:
+                    continue
+            elif not count or held_count[sku] >= cap:
                 continue
         need = target - held_count[sku]
         if need > 0:
