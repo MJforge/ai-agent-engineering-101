@@ -882,6 +882,36 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         if task_state in ("TASK_STATE_COMPLETED", "TASK_STATE_REJECTED", "TASK_STATE_CANCELED"):
             break
 
+    # A seller may lower its ask only after our third counter. Allow one final
+    # acceptance, never a fourth bargaining counter or a relaxed price cap.
+    if (is_round3 and rounds == 3 and not failure_reason
+            and task_state == "TASK_STATE_INPUT_REQUIRED"
+            and seller_ask is not None and seller_ask <= offer_limit):
+        try:
+            request_timeout(1)
+            last_offer = seller_ask
+            rounds += 1
+            res = rpc_call(rpc_url, "SendMessage", {"message": {
+                "role": "ROLE_USER",
+                "messageId": str(uuid.uuid4()),
+                "taskId": task_id,
+                "parts": [{"text": f"I offer {seller_ask} for this certified item."}],
+            }})
+            if "error" in res:
+                failure_reason = f"final acceptance RPC error: {res['error']}"
+            else:
+                task = res.get("task", res)
+                task_status = task.get("status", {})
+                task_state = task_status.get("state")
+                task_id = task.get("id") or task_id
+                active.update(id=task_id, state=task_state)
+                seller_ask = extract_last_number(task, min_valid_p, max_valid_p)
+                seller_texts.append(
+                    " ".join(p.get("text", "") for p in task_status.get("message", {}).get("parts", []))
+                )
+        except Exception as exc:
+            failure_reason = f"final acceptance RPC failed ({type(exc).__name__})"
+
     # 3. Inspect result & receipt
     raw_receipt = extract_receipt_data(task) if task_state == "TASK_STATE_COMPLETED" else None
     combined_service_text = (" ".join(seller_texts) + " " + card_desc + " " + json.dumps(raw_receipt or {})).lower()
@@ -993,7 +1023,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         review = template.format(rounds=rounds, ask=seller_ask or "high", budget=budget)
         if is_round3:
             if not failure_reason and task_state == "TASK_STATE_INPUT_REQUIRED":
-                failure_reason = f"counter limit reached (ask {seller_ask}, price limit {price_limit})"
+                failure_reason = f"counter limit reached (ask {seller_ask}, offer limit {offer_limit}, budget limit {budget})"
             review += f" Reason: {failure_reason or task_state or 'missing receipt'}."
 
     # A Round 3 agreed deal enters shop memory from review.py, only after it is paid

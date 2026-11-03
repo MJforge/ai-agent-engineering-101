@@ -306,5 +306,123 @@ class BuyerRetryTests(unittest.TestCase):
             self.assertIs(buyer.check_acp_support("https://offline.invalid"), False)
 
 
+class BuyerFinalAcceptanceTests(unittest.TestCase):
+    setUp = price_tests.BuyerPriceTests.setUp
+
+    def run_final_turn(self, *, ask=15000, final="receipt", expired=False, legacy=False,
+                       receipt_price=None, warranty=6):
+        offers = []
+        clock = [0.0]
+        active = {}
+
+        @contextmanager
+        def local_hub():
+            yield self.hub
+
+        def rpc(url, method, params):
+            self.assertEqual(method, "SendMessage")
+            text = params["message"]["parts"][0]["text"]
+            if text.startswith("I offer "):
+                offers.append(int(text.split()[2]))
+                self.assertEqual(text, f"I offer {offers[-1]} for this certified item." if not legacy
+                                 else f"I offer {offers[-1]} if you guarantee product quality and after-sales service support.")
+            count = len(offers)
+            if count == 3 and expired:
+                clock[0] = 22
+            if count == 4 and not legacy:
+                if final == "exception":
+                    raise RuntimeError("fake final acceptance failure")
+                if final == "error":
+                    return {"error": "fake final acceptance error"}
+            done = count == 4 and final == "receipt" and not legacy
+            quote = ask if count >= 3 else 20040
+            task = {"id": "task-1", "status": {
+                "state": "TASK_STATE_COMPLETED" if done else "TASK_STATE_INPUT_REQUIRED",
+                "message": {"parts": [{"text": f"certified ask {quote}"}]}}}
+            if done:
+                task["artifacts"] = [{"parts": [{"data": self.receipt(
+                    ask if receipt_price is None else receipt_price, warranty_hours=warranty)}]}]
+            return {"task": task}
+
+        with ExitStack() as stack:
+            for name, value in {"rpc_call": rpc, "mutate_hub": local_hub,
+                                "update_memory": lambda *a: None,
+                                "call_harness": lambda *a: "OFFER 100"}.items():
+                stack.enter_context(patch.object(buyer, name, value))
+            stack.enter_context(patch.object(buyer.httpx, "get", return_value=SimpleNamespace(json=lambda: {})))
+            stack.enter_context(patch.object(buyer.time, "monotonic", side_effect=lambda: clock[0]))
+            token = buyer.REQUEST_DEADLINE.set(None if legacy else 22)
+            try:
+                result = buyer._run_attempt(
+                    {"name": "shop", "url": "https://offline.invalid"},
+                    dict(self.catalog[self.sku], sku=self.sku), "offline test", {}, self.hub,
+                    self.catalog, {} if legacy else self.order, self.sku, 25000, active)
+            finally:
+                buyer.REQUEST_DEADLINE.reset(token)
+        return result, offers, active
+
+    def test_third_counter_new_affordable_ask_gets_final_receipt(self):
+        result, offers, active = self.run_final_turn()
+        self.assertEqual(offers, [9686, 12091, 15030, 15000])
+        self.assertEqual(result["receipt"]["price"], 15000)
+        self.assertEqual(active["state"], "TASK_STATE_COMPLETED")
+        self.assertEqual(self.hub["pending_deals"]["order-1"]["price"], 15000)
+
+    def test_above_offer_limit_never_gets_final_turn_and_reports_both_limits(self):
+        result, offers, _ = self.run_final_turn(ask=15031)
+        self.assertEqual(len(offers), 3)
+        self.assertIsNone(result["receipt"])
+        self.assertIn("counter limit reached (ask 15031, offer limit 15030, budget limit 25000)", result["review"])
+
+    def test_expired_deadline_does_not_send_final_turn(self):
+        result, offers, _ = self.run_final_turn(expired=True)
+        self.assertEqual(len(offers), 3)
+        self.assertIsNone(result["receipt"])
+        self.assertIn("final acceptance RPC failed (TimeoutError)", result["review"])
+
+    def test_final_turn_counter_is_not_followed_by_another_offer(self):
+        result, offers, _ = self.run_final_turn(final="counter")
+        self.assertEqual(len(offers), 4)
+        self.assertIsNone(result["receipt"])
+        self.assertIn("counter limit reached", result["review"])
+
+    def test_final_turn_rpc_failures_are_recorded(self):
+        for final, expected in [("exception", "final acceptance RPC failed (RuntimeError)"),
+                                ("error", "final acceptance RPC error: fake final acceptance error")]:
+            with self.subTest(final=final):
+                result, offers, _ = self.run_final_turn(final=final)
+                self.assertEqual(len(offers), 4)
+                self.assertIsNone(result["receipt"])
+                self.assertIn(expected, result["review"])
+
+    def test_final_receipt_cannot_exceed_last_accepted_offer(self):
+        result, offers, _ = self.run_final_turn(receipt_price=15001)
+        self.assertEqual(offers[-1], 15000)
+        self.assertIsNone(result["receipt"])
+        self.assertIn("Invalid receipt", result["review"])
+
+    def test_goods_comparables_cap_still_blocks_final_turn(self):
+        self.order["kind"] = "goods"
+        self.hub["demand_radar"]["sku_settles"] = {self.sku: [10000] * 3}
+        result, offers, _ = self.run_final_turn(ask=13000)
+        self.assertEqual(len(offers), 3)
+        self.assertLessEqual(max(offers), 12358)
+        self.assertIsNone(result["receipt"])
+        self.assertIn("offer limit 12358", result["review"])
+
+    def test_goods_final_receipt_still_requires_positive_surplus_or_warranty(self):
+        self.order["kind"] = "goods"
+        result, offers, _ = self.run_final_turn(warranty=0)
+        self.assertEqual(len(offers), 4)
+        self.assertIsNone(result["receipt"])
+        self.assertIn("break rate", result["review"])
+
+    def test_round2_keeps_five_counters_without_final_acceptance(self):
+        result, offers, _ = self.run_final_turn(legacy=True)
+        self.assertEqual(len(offers), 5)
+        self.assertIsNone(result["receipt"])
+        self.assertNotIn("Reason:", result["review"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
