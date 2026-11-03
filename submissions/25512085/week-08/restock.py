@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from adaptive_strategy import MAX_EXPLORATION_SKUS, MAX_WINDOW_BUDGET, decide_restock
+
 from store import (
     ROUND_END_TS,
     SEED_GOODS_CATEGORIES,
@@ -218,6 +220,10 @@ def build_restock_plan(market_dir: Path) -> dict[str, Any]:
     if window and str(window) not in snapshot.get("restock_windows", {}):
         rows += fetch_ledger_rows(0)
     own_urls = fetch_own_shop_urls()
+    try:
+        inventory_fresh = 0 <= time.time() - (market_dir / "inventory.json").stat().st_mtime <= 120
+    except OSError:
+        inventory_fresh = False
     with mutate_hub() as hub:
         hub["own_shop_urls"] = sorted(set(hub.get("own_shop_urls", [])) | set(own_urls))
         # A deployment's truncated ledger tail cannot prove this window's prior
@@ -226,7 +232,7 @@ def build_restock_plan(market_dir: Path) -> dict[str, Any]:
         if window and not hub.get("restock_windows"):
             hub.setdefault("restock_windows", {})[str(window)] = {
                 "baseline_actual": 0, "reserved": WINDOW_BUDGET, "blocked": True}
-        return plan_with_hub(hub, market_dir, catalog, inv, rows)
+        return plan_with_hub(hub, market_dir, catalog, inv, rows, inventory_fresh=inventory_fresh)
 
 
 def plan_with_hub(
@@ -235,6 +241,7 @@ def plan_with_hub(
     catalog: dict[str, dict[str, Any]],
     inv: dict[str, Any],
     rows: list[dict[str, Any]],
+    *, inventory_fresh: bool = False,
 ) -> dict[str, Any]:
     """The plan itself. Runs inside mutate_hub, which saves the hub on return: do not save it here."""
     # Keep evidence of previously verified own sales before store's short tail is
@@ -248,6 +255,7 @@ def plan_with_hub(
                   if times)
     hub["restock_proven_skus"] = sorted(s for s in proven if s in catalog)
     cs = update_capital_stage(hub, inv)
+    strategy = decide_restock(hub, inv, time.time(), inventory_fresh=inventory_fresh)
     forum_posts = load_json_safe(market_dir / "forum.json", []) or []
 
     stage = int(cs.get("stage", 1))
@@ -273,6 +281,13 @@ def plan_with_hub(
     exp_per_window = 8 if (is_cash_rich and is_full_catalog) else EXPLORATION_PER_WINDOW
     exp_skus_cap = 55 if (is_cash_rich and is_full_catalog) else EXPLORATION_SKUS
     exp_units_cap = 95 if (is_cash_rich and is_full_catalog) else EXPLORATION_UNITS
+    if is_cash_rich and is_full_catalog:
+        exp_skus_cap = min(MAX_EXPLORATION_SKUS, max(exp_skus_cap, strategy.get("exploration_skus", exp_skus_cap)))
+    # A policy/cash change never raises an already-started window's cap.
+    eff_window_budget = min(eff_window_budget, MAX_WINDOW_BUDGET,
+                            budget_state.setdefault("window_cap", eff_window_budget))
+    exploration_cap = int(eff_window_budget * .4 * max(.5, min(1., strategy.get("exploration_factor", 1.))))
+    exploration_reserved = budget_state.setdefault("exploration_reserved", budget_state["reserved"])
     used = max(actual, budget_state["baseline_actual"] + budget_state["reserved"])
     avail_budget = int(cs.get("available_budget", 0))
     tick_budget = min(avail_budget, max(0, eff_window_budget - used))
@@ -354,18 +369,21 @@ def plan_with_hub(
     max_goods_price = MAX_GOODS_STAGE3_PRICE if stage >= 3 else MAX_GOODS_STAGE1_PRICE
     buy_orders: list[dict[str, Any]] = []
     spent_est = 0
+    exploration_spent = 0
     planned = budget_state.setdefault("planned_skus", {})
     expanded = budget_state.setdefault("assortment_categories", [])
     # Reservations count as coverage even when inventory publication is delayed.
     held_skus.update(s for s in planned if s in catalog)
     projected_units = len(units) + sum(max(0, n - held_count[s]) for s, n in planned.items())
 
-    def add_line(sku: str, qty: int, limit: int) -> int:
+    def add_line(sku: str, qty: int, limit: int, *, experiment: bool = False) -> int:
         """Queue qty units of sku if the tick budget allows; returns how many were queued."""
-        nonlocal spent_est, projected_units
+        nonlocal spent_est, projected_units, exploration_spent
         if sku in planned or any(b["sku"] == sku for b in buy_orders):
             return 0
         unit_cost = max(1, math.ceil(int(catalog.get(sku, {}).get("list_price", 0)) * 0.75))
+        if experiment:
+            limit = min(limit, spent_est + max(0, exploration_cap - exploration_reserved - exploration_spent))
         qty = min(qty, 20, (min(tick_budget, limit) - spent_est) // unit_cost)
         if qty <= 0:
             return 0
@@ -373,6 +391,8 @@ def plan_with_hub(
         held_skus.add(sku)
         held_count[sku] += qty
         spent_est += unit_cost * qty
+        if experiment:
+            exploration_spent += unit_cost * qty
         projected_units += qty
         planned[sku] = qty
         return qty
@@ -386,6 +406,7 @@ def plan_with_hub(
     candidates = sorted(
         set(active_caps) | set(proven) | set(missed_skus_1h) | set(sku_recent) | set(hot_market_skus),
         key=lambda s: (
+            s not in proven and s not in missed_skus_1h and s not in active_caps,
             held_count[s] > 0,
             catalog.get(s, {}).get("kind", "goods") == "food",
             not (s in proven or s in missed_skus_1h or (s in active_caps and sku_market_recent.get(s, 0) >= 2)),
@@ -449,7 +470,7 @@ def plan_with_hub(
                          and spent_est + cost <= tick_budget - 50_000)
             if allowance:
                 limit = spent_est + cost
-            added = add_line(sku, 1 if allowance else need, limit)
+            added = add_line(sku, 1 if allowance else need, limit, experiment=experiment)
             if added:
                 if kind == "food":
                     held_food_units += added
@@ -501,7 +522,7 @@ def plan_with_hub(
             x["sku"],
         ))
         for info in pool:
-            added = add_line(info["sku"], 1, tick_budget)
+            added = add_line(info["sku"], 1, tick_budget, experiment=True)
             if added:
                 if info.get("kind") == "food":
                     held_food_units += added
@@ -509,6 +530,7 @@ def plan_with_hub(
                 break
 
     budget_state["reserved"] += spent_est
+    budget_state["exploration_reserved"] += exploration_spent
 
     # Optional Shop Forum promotion (max 1 post per 320s) when we have rich certified stock
     now = int(time.time())

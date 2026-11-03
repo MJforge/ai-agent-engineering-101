@@ -23,6 +23,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from adaptive_strategy import note_ledger_coverage, refresh_buyer_policy
+
 MARKET_URL = os.environ.get("MARKET_URL", "https://market.ourolabs.ai").rstrip("/")
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state_hub.json"
@@ -329,6 +331,7 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
     would count each settled deal twice. Rounds 1/2 have no settle entries.
     Market aggregates skip rows at/below ledger_seq; own sales use separate seq keys
     so identity bootstrap can recover sales already consumed by another hook."""
+    note_ledger_coverage(hub, rows, time.time())
     radar = hub["demand_radar"]
     last_seq = int(hub.get("ledger_seq", 0))
     seq = last_seq
@@ -533,13 +536,15 @@ def record_inbound_inquiry(category_or_item: str, matched: bool, path: Path = ST
                     missed_ts[k] = s_arr[-50:]
 
 
-def record_buyer_order(category: str, path: Path = STATE_FILE) -> None:
+def record_buyer_order(category: str, path: Path = STATE_FILE) -> dict[str, Any] | None:
     """Record an order category assigned to our market_buyer.py."""
     if not category:
         return
     with mutate_hub(path) as hub:
+        refresh_buyer_policy(hub, time.time())
         radar = hub.setdefault("demand_radar", default_hub()["demand_radar"])
         radar["buyer_orders"][category] = radar["buyer_orders"].get(category, 0) + 1
+        return hub.get("adaptive_strategy", {})
 
 
 def get_sku_market_anchor(hub: dict[str, Any], sku: str, list_price: int) -> int:

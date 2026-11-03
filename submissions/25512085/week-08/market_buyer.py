@@ -30,6 +30,8 @@ from typing import Any
 
 import httpx
 
+from adaptive_strategy import filter_candidates, record_failure
+
 from store import (
     BREAK_RATE,
     GOODS_BREAK_WINDOW_H,
@@ -360,6 +362,7 @@ def pick_round3_shop_and_sku(
             utility = est_surplus * feasibility_mult * trust_factor
             best_candidates.append((utility, c, {"sku": sku, "name": off.get("name", sku), "list_price": list_price, "est_cost": est_cost_floor}))
 
+    best_candidates = filter_candidates(best_candidates, hub, now_ts)
     if best_candidates:
         best_candidates.sort(key=lambda x: x[0], reverse=True)
         # One SKU per URL; explicitly unsupported ACP must never be a fallback.
@@ -597,7 +600,9 @@ def main():
     sync_broken_and_payments(hub, shops_path.parent if (shops_path.parent / "broken.jsonl").exists() else MARKET_DIR)
 
     if is_round3:
-        record_buyer_order(order_data.get("category") or item)
+        strategy = record_buyer_order(order_data.get("category") or item)
+        if isinstance(strategy, dict):
+            hub["adaptive_strategy"] = strategy
         result = run_round3(shops, memory, hub, catalog, order_data, item, budget, deadline)
     else:
         target_sku_info = None
@@ -657,6 +662,11 @@ def run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         if order_data.get("acceptable"):
             request_timeout(1)  # Includes time spent waiting for/exiting the hub lock.
         selected = result.get("receipt") is not None
+        if (order_data.get("acceptable") and not selected and active.get("failure")
+                and (cleanup_deadline is None or time.monotonic() < cleanup_deadline)):
+            with mutate_hub() as current_hub:
+                record_failure(current_hub, order_data.get("order"), chosen_shop["url"],
+                               target_sku_info["sku"], active["failure"], time.time())
         return result
     except Exception as exc:
         if not order_data.get("acceptable"):
@@ -713,6 +723,8 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         rpc_url = interfaces[0].get("url") if interfaces else f"{shop_url}/"
     except Exception as e:
         review = f"No deal in 0 rounds: shop card endpoint failed ({type(e).__name__})."
+        if isinstance(e, (TimeoutError, httpx.TimeoutException)):
+            active["failure"] = "timeout"
         update_memory(memory, shop_name, {
             "item": item, "budget": budget, "price": None, "rounds": 0, "stars": 2, "outcome": "no-deal"
         })
@@ -748,6 +760,8 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         res = rpc_call(rpc_url, "SendMessage", {"message": msg})
     except Exception as e:
         review = f"No deal in 0 rounds: shop did not respond to opening inquiry ({type(e).__name__})."
+        if isinstance(e, (TimeoutError, httpx.TimeoutException)):
+            active["failure"] = "timeout"
         update_memory(memory, shop_name, {
             "item": item, "budget": budget, "price": None, "rounds": 0, "stars": 2, "outcome": "no-deal"
         })
@@ -874,6 +888,8 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
             res = rpc_call(rpc_url, "SendMessage", {"message": follow_up})
         except Exception as exc:
             failure_reason = f"counter RPC failed ({type(exc).__name__})"
+            if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
+                active["failure"] = "timeout"
             break
         if "error" in res:
             failure_reason = f"counter RPC error: {res['error']}"
@@ -971,6 +987,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
             stars = None
             review = "No deal: unsigned receipt (missing sig_seller); trying another shop."
             outcome = "unsigned-receipt"
+            active["failure"] = "unsigned"
         elif receipt_invalid:
             stars = 1
             review = (
@@ -986,6 +1003,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
             stars = 3
             review = f"No deal: declined-price-policy for {rec_item} at {rec_price} (cap {receipt_cap})."
             outcome = "declined-price-policy"
+            active["failure"] = "price"
         else:
             final_receipt = raw_receipt
             recorded_price = int(rec_price)
@@ -1039,6 +1057,11 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         template = random.choice(FUNNY_NO_DEAL_REVIEWS)
         review = template.format(rounds=rounds, ask=seller_ask or "high", budget=budget)
         if is_round3:
+            if seller_ask is not None and seller_ask > offer_limit:
+                active["failure"] = "price"
+            elif task_state == "TASK_STATE_REJECTED":
+                # A rejected SKU is not proof of globally empty stock.
+                active["failure"] = "rejected"
             if not failure_reason and task_state == "TASK_STATE_INPUT_REQUIRED":
                 failure_reason = f"counter limit reached (ask {seller_ask}, offer limit {offer_limit}, budget limit {budget})"
             review += f" Reason: {failure_reason or task_state or 'missing receipt'}."
