@@ -308,6 +308,7 @@ class BuyerRetryTests(unittest.TestCase):
 
 class BuyerFinalAcceptanceTests(unittest.TestCase):
     setUp = price_tests.BuyerPriceTests.setUp
+    receipt = price_tests.BuyerPriceTests.receipt
 
     def run_final_turn(self, *, ask=15000, final="receipt", expired=False, legacy=False,
                        receipt_price=None, warranty=6):
