@@ -302,6 +302,7 @@ def plan_with_hub(
         eff_window_budget = SUPER_CASH_WINDOW_BUDGET if balance_now >= 6_200_000 else HIGH_CASH_WINDOW_BUDGET
     else:
         eff_window_budget = PROFITABLE_WINDOW_BUDGET if is_cash_rich else WINDOW_BUDGET
+    base_window_budget = eff_window_budget
     exp_per_window = 8 if (is_cash_rich and is_full_catalog) else EXPLORATION_PER_WINDOW
     exp_skus_cap = 55 if (is_cash_rich and is_full_catalog) else EXPLORATION_SKUS
     exp_units_cap = MAX_EXPLORATION_UNITS if (is_cash_rich and is_full_catalog) else EXPLORATION_UNITS
@@ -483,7 +484,8 @@ def plan_with_hub(
             is_live_catalog and is_cash_rich and sku in LIVE_BESTSELLER_CAPS
             and (sku in proven or sku in missed_skus_1h or count > 0 or sku_market_recent.get(sku, 0) >= 2)
         )
-        if deficit > 0 and sku in proven:
+        if (deficit > 0 and sku in proven
+                and (kind == "goods" or (info.get("shelf_hours") or 0) >= 96)):
             target_depth = max(3, LIVE_BESTSELLER_CAPS.get(sku, 0))
             need = max(0, target_depth - held_count[sku])
         elif held_count[sku] and sku not in proven:
@@ -521,8 +523,13 @@ def plan_with_hub(
             # One expensive unit may cross the 60% partition, but leaves 50k
             # for breadth in a rich window (e.g. the 423,810 mattress).
             allowance = (is_cash_rich and high_unit_allowed and not held_count[sku]
-                         and cost > core_limit - spent_est
-                         and spent_est + cost <= tick_budget - 50_000)
+                          and cost > core_limit - spent_est
+                          and spent_est + cost <= tick_budget - 50_000)
+            # Preserve the original one-high-unit usage marker when equity
+            # funding makes crossing the old 60% partition affordable normally.
+            baseline_allowance = (is_cash_rich and high_unit_allowed and not held_count[sku]
+                                  and cost > int(base_window_budget * .6) - used - spent_est
+                                  and spent_est + cost <= tick_budget - 50_000)
             if allowance:
                 limit = spent_est + cost
             added = add_line(sku, 1 if allowance else need, limit, experiment=experiment)
@@ -531,7 +538,7 @@ def plan_with_hub(
                     held_food_units += added
                 if experiment:
                     expanded.append(info.get("category"))
-                if allowance:
+                if allowance or baseline_allowance:
                     high_unit_allowed = False
                     budget_state["high_unit_allowance"] = True
 
