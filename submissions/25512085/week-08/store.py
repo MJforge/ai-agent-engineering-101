@@ -171,7 +171,7 @@ def compact_hub(hub: dict[str, Any], now: float) -> None:
     """Lossless for current consumers: all 50 samples within their 3h window.
 
     A smaller sample cap changes medians. Do not truncate to 15 just to meet a
-    byte target. No consumer reads shop/order/seq/shelf_hours on comparables.
+    byte target. Forum citations use their own bounded window, not comparables.
     """
     from seller_cash_policy import compact_cash_sales, compact_break_orders, number
     radar = hub.get('demand_radar', {})
@@ -411,6 +411,37 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
     # Separate idempotent seller-only observations; never change the buyer's ranking state.
     from seller_cash_policy import observe
     observe(hub, rows, catalog, time.time(), own_urls, OWN_NAME)
+    # A separate exact 3h forum window: comparables are capped at 50 per SKU
+    # and exclude our buyer. Overflow makes the window unavailable, not biased.
+    intel = hub.setdefault('forum_intel', {})
+    now = time.time()
+    events = {str(r['seq']): r for r in intel.get('settles', [])
+              if now-10800 <= r['ts'] <= now}
+    lookup = {s.lower(): s for s in catalog}
+    for e in rows:
+        d = e.get('data') or {}
+        sku = lookup.get(str(d.get('sku') or d.get('item') or '').lower())
+        if (e.get('kind') == 'settle' and isinstance(e.get('seq'), int)
+                and isinstance(e.get('ts'), (int, float)) and now-10800 <= e['ts'] <= now
+                and sku and isinstance(d.get('amount'), (int, float)) and d['amount'] > 0):
+            events[str(e['seq'])] = {'seq': e['seq'], 'ts': e['ts'], 'sku': sku,
+                                      'amount': d['amount']}
+    ordered = sorted(events.values(), key=lambda r: (r['ts'], r['seq']))
+    if len(ordered) > 20000:
+        intel['overflow_until'] = ordered[-20001]['ts'] + 10800
+    intel['settles'] = ordered[-20000:]
+    # Small, topic-specific sale/break references; counters themselves stay in
+    # the existing break observer. No order identities or seller policy changes.
+    refs = intel.setdefault('quality_refs', {})
+    for e in rows:
+        d = e.get('data') or {}
+        if e.get('kind') != 'settle' or not isinstance(e.get('seq'), int):
+            continue
+        sku = lookup.get(str(d.get('sku') or d.get('item') or '').lower())
+        if sku and d.get('grade') in ('A', 'B', 'C'):
+            key = sku + ':' + d['grade']
+            refs[key] = list(dict.fromkeys(refs.get(key, []) + [e['seq']]))[-10:]
+    intel['quality_refs'] = dict(list(refs.items())[-5000:])
 
     # Fast case-insensitive catalog lookup for canonical SKU & category
     cat_lookup: dict[str, tuple[str, str]] = {}

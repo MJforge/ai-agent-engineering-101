@@ -10,7 +10,7 @@ Responsibilities:
    and as a shop-memory entry (`memory.json`). Unpaid deals never get here, so they are never recorded.
 3. Checks `.market/broken.jsonl` to attribute any broken non-food items back to the selling shop.
 4. Picks the facts for a ledger-referenced (`refs: [ledger_seq]`) buyer forum post (respecting the 5-minute
-   rate limit) and hands them to `forum_writer.py`, where the model writes the post; casts strategic votes on
+    rate limit) and hands them to `forum_writer.py` (deterministic by default); casts strategic votes on
    informative peer forum posts to maximize Buyer Forum Score (30% of Buyer ALL!).
 5. Prints final `{stars, review}` JSON line.
 """
@@ -26,7 +26,9 @@ from pathlib import Path
 from typing import Any
 
 from market_buyer import load_memory, update_memory
+from forum_writer import build_analysis_brief, check_post
 from store import (
+    load_catalog,
     load_json_safe,
     mutate_hub,
     queue_forum_action,
@@ -48,7 +50,8 @@ def start_forum_writer(market_dir: Path, brief: dict[str, Any]) -> None:
         subprocess.Popen([sys.executable, str(BASE_DIR / "forum_writer.py"), str(brief_path)], cwd=str(BASE_DIR),
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)
     except OSError:
-        queue_forum_action(market_dir, {"post": brief["fallback"], "refs": brief["refs"], "as": "buyer"})
+        if check_post(brief['fallback']) is None:
+            queue_forum_action(market_dir, {"post": brief["fallback"], "refs": brief["refs"], "as": "buyer"})
 
 
 def evaluate_settled_deal(deal_data: dict[str, Any], hub: dict[str, Any], market_dir: Path) -> tuple[int, str]:
@@ -155,51 +158,17 @@ def evaluate_settled_deal(deal_data: dict[str, Any], hub: dict[str, Any], market
     last_buyer_post = int(f_state.get("last_buyer_post_ts", 0))
 
     if (now - last_buyer_post) >= 315 and isinstance(ledger_seq, int):
-        recent_refs = (hub.get("demand_radar", {}).get("recent_refs") or [ledger_seq])[-4:]
-        shop_label = str(receipt.get("shop") or shop_url)
-        if claim_honest is False:
-            post_body = (
-                f"[Buyer Audit Warning] Ledger #{ledger_seq}: {shop_label} claimed grade '{claim}' on {name} ({sku}) "
-                f"at {price}, but certified inspection revealed grade '{grade}'. Always set accept.cert=true!"
-            )
-        elif newly_broken:
-            b_item = newly_broken[-1]
-            w_hrs = int(b_item.get("warranty_hours") or 0)
-            w_note = f"covered by {w_hrs}h warranty (full refund)" if w_hrs > 0 else "NO warranty (unrecovered loss)"
-            post_body = (
-                f"[Reliability & Price Report] Settled {name} ({sku}, grade {grade}) at {price} (value {value}, "
-                f"surplus +{surplus}, ledger #{ledger_seq} via {shop_label}). Note: earlier goods '{b_item.get('name')}' "
-                f"from {b_item.get('shop_name')} broke after sale ({w_note})."
-            )
-        else:
-            # Summarize our verified honest shops and average surplus to provide high utility to peer buyers
-            honest_shops = [
-                v.get("name") for v in (hub.get("shop_trust") or {}).values()
-                if v.get("name") and int(v.get("honest", 0)) >= 1 and int(v.get("dishonest", 0)) == 0
-            ][:4]
-            trusted_str = f" Verified honest shops so far: {', '.join(honest_shops)}." if honest_shops else ""
-            post_body = (
-                f"[Market Price & Quality Brief] Settled {name} ({sku}, grade {grade}, warranty {warranty}h) "
-                f"at {price} vs list value {value} (net buyer surplus +{surplus}, ledger #{ledger_seq} at {shop_label})."
-                f"{trusted_str}"
-            )
-        # The model writes the post from these facts in forum_writer.py, started detached so this hook (and the
-        # kit's settlement loop) does not wait for it; post_body is what gets posted if the model fails.
-        facts = {
-            "event": "dishonest_grade_claim" if claim_honest is False else ("broken_goods" if newly_broken else "settled_deal"),
-            "product": name[:80], "sku": sku, "shop": shop_label[:40], "paid": price, "list_value": value,
-            "buyer_surplus": surplus, "grade": grade, "claimed_grade": claim, "claim_honest": claim_honest,
-            "warranty_hours": warranty, "ledger": ledger_seq,
-            "broken": ({"product": str(newly_broken[-1].get("name"))[:80], "shop": str(newly_broken[-1].get("shop_name"))[:40],
-                        "warranty_hours": int(newly_broken[-1].get("warranty_hours") or 0)} if newly_broken else None),
-            "honest_shops_so_far": [
-                str(v.get("name"))[:40] for v in (hub.get("shop_trust") or {}).values()
-                if v.get("name") and int(v.get("honest", 0)) >= 1 and int(v.get("dishonest", 0)) == 0
-            ][:4],
-        }
-        start_forum_writer(market_dir, {"facts": facts, "fallback": post_body, "refs": recent_refs,
-                                        "ledger": ledger_seq, "market_dir": str(market_dir)})
-        f_state["last_buyer_post_ts"] = now
+        shops = load_json_safe(market_dir / 'shops.json', None)
+        if isinstance(shops, dict):
+            shops = shops.get('shops', [])
+        brief = build_analysis_brief(hub, load_catalog(market_dir), shops, now, {
+            'sku': sku, 'paid': price, 'value': value, 'ledger': ledger_seq,
+            'category': purchase.get('category') or sku,
+        })
+        if brief:
+            brief.update(ledger=ledger_seq, market_dir=str(market_dir))
+            start_forum_writer(market_dir, brief)
+            f_state["last_buyer_post_ts"] = now
 
     # Cast strategic votes on peer forum posts with ledger refs (no rate limit on votes)
     forum_posts = load_json_safe(market_dir / "forum.json", []) or []
