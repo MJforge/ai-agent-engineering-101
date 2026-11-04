@@ -31,6 +31,26 @@ RATIO_CACHE_S = 30 * 60
 RATIO_MIN, RATIO_MAX = .30, .75   # Growth phase: allow up to the top shops' stock ratio (POLICY 9.1)
 FILL_WINDOWS = 2                  # Close the stock deficit over ~2 supply windows (~40 min)
 WINDOW_EQUITY_CAP = .50           # Runaway guard per supply window
+ENDGAME_SCHEDULE = {
+    # Exclusive lower bound in hours remaining (exact boundary enters the next phase).
+    96: {"name": "normal", "ratio_cap": None, "grades": ("hot", "popular", "observe"), "hot_max_depth": 8},
+    72: {"name": "taper-1", "ratio_cap": .50, "grades": ("hot", "popular", "observe"), "hot_max_depth": 6},
+    48: {"name": "taper-2", "ratio_cap": .30, "grades": ("hot", "popular"), "hot_max_depth": 4},
+    36: {"name": "taper-3", "ratio_cap": .15, "grades": ("hot",), "hot_max_depth": 2},
+    -math.inf: {"name": "stop", "ratio_cap": 0, "grades": (), "hot_max_depth": 0},
+}
+
+
+def endgame_phase(now):
+    hours_left = (ROUND_END_TS - now) / 3600
+    phase = ENDGAME_SCHEDULE[-math.inf] if ROUND_END_TS - now <= STOP_BUYING_BEFORE_END_S else next(
+        ENDGAME_SCHEDULE[lower] for lower in sorted(ENDGAME_SCHEDULE, reverse=True) if hours_left > lower)
+    return phase, {"endgame_phase": phase["name"], "ratio_cap": phase["ratio_cap"], "hours_left": hours_left}
+
+
+def taper_ratio(ratio, phase):
+    # §9 has already clamped R; never apply RATIO_MIN again after the endgame cap.
+    return ratio if phase["ratio_cap"] is None else min(ratio, phase["ratio_cap"])
 
 
 def supply_window(inv: dict[str, Any]) -> tuple[float, float] | None:
@@ -92,9 +112,11 @@ def resolve_market_ratio(hub, observation=None):
                            "default": True, "cached": False, "shops": 0}
 
 
-def popularity(inquiries, misses, settlements):
+def popularity(inquiries, misses, settlements, *, hot_max_depth=None):
+    if hot_max_depth is None:
+        hot_max_depth = ENDGAME_SCHEDULE[max(ENDGAME_SCHEDULE)]["hot_max_depth"]
     if inquiries >= 4:
-        return "hot", max(3, min(8, inquiries))
+        return "hot", min(hot_max_depth, max(3, inquiries))
     if inquiries >= 2 or misses >= 2 or settlements >= 21:
         return "popular", 2
     if inquiries == 1 or misses == 1 or 11 <= settlements <= 20:
@@ -115,12 +137,14 @@ def build_restock_plan(market_dir: Path) -> dict[str, Any]:
         stock = cs.get("stock_cost_value", 0)
         equity = int(inv.get("balance") or 0) + stock
         ratio, source = resolve_market_ratio(load_hub())
+        phase, endgame = endgame_phase(time.time())
+        ratio = taper_ratio(ratio, phase)
         print(json.dumps({"E": equity, "R": ratio, "R_source": source, "T": ratio * equity,
                           "deficit": max(0, ratio * equity - stock), "W": 0,
                           "grades": {g: {"skus": 0, "reserved": 0} for g in ("hot", "popular", "observe")},
                           "grade_budget": {"hot_popular": 0, "observe": 0},
                           "dead_new": 0, "dead_total": len(load_hub().get("dead_skus", {})),
-                          "excluded": {}, "stop": reason}), file=sys.stderr, flush=True)
+                          "excluded": {}, "stop": reason, **endgame}), file=sys.stderr, flush=True)
         return {"buy": [], "bankrupt": True} if bankrupt else {"buy": []}
 
     if not catalog or not inv:
@@ -129,7 +153,7 @@ def build_restock_plan(market_dir: Path) -> dict[str, Any]:
     sellable = [u for u in inv.get("units", []) if u.get("grade") != "expired"]
     if balance < int(inv.get("bankrupt_line") or 0) and int(inv.get("bankruptcies_left") or 0) > 0 and not sellable:
         return stopped("bankruptcy", bankrupt=True)
-    if time.time() > ROUND_END_TS - STOP_BUYING_BEFORE_END_S:
+    if time.time() >= ROUND_END_TS - STOP_BUYING_BEFORE_END_S:
         return stopped("round_end")
     snapshot = load_hub()
     rows = fetch_ledger_rows(int(snapshot.get("ledger_seq", 0)))
@@ -185,6 +209,8 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
     covered = (coverage.get("since", now) <= now - NO_DEMAND_S
                and 0 <= now - coverage.get("through", 0) <= 120)
     ratio, source = resolve_market_ratio(hub, ratio_observation)
+    phase, endgame = endgame_phase(now)
+    ratio = taper_ratio(ratio, phase)
     stock = cs["stock_cost_value"]
     equity = int(inv.get("balance") or 0) + stock
     target = ratio * equity
@@ -199,7 +225,8 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
         # Unheld SKUs use stockout inquiries only, not old quotes for stock no longer held.
         inquiries = len(recent) if held[sku] else misses
         sales = radar.get("sku_sold_ts", {}).get(sku, [])
-        grade, depth = popularity(inquiries, misses, sum(0 <= now - t <= POPULARITY_S for t in sales))
+        grade, depth = popularity(inquiries, misses, sum(0 <= now - t <= POPULARITY_S for t in sales),
+                                  hot_max_depth=phase["hot_max_depth"])
         lp, cost = int(info.get("list_price", 0)), estimated_cost(hub, sku, info)
         prices = radar.get("sku_settles", {}).get(sku, [])
         expected_price = statistics.median(prices) if prices else .95 * lp
@@ -212,6 +239,8 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
             reason = "no_demand_2h"
         elif depth == 0:
             reason = "no_popularity"
+        elif grade not in phase["grades"]:
+            reason = "endgame_grade"
         elif lp <= 0:
             reason = "invalid_price"
         elif (info.get("kind") == "food" and grade != "hot"
@@ -230,12 +259,14 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
         group.sort(key=lambda c: (-c[3], c[0]))
     restore = sum(n * c for g in ("hot", "popular") for s, n, c, m in candidates[g] if not held[s])
     calculated = max(0, int(min(cs["available_budget"], max(restore, deficit / FILL_WINDOWS), WINDOW_EQUITY_CAP * equity)))
+    if phase["ratio_cap"] is not None and deficit <= 0:
+        calculated = 0
     diag = {"E": equity, "R": ratio, "R_source": source, "T": target, "deficit": deficit,
             "W": calculated, "cash_floor": cs["cash_floor"], "restore_cost": restore,
             "grades": {g: {"skus": len(v), "reserved": 0} for g, v in candidates.items()},
             "grade_budget": {"hot_popular": calculated, "observe": calculated // 2},
             "dead_new": new_dead, "dead_total": len(dead), "excluded": excluded,
-            "no_demand_deferred": not covered}
+            "no_demand_deferred": not covered, **endgame}
 
     def finish(orders, reason=None):
         if reason:
@@ -243,7 +274,7 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
         print(json.dumps(diag, ensure_ascii=False), file=sys.stderr, flush=True)
         return {"buy": orders}
 
-    if time.time() > ROUND_END_TS - STOP_BUYING_BEFORE_END_S:
+    if time.time() >= ROUND_END_TS - STOP_BUYING_BEFORE_END_S:
         return finish([], "round_end")
     window = supply_window(inv)
     if window is None:
