@@ -194,7 +194,7 @@ def _save_hub_unlocked(hub: dict[str, Any], path: Path) -> None:
     hub["updated_at"] = int(time.time())
     tmp = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
     try:
-        tmp.write_text(json.dumps(hub, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.write_text(json.dumps(hub, ensure_ascii=False, separators=(',',':')), encoding="utf-8")
         replaced = False
         for attempt in range(5):
             try:
@@ -564,12 +564,12 @@ def sync_broken_and_payments(hub: dict[str, Any], market_dir: Path) -> list[dict
     return newly_attributed
 
 
-def record_inbound_inquiry(category_or_item: str, matched: bool, path: Path = STATE_FILE, raw_text: str = "", *, sku: str = "") -> None:
+def record_inbound_inquiry(category_or_item: str, matched: bool, path: Path = STATE_FILE, raw_text: str = "", *, sku: str = "", observed_at: float | None = None) -> None:
     """Record a buyer inquiry arriving at seller.py (including missed demand when out of stock)."""
     if not category_or_item and not sku:
         return
     category_or_item = category_or_item or sku
-    now = time.time()
+    now = time.time() if observed_at is None else observed_at
     with mutate_hub(path) as hub:
         radar = hub.setdefault("demand_radar", default_hub()["demand_radar"])
         import re
@@ -638,6 +638,7 @@ def queue_forum_action(market_dir: Path, payload: dict[str, Any]) -> None:
     try:
         with open(outbox_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        return True
     except OSError:
-        pass
+        return False
 

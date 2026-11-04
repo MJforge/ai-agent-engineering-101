@@ -15,6 +15,7 @@ import logging
 import math
 import os
 import random
+import queue
 import re
 import threading
 import time
@@ -72,6 +73,30 @@ MARKET_NAME = os.environ.get("SHOP_MARKET_NAME", "mjforge")
 BASE_DIR = Path(__file__).resolve().parent
 MARKET_DIR = Path(os.environ.get("MARKET_DIR", str(BASE_DIR / ".market")))
 SELLER_HISTORY_FILE = BASE_DIR / "seller_history.json"
+
+# Analytics must never block the A2A event loop on the shared hub's eight-second file lock.
+_INQUIRY_QUEUE=queue.Queue(maxsize=256)
+_INQUIRY_THREAD=None
+_INQUIRY_START_LOCK=threading.Lock()
+
+
+def _inquiry_worker():
+    while True:
+        writer,args,kwargs=_INQUIRY_QUEUE.get()
+        try:writer(*args,**kwargs)
+        except Exception as exc:print(f'[inquiry-analytics-error] {type(exc).__name__}',flush=True)
+        finally:_INQUIRY_QUEUE.task_done()
+
+
+def queue_inbound_inquiry(*args,**kwargs):
+    global _INQUIRY_THREAD
+    with _INQUIRY_START_LOCK:
+        if _INQUIRY_THREAD is None or not _INQUIRY_THREAD.is_alive():
+            _INQUIRY_THREAD=threading.Thread(target=_inquiry_worker,daemon=True,name='seller-inquiry-analytics')
+            _INQUIRY_THREAD.start()
+    kwargs['observed_at']=time.time()
+    try:_INQUIRY_QUEUE.put_nowait((record_inbound_inquiry,args,kwargs))
+    except queue.Full:print('[inquiry-analytics-skipped] bounded queue full; checkout unaffected',flush=True)
 
 
 def canon(d: dict) -> bytes:
@@ -328,8 +353,8 @@ def find_stock_unit(text: str, taken_units: set[str], inv: dict[str, Any], catal
 # from our balance. Break rates by grade (BREAK_RATE) live in store.py, shared with market_buyer.py.
 CARE_HOURS = GOODS_BREAK_WINDOW_H
 # Without Safe-Care we expect to keep the whole price, so the fair discount is the expected refund: price x break rate.
-# Grade C is always sold with Safe-Care: without it a third of those buyers would lose the whole price.
-NO_CARE_GRADES = ("A", "B")
+# Fixed, disclosed grade terms: A72h, B6h, C0h. No mid-negotiation warranty switches.
+NO_CARE_GRADES = ()
 NO_CARE_WORDS = ("without care", "without safe-care", "without safecare", "no care", "no safe-care",
                  "without warranty", "no warranty", "without the warranty", "안심케어 없이", "안심케어 미포함",
                  "케어 없이", "보증 없이", "보증 빼고", "미포함")
@@ -341,7 +366,8 @@ def care_terms(kind: str, warranty: int) -> dict[str, str]:
     if kind != "goods":
         return {}
     if warranty > 0:
-        return {"care_plan": f"Safe-Care (안심케어) {warranty}h",
+        label=" (market maximum / 시장 허용 최대 보증)" if warranty==72 else ""
+        return {"care_plan": f"Safe-Care (안심케어) {warranty}h{label}",
                 "refund_policy": f"the market refunds the full price if the item breaks within {warranty} h of the sale"}
     return {"care_plan": "none (bought without Safe-Care)",
             "refund_policy": "no refund if the item breaks"}
@@ -351,6 +377,14 @@ def no_care_price(price: int, cost: int, break_rate: float) -> int:
     """The same deal without Safe-Care: lower by the expected refund, not below cost x 1.10 (or below the price
     itself, which can already be under that in the end-of-round clearance)."""
     return max(min(int(cost * 1.10), price), int(price * (1.0 - break_rate)))
+
+
+def required_warranty_hours(text):
+    values=[]
+    for pattern in (r"(?:warranty|guarantee|보증)\s*(?:hours?|기간)?[=: ]*(\d+(?:\.\d+)?)\s*(?:h(?:ours?)?|시간)",
+                    r"(\d+(?:\.\d+)?)\s*(?:h(?:ours?)?|시간)\s*(?:warranty|guarantee|보증)"):
+        values.extend(float(v) for v in re.findall(pattern,text.lower()))
+    return max(values,default=0)
 
 
 def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) -> dict[str, Any]:
@@ -408,7 +442,7 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
             r1_target = max(hard_floor, int(round(cost * 1.06)))
             r2_target = hard_floor
 
-        default_warranty = CARE_HOURS
+        default_warranty = cash_policy.warranty_hours(grade)
     else:
         break_rate = 0.0
         hl = float(hours_left) if hours_left is not None else float("inf")
@@ -469,6 +503,15 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
     if first_quote:
         open_ask,r1_target,r2_target,hard_floor = (first_quote[k] for k in ('open_ask','r1_target','r2_target','hard_floor'))
         break_rate = first_quote['break_rate']
+    if kind=='goods' and grade=='C':
+        # No paid breakage refund. Do not discount an already unbundled quote twice.
+        break_rate=0.0
+        if not first_quote:
+            open_ask=max(cash_policy.profit_floor(unit,hub,load_catalog(MARKET_DIR),now),
+                         int(list_price*cash_policy.config().get('c_fallback_list_fraction',.64)))
+            hard_floor=cash_policy.profit_floor(unit,hub,load_catalog(MARKET_DIR),now)
+            r1_target=max(hard_floor,math.ceil(open_ask*.99))
+            r2_target=r1_target
     open_ask = max(open_ask, hard_floor)
     r1_target = min(open_ask, max(hard_floor, r1_target))
     r2_target = min(r1_target, max(hard_floor, r2_target))
@@ -480,6 +523,12 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
         salvage = max(1, int(cost * 0.25))
         open_ask, r1_target, r2_target, hard_floor = (
             int(salvage + (p - salvage) * f) for p in (open_ask, r1_target, r2_target, hard_floor))
+    if kind=='goods' and grade=='B':
+        # B's actual-cost/risk floor survives old-stock and final-day liquidation paths.
+        hard_floor=max(hard_floor,cash_policy.profit_floor(unit,hub,load_catalog(MARKET_DIR),now))
+        open_ask=max(open_ask,hard_floor)
+        r1_target=min(open_ask,max(r1_target,hard_floor))
+        r2_target=min(r1_target,max(r2_target,hard_floor))
     disc_from_list = max(0, int(round((1.0 - open_ask / max(1, list_price)) * 100)))
     return {
         "open_ask": open_ask,
@@ -727,7 +776,7 @@ class Seller(AgentExecutor):
                 unit, demand_query = find_stock_unit(text, taken_units, inv, catalog)
 
                 if unit is None:
-                    record_inbound_inquiry(demand_query, matched=False, raw_text=text)
+                    queue_inbound_inquiry(demand_query, matched=False, raw_text=text)
                     print(f"[stock-miss] Out of stock for buyer request: {text[:80]} (recorded demand: {demand_query})", flush=True)
                     await up.reject(say("Sorry, no matching stock meets your request (including any required shelf life plus checkout buffer). No receipt issued."))
                     return
@@ -739,6 +788,9 @@ class Seller(AgentExecutor):
                 hard_floor = pricing["hard_floor"]
                 grade = pricing["grade"]
                 warranty = pricing["warranty_hours"]
+                if required_warranty_hours(text)>warranty and unit.get('kind')=='goods':
+                    await up.reject(say(f"This certified grade {grade} unit has warranty_hours={warranty}; it cannot meet your required warranty. No receipt issued."))
+                    return
                 hours_left = pricing["hours_left"]
                 list_price = pricing["list_price"]
                 is_food = unit.get("kind") == "food"
@@ -765,14 +817,14 @@ class Seller(AgentExecutor):
                         "claim": grade,
                         "cert": True,
                     }
-                    if warranty > 0:
+                    if unit.get('kind')=='goods':
                         receipt["warranty_hours"] = warranty
                     receipt.update(care_terms(unit.get("kind", ""), warranty))
                     receipt = sign_receipt(receipt)
                     await up.add_artifact(parts=[new_data_part(receipt)], name="receipt")
                     await up.complete(say(
                         f"Deal: {unit['name']} ({unit['sku']}) at {final_price} "
-                        f"(grade {grade}, cert=true, warranty={warranty}h)."
+                        f"(grade {grade}, cert=true, warranty={warranty}h{' market maximum / 시장 허용 최대 보증' if warranty==72 else ''})."
                     ))
                     print(f"[instant-deal] Sold {unit['sku']} ({unit['name']}) unit={unit['unit']} at {final_price} (cost={unit['cost']})", flush=True)
                     return
@@ -789,8 +841,9 @@ class Seller(AgentExecutor):
 
                 care_note = ""
                 if unit.get("kind") == "goods":
-                    care_note = (f" Price includes Safe-Care (안심케어): if it breaks within {CARE_HOURS} h of the sale, "
-                                 f"the market refunds you the full price.")
+                    care_note = ((f" Price includes {'market maximum 72h warranty (시장 허용 최대 보증)' if warranty==72 else str(warranty)+'h warranty'}: "
+                                  f"if it breaks within {warranty} h of the sale, the market refunds you the full price.")
+                                 if warranty else " Grade C refurbished: warranty_hours=0, no warranty and no breakage refund; the quoted price is without warranty.")
                     if grade in NO_CARE_GRADES:
                         care_note += (f" Without Safe-Care: {no_care_price(ask, unit['cost'], pricing['break_rate'])}"
                                       f" (no refund); say 'without care' to take that option.")
@@ -806,7 +859,7 @@ class Seller(AgentExecutor):
                         f"{unit['name']} (sku={unit['sku']}), asking price {ask}. "
                         + food_use_question(hours_left)
                     )
-                record_inbound_inquiry(demand_query, matched=True, raw_text=text, sku=unit["sku"])
+                queue_inbound_inquiry(demand_query, matched=True, raw_text=text, sku=unit["sku"])
                 print(
                     f"[r3-quote] {unit['sku']} ({unit['name']}): cost={unit['cost']}, list={list_price}, "
                     f"grade={grade}, ask={ask}, r1_target={r1_target}, floor={hard_floor}, warranty={warranty}h, "
@@ -939,6 +992,14 @@ class Seller(AgentExecutor):
             hard_floor = int(deal.get("hard_floor") or cost)   # above cost except in the end-of-round clearance
             r1_target = int(deal.get("r1_target") or hard_floor)
             r2_target = int(deal.get("r2_target") or hard_floor)
+            if u.get('kind')=='goods' and required_warranty_hours(text)>int(deal.get('warranty_hours') or 0):
+                await up.reject(say("Requested warranty exceeds the disclosed terms. No receipt issued."))
+                del self.open[task.id]
+                return
+            if u.get('kind')=='goods' and live_grade=='B':
+                hard_floor=max(hard_floor,cash_policy.profit_floor(u,load_hub(),catalog,now_ts))
+                r1_target=max(r1_target,hard_floor)
+                r2_target=max(r2_target,hard_floor)
 
             # Safe-Care choice: the buyer drops it by saying so (grades A/B only) and asking for it brings it back.
             # The stored targets include Safe-Care; without it every target is lower by the expected refund.
@@ -982,8 +1043,12 @@ class Seller(AgentExecutor):
                         return
                 current_ask = in_mode(int(deal["ask"]))
                 final_price = min(current_ask, int(offer))
+                if is_goods and live_grade=='B' and final_price<hard_floor:
+                    await up.reject(say("The previously quoted price no longer clears the actual-cost profit floor. No receipt issued."))
+                    del self.open[task.id]
+                    return
                 # Goods carry Safe-Care unless the buyer explicitly took the cheaper no-care price; food has none
-                warranty = CARE_HOURS if is_goods and not no_care else 0
+                warranty = int(deal.get('warranty_hours',cash_policy.warranty_hours(live_grade))) if is_goods and not no_care else 0
 
                 receipt = {
                     "shop": SHOP_NAME,
@@ -994,7 +1059,7 @@ class Seller(AgentExecutor):
                     "claim": live_grade,
                     "cert": True,
                 }
-                if warranty > 0:
+                if is_goods:
                     receipt["warranty_hours"] = warranty
                 receipt.update(care_terms(u.get("kind", ""), warranty))
                 receipt = sign_receipt(receipt)
@@ -1002,7 +1067,7 @@ class Seller(AgentExecutor):
                 await up.add_artifact(parts=[new_data_part(receipt)], name="receipt")
                 await up.complete(say(
                     f"Deal: {u['name']} ({u['sku']}) at {final_price} "
-                    f"(unit={u['unit']}, grade={live_grade}, cert=true, warranty={warranty}h)."
+                    f"(unit={u['unit']}, grade={live_grade}, cert=true, warranty={warranty}h{' market maximum / 시장 허용 최대 보증' if warranty==72 else ''})."
                 ))
                 profit_est = final_price - cost
                 print(
@@ -1111,11 +1176,12 @@ def build_app(port: int):
         name=SHOP_NAME,
         description=(
             "mjforge Certified Fulfillment Shop: Every unit ships with the market-signed certificate (cert=true), "
-            "honest current grades (A/B/C), and a stated warranty on goods. First quotes reflect certified grade, "
+            "honest current grades (A/B/C). A goods include the market maximum 72-hour full-refund warranty; "
+            "B goods include 6 hours; C refurbished goods have no warranty or breakage refund and a separately priced offer. First quotes reflect certified grade, "
             "actual unit cost and comparable trades; prices can exceed catalog list when costs require it. "
             "Ed25519-signed receipts. Ask for a SKU or category: 'I want to buy <name> (<sku>)'."
         ),
-        version="3.1.0",
+        version="3.2.0",
         default_input_modes=["text/plain"],
         default_output_modes=["application/json", "text/plain"],
         capabilities=AgentCapabilities(streaming=False),

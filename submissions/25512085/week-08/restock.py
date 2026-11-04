@@ -300,6 +300,24 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
                                   'models':cash_models if growth else {}}
 
     def finish(orders, reason=None):
+        if inventory_fresh:
+            try:
+                feed_path=market_dir/'forum.json'
+                feed=json.loads(feed_path.read_text('utf-8')) if 0<=now-feed_path.stat().st_mtime<=120 else []
+            except (OSError,ValueError):
+                feed=[]
+            post=cash_policy.availability_plan(active,hub,catalog,now,feed)
+            if post:
+                # The outbox append must succeed before reserving this notice's slot.
+                queued=queue_forum_action(market_dir,post['action'])
+                if queued:
+                    fs=hub.setdefault('forum_state',{})
+                    fs['last_shop_post_ts']=int(now)
+                    announced=fs.setdefault('availability_announced',{})
+                    announced.update({s:post['demand_ts'] for s in post['skus']})
+                    fs['availability_announced']=dict(sorted(announced.items(),key=lambda x:x[1])[-500:])
+                    if post['thread']:
+                        fs['availability_replied_threads']=(fs.get('availability_replied_threads',[])+[post['thread']])[-300:]
         if reason:
             diag["stop"] = reason
         print(json.dumps(diag, ensure_ascii=False), file=sys.stderr, flush=True)
@@ -348,12 +366,7 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
     for grade in candidates:
         diag["grades"][grade]["reserved"] = grade_spent[grade]
     diag["grade_budget"] = {"hot_popular": cap, "observe": cap // 2}
-    # Advertise only actual certified stock, using the seller's own first-quote calculation.
-    last_post = int(hub.get("forum_state", {}).get("last_shop_post_ts", 0))
-    text = cash_policy.stock_post(active,hub,catalog,now) if now-last_post >= cash_policy.config().get('forum_interval_seconds',1200) else None
-    if text:
-        queue_forum_action(market_dir, {"post": text, "refs": [], "as": "shop"})
-        hub.setdefault("forum_state", {})["last_shop_post_ts"] = int(now)
+    # Availability notices also run outside supply windows, through finish().
     return finish(orders)
 
 

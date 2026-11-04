@@ -8,6 +8,7 @@ from __future__ import annotations
 import collections
 import json
 import math
+import re
 from pathlib import Path
 import statistics
 from adaptive_strategy import note_ledger_coverage
@@ -84,13 +85,41 @@ def refund_probability(hub, sku, grade, catalog, now):
     return (sum(r.get('order') in broken for r in old) + 20*prior)/(len(old)+20)
 
 
-def reference_price(hub, sku, grade, now, kind='goods'):
+def warranty_hours(grade, kind='goods'):
+    if kind != 'goods':
+        return 0
+    return max(0,min(72,int(config().get('grade_warranty_hours',{}).get(grade,{'A':72,'B':6,'C':0}.get(grade,0)))))
+
+
+def profit_floor(unit, hub, catalog, now, warranty=None):
+    """Expected-profit floor, never a guarantee against a realized full refund."""
+    p=config();cost=float(unit['cost']);grade=unit.get('live_grade') or unit.get('grade')
+    hours=warranty_hours(grade,unit.get('kind','goods')) if warranty is None else warranty
+    q=refund_probability(hub,unit['sku'],grade,catalog,now) if hours else 0
+    if grade == 'B' and hours:
+        q=max(PRIOR_BREAK['B'],q)
+    # A flat5000 floor made low-list-price goods unnecessarily dearer than their catalog value.
+    contribution=min(p.get('absolute_goods_contribution',5000),
+                     max(p.get('minimum_goods_contribution',500),math.ceil(cost*.05)))
+    if grade == 'B':
+        contribution=max(contribution,math.ceil(cost*p.get('b_minimum_expected_margin_fraction',.05)))
+    age=max(0,now-float(unit.get('supplied_at') or now))
+    storage=cost*.01*age/86400
+    return math.ceil((cost+storage+contribution)/max(1-q,1e-9))
+
+
+def reference_price(hub, sku, grade, now, kind='goods', warranty=None):
     """Never mix unknown/other grades into the first-quote comparable price."""
     observations = hub.get('demand_radar', {}).get('sku_comparables', {}).get(sku, [])
-    valid = [r for r in observations if r.get('grade') == grade and number(r.get('ts'))
-             and 0 <= now-r['ts'] <= 3600 and number(r.get('amount')) and r['amount'] > 0
-             and (kind != 'goods' or number(r.get('warranty_hours')) and r['warranty_hours'] >= 6)]
-    return int(round(statistics.median(r['amount'] for r in valid))) if len(valid) >= 5 else None
+    hours=warranty_hours(grade,kind) if warranty is None else warranty
+    for lookback in ([3600,10800] if kind=='goods' and hours==0 else [3600]):
+        valid = [r for r in observations if r.get('grade') == grade and number(r.get('ts'))
+                 and 0 <= now-r['ts'] <= lookback and number(r.get('amount')) and r['amount'] > 0
+                 and (kind != 'goods' or ((r.get('warranty_hours') or 0)==0 if hours==0 else
+                      number(r.get('warranty_hours')) and r['warranty_hours']>=6))]
+        if len(valid)>=5:
+            return int(round(statistics.median(r['amount'] for r in valid)))
+    return None
 
 
 def quote(unit, hub, catalog, now):
@@ -108,13 +137,17 @@ def quote(unit, hub, catalog, now):
     if price is None or not number(unit.get('cost')):
         return None
     p = config()
-    q = refund_probability(hub, sku, grade, catalog, now) if kind == 'goods' else 0
+    hours=warranty_hours(grade,kind)
+    q = refund_probability(hub, sku, grade, catalog, now) if hours else 0
+    if grade=='B' and hours:
+        q=max(PRIOR_BREAK['B'],q)
     contribution = p.get('absolute_goods_contribution',5000) if kind == 'goods' else p.get('absolute_food_contribution',1000)
-    floor = math.ceil((unit['cost']+contribution)/(1-q))
+    floor = profit_floor(unit,hub,catalog,now) if kind=='goods' else math.ceil(unit['cost']+contribution)
     ask = max(floor, price)
     last = max(floor, math.ceil(ask*(1-p.get('maximum_concession_fraction',.01))))
     return {'open_ask':ask, 'r1_target':last, 'r2_target':last, 'hard_floor':floor,
-            'break_rate':q, 'cash_first_quote':True, 'quote_basis':'same-SKU/grade/6h-settles-1h'}
+            'break_rate':q, 'cash_first_quote':True, 'warranty_hours':hours,
+            'quote_basis':'same-SKU/grade/warranty-class-settles'}
 
 
 def note_stock(hub, held, now):
@@ -165,7 +198,9 @@ def procurement(hub, sku, info, inv, qty, catalog, now):
         if price is None:
             # Prior is explicitly an estimate, never a current quote or a claimed executable price.
             price = lp*{'A':.80,'B':.72,'C':.65}[grade]
-        q = refund_probability(hub,sku,grade,catalog,now) if info.get('kind') == 'goods' else 0
+        q = refund_probability(hub,sku,grade,catalog,now) if warranty_hours(grade,info.get('kind','goods')) else 0
+        if grade=='B' and q:
+            q=max(PRIOR_BREAK['B'],q)
         cost = lp*{'A':.65,'B':.5,'C':.35}[grade]*factor
         expected += weight*(price*(1-q)-cost)
     return {'expected_unit_contribution':expected,'projected_surge':factor,
@@ -214,24 +249,51 @@ def allocate(groups, models, held, budget, cap, grade_spent, previous):
     return orders,spent
 
 
-def stock_post(units, hub, catalog, now):
-    """Only advertise verified held goods, at the same quote used by the seller."""
-    ranked = []
-    for u in units:
-        if u.get('kind') != 'goods' or u.get('grade') not in PRIOR_BREAK or not u.get('cert'):
-            continue
-        value = quote(u,hub,catalog,now)
-        if value:
-            ranked.append(((value['open_ask']*(1-value['break_rate'])-u['cost']),u,value))
-    lines, seen = [],set()
-    for _,u,value in sorted(ranked,key=lambda r:-r[0]):
-        key = u['sku'],u['grade'],value['open_ask']
-        if key in seen:
-            continue
-        seen.add(key)
-        lines.append(f"SKU={u['sku']} grade={u['grade']} qty=1 first_quote={value['open_ask']} cert=true warranty_hours=6")
-        if len(lines)==3:
-            break
-    if not lines:
+def availability_plan(units, hub, catalog, now, forum=None):
+    """Match real recent requests to certified stock; publish availability only."""
+    state=hub.get('forum_state',{})
+    if now-state.get('last_shop_post_ts',0)<300:
         return None
-    return '[mjforge verified stock]\n'+'\n'.join(lines)+f'\nChecked_at={int(now)}. Each quote is for one verified unit; stock is rechecked at checkout. Send the SKU for an immediate quote.'
+    held={u['sku']:u for u in units if u.get('sku') in catalog and u.get('cert')
+          and u.get('grade')!='expired' and (u.get('kind')!='food' or (u.get('expires_at') or 0)>now+600)}
+    if not held:
+        return None
+    lookup={s.lower():s for s in held}
+    def text_for(skus):
+        lines=['[mjforge 재고 안내]']
+        for sku in skus[:3]:
+            name=str(catalog[sku].get('name') or held[sku].get('name') or sku).replace('\n',' ').replace('\r',' ')[:100]
+            lines.append(f'{sku} {name}: 재고 있음')
+        return '\n'.join(lines)
+    posts=forum.get('posts',[]) if isinstance(forum,dict) else forum if isinstance(forum,list) else []
+    replied=set(state.get('availability_replied_threads',[]))
+    request=re.compile(r'looking for|want to buy|stock request|availability|in stock\?|구매\s*(?:희망|원|요청)|재고\s*(?:있|문의)|찾(?:아요|습니다|고 있어)',re.I)
+    for post in sorted(posts,key=lambda x:x.get('ts',0),reverse=True):
+        pid=post.get('id');body=str(post.get('text') or '')
+        if (post.get('role')!='buyer' or str(post.get('owner') or '').lower()=='mjforge'
+                or not number(post.get('ts')) or not 0<=now-post['ts']<=1200
+                or pid is None or str(pid) in replied or not request.search(body)):
+            continue
+        skus=sorted({lookup[k.lower()] for k in re.findall(r'\b[GgFf][0-9a-fA-F]{7,10}\b',body) if k.lower() in lookup})
+        if skus:
+            return {'action':{'post':text_for(skus),'refs':[],'as':'shop','thread':pid},
+                    'skus':skus[:3],'demand_ts':post['ts'],'thread':str(pid)}
+    if now-state.get('last_shop_post_ts',0)<config().get('forum_interval_seconds',1200):
+        return None
+    announced=state.get('availability_announced',{})
+    wants=hub.get('demand_radar',{}).get('sku_inquiries',{})
+    ranked=[]
+    for sku in held:
+        events=[e['ts'] for e in wants.get(sku.lower(),[]) if number(e.get('ts')) and 0<=now-e['ts']<=1200
+                and e['ts']>announced.get(sku,0)]
+        if events:ranked.append((len(events),max(events),sku))
+    if not ranked:
+        return None
+    chosen=sorted(ranked,reverse=True)[:3];skus=[v[2] for v in chosen]
+    return {'action':{'post':text_for(skus),'refs':[],'as':'shop'},'skus':skus,
+            'demand_ts':max(v[1] for v in chosen),'thread':None}
+
+
+def stock_post(units,hub,catalog,now):
+    plan=availability_plan(units,hub,catalog,now)
+    return plan['action']['post'] if plan else None

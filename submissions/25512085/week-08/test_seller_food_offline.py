@@ -289,11 +289,11 @@ class FoodSafetyTests(unittest.TestCase):
         self.inventory["units"] = goods
         receipt = self.receipt(self.turn("g00000001 warranty 6h offer 36000"))
         self.assertEqual(receipt["unit"], "good-a")
-        self.assertEqual(receipt["warranty_hours"], 6)
+        self.assertEqual(receipt["warranty_hours"], 72)
         self.agent = seller.Seller(0)
         self.turn("g00000001 warranty 6h")
         receipt = self.receipt(self.turn("offer 36000"))
-        self.assertEqual(receipt["warranty_hours"], 6)
+        self.assertEqual(receipt["warranty_hours"], 72)
 
     def test_differentiated_clearance_food_vs_goods(self):
         hub = {}

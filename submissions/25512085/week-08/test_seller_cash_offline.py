@@ -127,7 +127,7 @@ class CashQuoteTests(unittest.TestCase):
         self.turn(sku)
         self.assertEqual(self.agent.open['task-1']['ask'],80000)
         receipt=self.receipt(self.turn('80000'))
-        self.assertEqual((receipt['price'],receipt['unit'],receipt['claim'],receipt['warranty_hours']),(80000,'goods-1','A',6))
+        self.assertEqual((receipt['price'],receipt['unit'],receipt['claim'],receipt['warranty_hours']),(80000,'goods-1','A',72))
 
     def test_one_small_concession_then_rejects_low_offer(self):
         sku,unit,hub=self.prepare()
@@ -157,9 +157,12 @@ class CashQuoteTests(unittest.TestCase):
 
     def test_shop_post_uses_only_actual_certified_stock_and_same_quote(self):
         sku,unit,hub=self.prepare()
+        hub['demand_radar']['sku_inquiries']={sku.lower():[{'ts':self.now,'miss':False}]}
         text=cash.stock_post([unit],hub,self.catalog,self.now)
-        self.assertIn('qty=1 first_quote=80000',text)
-        self.assertIn('grade=A',text)
+        self.assertIn('재고 있음',text)
+        self.assertIn(sku,text)
+        self.assertNotIn('first_quote',text)
+        self.assertNotIn('grade=',text)
         self.assertIsNone(cash.stock_post([{**unit,'cert':None}],hub,self.catalog,self.now))
 
 
