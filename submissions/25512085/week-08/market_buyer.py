@@ -804,8 +804,8 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         ]
         if len(settles) >= 3:
             comp_cap = max(
-                math.floor(list_price * 0.74),
-                math.floor(statistics.median(settles[-15:]) * 106 / 100),
+                math.floor(list_price * 0.88),
+                math.floor(statistics.median(settles[-15:]) * 112 / 100),
             )
             offer_limit = min(offer_limit, comp_cap)
 
