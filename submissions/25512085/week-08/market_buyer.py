@@ -90,8 +90,55 @@ FUNNY_NO_DEAL_REVIEWS = [
 ]
 
 
+def get_gemini_api_key() -> str:
+    """Safely obtain GEMINI_API_KEY from environment or ~/.bashrc fallback."""
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if key:
+        return key
+    bashrc_path = os.path.expanduser("~/.bashrc")
+    if os.path.exists(bashrc_path):
+        try:
+            with open(bashrc_path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    if line.strip().startswith("export GEMINI_API_KEY="):
+                        val = line.strip().split("export GEMINI_API_KEY=", 1)[1].strip().strip('"\'')
+                        if val:
+                            return val
+        except Exception:
+            pass
+    return ""
+
+
+def call_gemini_api(prompt: str) -> str:
+    """Call Google Gemini API (gemini-2.5-flash) as an ultra-fast, zero-cost fallback."""
+    api_key = get_gemini_api_key()
+    if not api_key:
+        return ""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 64},
+    }
+    try:
+        with httpx.Client(timeout=8.0) as client:
+            resp = client.post(url, json=payload, headers={"Content-Type": "application/json"})
+            if resp.status_code == 200:
+                data = resp.json()
+                candidates = data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        text = parts[0].get("text", "").strip()
+                        return text
+    except Exception as e:
+        diagnostic(f"[Gemini Fallback Warning]: {e}")
+    return ""
+
+
 def call_harness(prompt: str) -> str:
-    """Call Codex CLI harness non-interactively in an empty directory."""
+    """Call Codex CLI harness non-interactively in an empty directory.
+    Falls back to Google Gemini API (gemini-2.5-flash) if OpenAI CLI fails, times out, or quota is exhausted."""
+    # 1. Primary: OpenAI CLI via Codex harness
     with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
         tmp_path = tmp.name
     empty_dir = tempfile.gettempdir()
@@ -109,7 +156,9 @@ def call_harness(prompt: str) -> str:
         p.communicate(input=prompt, timeout=18)
         if os.path.exists(tmp_path):
             with open(tmp_path, "r", encoding="utf-8") as f:
-                return f.read().strip()
+                res = f.read().strip()
+                if res:
+                    return res
     except Exception as e:
         diagnostic(f"[Buyer Harness Warning]: {e}")
         if p:
@@ -123,6 +172,12 @@ def call_harness(prompt: str) -> str:
                 os.remove(tmp_path)
             except Exception:
                 pass
+
+    # 2. Secondary Fallback: Google Gemini API (gemini-2.5-flash)
+    gemini_res = call_gemini_api(prompt)
+    if gemini_res:
+        return gemini_res
+
     return ""
 
 
