@@ -108,7 +108,7 @@ class EndgameTaperTests(BuyingFixture, unittest.TestCase):
         self.hub["no_rebuy"] = {"hot": NOW-1}
         buys, diag = self.run_at(60*3600)
         self.assertNotIn("hot", buys)
-        self.assertEqual(diag["excluded"]["dead"], 1)
+        self.assertEqual(diag["excluded"]["no_rebuy"], 1)
         state = self.state()
         cap, reserved = state["window_cap"], state["reserved"]
         self.inv["balance"] *= 10
