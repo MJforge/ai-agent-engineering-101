@@ -63,6 +63,7 @@ WINDOW_BUDGET = 200_000
 PROFITABLE_WINDOW_BUDGET = 450_000  # Base cash-rich window cap; scales up to 900k-1.2M on full live catalog
 HIGH_CASH_WINDOW_BUDGET = 900_000
 SUPER_CASH_WINDOW_BUDGET = 1_200_000
+MEGA_CASH_WINDOW_BUDGET = 2_800_000
 MISSED_RECENT_S = 3600              # 1-hour window for out-of-stock missed inquiries
 MAX_ACTIVE_FOOD_UNITS = 20          # Tight food inventory cap: stop buying food when >= 20 food units are held
 HIGH_GOODS_MIN_PRICE = 100_000      # Prioritize >= 100,000 KRW non-food categories for new assortment expansion
@@ -79,14 +80,15 @@ HIGH_VALUE_CAPS = {
     "G200e39a3": 3,  # 37,900 Kimchi 10kg (#6 market revenue SKU)
 }
 LIVE_BESTSELLER_CAPS = {
-    "G1515d951": 3,  # 423,810 Queen hybrid mattress
+    "G1515d951": 4,  # 423,810 Queen hybrid mattress
     "G07ec17d5": 4,  # 279,000 SS hybrid spring mattress
-    "G8ec51935": 1,  # 2,320,000 Jakomo 4-person sofa
-    "G03d0199f": 1,  # 1,380,000 La Cloud hotel bed frame+mattress set
+    "G8ec51935": 2,  # 2,320,000 Jakomo 4-person sofa
+    "G00327e80": 2,  # 2,246,800 Dauning 4-person leather sofa
+    "G03d0199f": 2,  # 1,380,000 La Cloud hotel bed frame+mattress set
     "G2cb8041b": 3,  # 296,000 Office mesh chair
     "G5cd4ffbc": 3,  # 199,000 Microfiber comforter set
     "Ge62449c9": 4,  # 87,900 Hotel comforter
-    "G75f11c19": 2,  # 122,900 Modal comforter pad set Q
+    "G75f11c19": 3,  # 122,900 Modal comforter pad set Q
     "G6f632932": 2,  # 116,000 Wood dining chair
     "Gd19f1a46": 2,  # 111,370 Blackout curtain
     "G0be9ed07": 4,  # 39,900 Modal sofa pad
@@ -302,7 +304,12 @@ def plan_with_hub(
     is_cash_rich = balance_now >= 5_500_000
     is_full_catalog = len(catalog) >= 50
     if is_cash_rich and is_full_catalog:
-        eff_window_budget = SUPER_CASH_WINDOW_BUDGET if balance_now >= 6_200_000 else HIGH_CASH_WINDOW_BUDGET
+        if balance_now >= 10_000_000:
+            eff_window_budget = MEGA_CASH_WINDOW_BUDGET
+        elif balance_now >= 6_200_000:
+            eff_window_budget = SUPER_CASH_WINDOW_BUDGET
+        else:
+            eff_window_budget = HIGH_CASH_WINDOW_BUDGET
     else:
         eff_window_budget = PROFITABLE_WINDOW_BUDGET if is_cash_rich else WINDOW_BUDGET
     base_window_budget = eff_window_budget
@@ -418,7 +425,7 @@ def plan_with_hub(
 
     is_live_catalog = len(catalog) >= 500
     max_goods_price = (
-        1_450_000 if (stage >= 3 and is_live_catalog and balance_now >= 10_000_000)
+        2_500_000 if (stage >= 3 and is_live_catalog and balance_now >= 10_000_000)
         else (MAX_GOODS_STAGE3_PRICE if stage >= 3 else MAX_GOODS_STAGE1_PRICE)
     )
     buy_orders: list[dict[str, Any]] = []

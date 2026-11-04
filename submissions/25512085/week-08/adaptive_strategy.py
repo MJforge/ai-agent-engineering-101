@@ -73,7 +73,7 @@ def decide_restock(hub, inv, now, *, inventory_fresh=False):
                "own_sales": len(sales), "misses": misses, "stock_cost": cost,
                "old_cost": old_cost, "old_cost_share": old_cost / cost if cost else 0,
                "held_skus": len({u["sku"] for u in active})}
-        if old_cost >= 300_000 and obs["old_cost_share"] >= .35:
+        if old_cost >= 300_000 and obs["old_cost_share"] >= .35 and inv.get("balance", 0) < 10_000_000:
             state.update(mode="recover", exploration_factor=.5,
                          reason="aged-cost exposure; core restoration unchanged")
         elif inv["balance"] >= 6_200_000 and sales and (len(sales) >= 3 or misses > 0):
