@@ -367,44 +367,44 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
     if kind == "goods":
         # Non-food ("goods"): Grade is permanent (A/B/C), no expiration, 1%/day storage fee.
         # Prices here include Safe-Care. Expected profit with it is (1 - break_rate) x price - cost, so the floor
-        # covers the expected refund plus 10%: B >= cost x 1.29, C >= cost x 1.69; A keeps the 18% margin floor.
+        # covers the expected refund plus 5% net margin: A >= cost x 1.082 (~81.2% list), B >= cost x 1.19, C >= cost x 1.62.
         break_rate = BREAK_RATE.get(grade, BREAK_RATE["C"])
-        hard_floor = max(cost + 50, int(cost * 1.18), int(cost / (1.0 - break_rate) * 1.10))
+        hard_floor = max(cost + 50, int(cost * 1.08), int(cost / (1.0 - break_rate) * 1.05))
         if grade == "A":
-            # High anchor: 94~97% of list_price (gives buyer strong discount satisfaction)
-            open_ask = max(int(cost * 1.35), min(int(list_price * 0.96), max(market_anchor, int(list_price * 0.92))))
-            # Turn 1 target: around 82~86% of list_price
-            r1_target = max(int(cost * 1.25), int(round(cost + (open_ask - cost) * 0.55)))
-            # Turn 2 mid-step: keeps margin healthy (>20%) while making significant concession
-            r2_target = max(hard_floor, int(round(cost + (open_ask - cost) * 0.28)))
+            # High anchor: 92~95% of list_price (gives buyer strong discount satisfaction)
+            open_ask = max(int(cost * 1.24), min(int(list_price * 0.95), max(market_anchor, int(list_price * 0.90))))
+            # Turn 1 target: around 84~86% of list_price
+            r1_target = max(hard_floor, int(round(cost + (open_ask - cost) * 0.50)))
+            # Turn 2 mid-step: steps down near floor (~81~82% of list_price) to close before walkaway
+            r2_target = max(hard_floor, int(round(cost + (open_ask - cost) * 0.18)))
         elif grade == "B":
-            # Grade B cost is only 40-60% of list_price -> strong margin potential
-            open_ask = max(int(cost * 1.38), int(list_price * 0.88))
-            r1_target = max(int(cost * 1.25), int(list_price * 0.76))
+            # Grade B cost is 40-60% of list_price -> strong margin potential
+            open_ask = max(int(cost * 1.30), int(list_price * 0.86))
+            r1_target = max(hard_floor, int(list_price * 0.75))
             r2_target = max(hard_floor, int(list_price * 0.68))
         else:
             # Grade C (refurb): cost is 25-45% of list_price
-            open_ask = max(int(cost * 1.45), int(list_price * 0.82))
-            r1_target = max(int(cost * 1.28), int(list_price * 0.70))
+            open_ask = max(int(cost * 1.38), int(list_price * 0.80))
+            r1_target = max(hard_floor, int(list_price * 0.68))
             r2_target = max(hard_floor, int(list_price * 0.60))
         default_warranty = CARE_HOURS
     else:
         break_rate = 0.0
         # Perishable/Non-perishable Food ("food"): no storage fee, markdown dynamically as shelf life drops
         if grade == "A":
-            hard_floor = max(cost + 20, int(cost * 1.10))
-            open_ask = max(int(cost * 1.25), min(int(list_price * 0.95), max(market_anchor, int(list_price * 0.90))))
-            r1_target = max(int(cost * 1.18), int(round(cost + (open_ask - cost) * 0.50)))
-            r2_target = max(hard_floor, int(round(cost + (open_ask - cost) * 0.22)))
+            hard_floor = max(cost + 10, int(cost * 1.03))
+            open_ask = max(int(cost * 1.20), min(int(list_price * 0.95), max(market_anchor, int(list_price * 0.90))))
+            r1_target = max(int(cost * 1.08), int(round(cost + (open_ask - cost) * 0.42)))
+            r2_target = max(hard_floor, int(round(cost + (open_ask - cost) * 0.14)))
         elif grade == "B":
-            hard_floor = max(cost + 10, int(cost * 1.06))
-            open_ask = max(int(cost * 1.18), int(list_price * 0.85))
-            r1_target = max(int(cost * 1.12), int(list_price * 0.76))
-            r2_target = max(hard_floor, int(list_price * 0.70))
+            hard_floor = cost
+            open_ask = max(int(cost * 1.12), int(list_price * 0.84))
+            r1_target = max(int(cost * 1.04), int(list_price * 0.76))
+            r2_target = hard_floor
         else:
-            hard_floor = max(cost, int(cost * 1.02))
-            open_ask = max(int(cost * 1.10), int(list_price * 0.75))
-            r1_target = max(hard_floor, int(cost * 1.05))
+            hard_floor = max(1, int(cost * 0.78))
+            open_ask = max(hard_floor, int(list_price * 0.72))
+            r1_target = max(hard_floor, int(list_price * 0.64))
             r2_target = hard_floor
         default_warranty = 0
 
