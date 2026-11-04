@@ -1,6 +1,5 @@
 """POLICY §9 contract: fake time, unique temporary files, network forbidden."""
 import contextlib
-import copy
 import io
 import json
 from pathlib import Path
@@ -16,7 +15,8 @@ NOW = 1_790_000_000
 
 class BuyingFixture:
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="unified-buying-", dir="C:/Users/clair/AppData/Local/Temp/opencode")
+        approved = Path("C:/Users/clair/AppData/Local/Temp/opencode")
+        self.tmp = tempfile.TemporaryDirectory(prefix="unified-buying-", dir=approved if approved.exists() else None)
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name)
         self.hub = store.default_hub()
@@ -326,6 +326,20 @@ class UnifiedBuyingTests(BuyingFixture, unittest.TestCase):
         events = store.load_hub(path)["demand_radar"]["sku_inquiries"]
         self.assertLessEqual(len(events), 500)
         self.assertLessEqual(sum(map(len, events.values())), 5000)
+
+    def test_build_early_stops_emit_one_json_diagnostic_without_network(self):
+        sku = self.item()
+        with patch.object(restock, "load_catalog", return_value=self.catalog), \
+             patch.object(restock, "load_inventory", return_value=self.inv), \
+             patch.object(restock, "load_hub", return_value=self.hub), \
+             patch.object(restock, "fetch_ledger_rows", side_effect=AssertionError("fetch forbidden")):
+            self.inv.update(balance=100, bankrupt_line=500_000, bankruptcies_left=1)
+            self.assertEqual(restock.build_restock_plan(self.path), {"buy": [], "bankrupt": True})
+            self.assertEqual(self.diag()["stop"], "bankruptcy")
+            self.assertEqual(len(self.stderr.getvalue().splitlines()), 1)
+            self.catalog.clear()
+            self.assertEqual(restock.build_restock_plan(self.path), {"buy": []})
+            self.assertEqual(self.diag()["stop"], "missing_input")
 
     def test_long_lived_last_sale_from_old_cursor_survives_short_tail(self):
         sku = self.item()

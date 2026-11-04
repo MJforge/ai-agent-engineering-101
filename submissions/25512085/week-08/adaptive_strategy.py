@@ -39,12 +39,12 @@ def decide_restock(hub, inv, now, *, inventory_fresh=False):
     coverage plus fresh, fully costed/aged inventory is required for a change.
     """
     state = hub.setdefault("adaptive_strategy", {})
-    if now - state.get("last_decision", -INTERVAL_S) < INTERVAL_S:
-        return state
-    state["last_decision"] = now
     state["mode"] = "metrics-only"
     state.pop("exploration_factor", None)
     state.pop("exploration_skus", None)
+    if now - state.get("last_decision", -INTERVAL_S) < INTERVAL_S:
+        return state
+    state["last_decision"] = now
     coverage = hub.get("adaptive_ledger_coverage", {})
     units = inv.get("units")
     complete = (inventory_fresh and isinstance(units, list) and number(inv.get("balance"))
@@ -59,7 +59,6 @@ def decide_restock(hub, inv, now, *, inventory_fresh=False):
         active = [u for u in units if u.get("grade") != "expired"]
         sales = [e for e in hub.get("own_sale_events", {}).values()
                  if now - INTERVAL_S < e.get("ts", 0) <= now]
-        sold = {e["sku"] for e in sales}
         radar = hub.get("demand_radar", {})
         misses = sum(sum(now - INTERVAL_S < t <= now for t in times)
                      for times in radar.get("missed_ts", {}).values())

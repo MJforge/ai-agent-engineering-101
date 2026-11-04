@@ -91,14 +91,28 @@ def estimated_cost(hub, sku, info):
 
 def build_restock_plan(market_dir: Path) -> dict[str, Any]:
     catalog, inv = load_catalog(market_dir), load_inventory(market_dir)
+
+    def stopped(reason, *, bankrupt=False):
+        cs = update_capital_stage({"capital_stage": {}}, inv)
+        stock = cs.get("stock_cost_value", 0)
+        equity = int(inv.get("balance") or 0) + stock
+        ratio, source = market_ratio(market_dir, catalog)
+        print(json.dumps({"E": equity, "R": ratio, "R_source": source, "T": ratio * equity,
+                          "deficit": max(0, ratio * equity - stock), "W": 0,
+                          "grades": {g: {"skus": 0, "reserved": 0} for g in ("hot", "popular", "observe")},
+                          "grade_budget": {"hot_popular": 0, "observe": 0},
+                          "dead_new": 0, "dead_total": len(load_hub().get("dead_skus", {})),
+                          "excluded": {}, "stop": reason}), file=sys.stderr, flush=True)
+        return {"buy": [], "bankrupt": True} if bankrupt else {"buy": []}
+
     if not catalog or not inv:
-        return {"buy": []}
+        return stopped("missing_input")
     balance = int(inv.get("balance") or 0)
     sellable = [u for u in inv.get("units", []) if u.get("grade") != "expired"]
     if balance < int(inv.get("bankrupt_line") or 0) and int(inv.get("bankruptcies_left") or 0) > 0 and not sellable:
-        return {"buy": [], "bankrupt": True}
+        return stopped("bankruptcy", bankrupt=True)
     if time.time() > ROUND_END_TS - STOP_BUYING_BEFORE_END_S:
-        return {"buy": []}
+        return stopped("round_end")
     snapshot = load_hub()
     rows = fetch_ledger_rows(int(snapshot.get("ledger_seq", 0)))
     window = supply_window(inv)
@@ -219,6 +233,7 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False)
     diag["W"] = cap  # immutable initial ceiling; current cash can only reduce usable funds
     used = max(actual, state["baseline_actual"] + state["reserved"])
     budget = min(cs["available_budget"], calculated, max(0, cap - used))
+    diag["usable_budget"] = budget
     planned = state.setdefault("planned_skus", {})
     grade_spent = state.setdefault("grade_reserved", {g: 0 for g in candidates})
     spent, orders = 0, []
