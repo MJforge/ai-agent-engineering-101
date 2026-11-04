@@ -107,21 +107,24 @@ class AdaptiveRestockTests(unittest.TestCase):
         catalog = self.catalog()
         for info in catalog.values():
             info["list_price"] = 300_000
-        catalog["core"] = {"list_price": 200_000, "kind": "goods", "category": "core"}
+        # Keep core spend at 450k after the velocity target changes from 3 to 4,
+        # so remaining budget still distinguishes recovery from normal breadth.
+        catalog["core"] = {"list_price": 150_000, "kind": "goods", "category": "core"}
         catalog["old"] = {"list_price": 600_000, "kind": "goods", "category": "old"}
         self.inv["units"] = [{"sku": "old", "grade": "A", "cost": 400_000,
                                "supplied_at": NOW-21601}]
         baseline_hub = copy.deepcopy(self.hub)
         plan = self.plan(catalog)
         self.assertEqual(self.hub["adaptive_strategy"]["mode"], "recover")
-        self.assertIn({"sku": "core", "qty": 3}, plan["buy"])
+        # Three recent own sales target ceil(3 * 1.25) in both modes.
+        self.assertIn({"sku": "core", "qty": 4}, plan["buy"])
         window = next(iter(self.hub["restock_windows"].values()))
         self.assertLessEqual(window["exploration_reserved"], 600_000)
         recover_buys = len(plan["buy"])
         self.hub = baseline_hub
         self.inv["units"][0]["supplied_at"] = NOW-100
         normal = self.plan(catalog)
-        self.assertIn({"sku": "core", "qty": 3}, normal["buy"])
+        self.assertIn({"sku": "core", "qty": 4}, normal["buy"])
         self.assertGreater(len(normal["buy"]), recover_buys)
 
     def test_cash_floor_and_absolute_window_cap(self):

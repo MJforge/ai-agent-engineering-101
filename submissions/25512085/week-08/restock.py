@@ -358,11 +358,16 @@ def plan_with_hub(
 
     # 1-hour out-of-stock missed inquiries (from seller.py missed_ts / missed_wants and failed ledger results)
     missed_skus_1h: dict[str, int] = collections.Counter()
+    recent_missed_keys: set[str] = set()
+    recent_missed_skus: set[str] = set()
     missed_ts_map = radar.get("missed_ts") or {}
     for key, ts_list in missed_ts_map.items():
         recent_cnt = sum(1 for t in (ts_list or []) if 0 <= now_s - float(t) <= MISSED_RECENT_S)
+        if recent_cnt > 0:
+            recent_missed_keys.add(str(key).strip().lower())
         if recent_cnt > 0 and str(key).lower() in sku_ci_map:
             missed_skus_1h[sku_ci_map[str(key).lower()]] += recent_cnt
+            recent_missed_skus.add(sku_ci_map[str(key).lower()])
     for key, cnt in (radar.get("missed_wants") or {}).items():
         if key not in missed_ts_map and int(cnt or 0) > 0 and str(key).lower() in sku_ci_map:
             c_sku = sku_ci_map[str(key).lower()]
@@ -381,6 +386,14 @@ def plan_with_hub(
         for tok in rev_txt.replace("(", " ").replace(")", " ").replace(",", " ").split():
             if tok.lower() in sku_ci_map:
                 missed_skus_1h[sku_ci_map[tok.lower()]] += 1
+                recent_missed_skus.add(sku_ci_map[tok.lower()])
+
+    # Category popularity is not first-party evidence. Only recent own sales or
+    # timestamped own stockout signals give a price gap priority over cold breadth.
+    proven_categories = {catalog[s].get("category") for s in set(sku_recent) | recent_missed_skus
+                         if s in catalog}
+    proven_categories.update(c for c in cat_map if c.strip().lower() in recent_missed_keys
+                             or c.split(">")[-1].strip().lower() in recent_missed_keys)
 
     demand_scores = compute_category_demand_scores(hub, set(cat_map.keys()), forum_posts, cat_recent, catalog)
     medians = {c: float(statistics.median(int(x.get("list_price", 0)) for x in skus))
@@ -448,6 +461,7 @@ def plan_with_hub(
         set(active_caps) | set(proven) | set(missed_skus_1h) | set(sku_recent) | set(hot_market_skus),
         key=lambda s: (
             s not in proven and s not in missed_skus_1h and s not in active_caps,
+            catalog.get(s, {}).get("category") not in proven_categories,
             held_count[s] > 0 and not (is_live_catalog and s in LIVE_BESTSELLER_CAPS and held_count[s] < 2 and (s in proven or sku_market_recent.get(s, 0) >= 2)),
             catalog.get(s, {}).get("kind", "goods") == "food",
             not (s in proven or s in missed_skus_1h or (s in active_caps and sku_market_recent.get(s, 0) >= 2)),
@@ -480,6 +494,9 @@ def plan_with_hub(
         kind = info.get("kind", "goods")
         lp = int(info.get("list_price", 0))
         if not eligible(info, sku in proven or sku in missed_skus_1h):
+            continue
+        if (sku in recent_missed_skus and sku not in proven and not held_count[sku]
+                and price_covered(info, held_skus, catalog)):
             continue
         cap = min(active_caps.get(sku, 3 if kind == "goods" else 4), 4)
         is_live_bestseller = (
@@ -520,7 +537,8 @@ def plan_with_hub(
             experiment = sku not in active_caps and sku not in proven and sku not in missed_skus_1h
             if experiment and (
                     len(held_skus) >= exp_skus_cap or projected_units >= exp_units_cap
-                    or len(expanded) >= exp_per_window or info.get("category") in expanded
+                    or len(expanded) >= exp_per_window
+                    or (info.get("category") in expanded and info.get("category") not in proven_categories)
                     or price_covered(info, held_skus, catalog)):
                 continue
             cost = math.ceil(lp * .75)
@@ -570,6 +588,7 @@ def plan_with_hub(
     ranked = sorted(
         cat_map,
         key=lambda c: (
+            c not in proven_categories,
             c in covered_cats,
             -demand_scores.get(c, 0),
             not cat_is_goods.get(c, False),
@@ -582,20 +601,28 @@ def plan_with_hub(
         if (len(buy_orders) >= 10 or len(expanded) >= exp_per_window
                 or len(held_skus) >= exp_skus_cap or projected_units >= exp_units_cap):
             break
-        if cat in expanded:
+        proven_category = cat in proven_categories
+        if cat in expanded and not proven_category:
             continue
-        if is_live_catalog and len(held_skus) >= 32 and demand_scores.get(cat, 0) < 2.0:
+        if is_live_catalog and len(held_skus) >= 32 and demand_scores.get(cat, 0) < 2.0 and not proven_category:
             continue
-        if is_cash_rich and is_full_catalog and demand_scores.get(cat, 0) <= 0 and not cat_has_high_goods.get(cat, False):
+        if (is_cash_rich and is_full_catalog and demand_scores.get(cat, 0) <= 0
+                and not cat_has_high_goods.get(cat, False) and not proven_category):
             continue
         held_bands = {price_band(int(catalog[s].get("list_price", 0)), medians[cat])
                       for s in held_skus if s in catalog and catalog[s].get("category") == cat}
         pool = [x for x in cat_map[cat] if x["sku"] not in held_skus and eligible(x)
                 and x["sku"] not in TARGET_CAPS and x["sku"] not in HIGH_VALUE_CAPS
                 and not price_covered(x, held_skus, catalog)
-                and price_band(int(x.get("list_price", 0)), medians[cat]) not in held_bands]
+                and (proven_category or price_band(int(x.get("list_price", 0)), medians[cat]) not in held_bands)
+                and (not proven_category or sku_market_recent.get(x["sku"], 0)
+                     or x["sku"] in recent_missed_skus
+                     or .75 * medians[cat] <= int(x.get("list_price", 0)) <= 1.33 * medians[cat])]
         pool.sort(key=lambda x: (
-            not (is_cash_rich and x.get("kind", "goods") == "goods" and int(x.get("list_price", 0)) >= HIGH_GOODS_MIN_PRICE),
+            not (proven_category and x["sku"] in recent_missed_skus),
+            not (proven_category and sku_market_recent.get(x["sku"], 0) > 0),
+            not (not proven_category and is_cash_rich and x.get("kind", "goods") == "goods"
+                 and int(x.get("list_price", 0)) >= HIGH_GOODS_MIN_PRICE),
             abs(math.log(max(1, int(x.get("list_price", 0))) / max(1., medians[cat]))),
             x["sku"],
         ))
