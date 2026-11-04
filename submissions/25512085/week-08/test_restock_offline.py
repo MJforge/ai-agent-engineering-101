@@ -23,7 +23,7 @@ class RestockTests(unittest.TestCase):
         self.catalog = {
             sku: {"kind": "goods" if i > 1 else "food", "category": f"cat{i}",
                   "list_price": 20_001, "shelf_hours": 400}
-            for i, sku in enumerate(restock.TARGET_CAPS)
+            for i, sku in enumerate(("G97cd0437", "Gef4d3036", "G0be9ed07", "Ge62449c9", "G07ec17d5"))
         }
         self.catalog["G07ec17d5"]["list_price"] = 279_000
         self.inv = {"balance": 5_000_000, "units": [],
@@ -54,7 +54,8 @@ class RestockTests(unittest.TestCase):
 
     def seed_catalog(self):
         self.catalog["seed"] = {"kind": "food", "category": "seed", "list_price": 10_000,
-                                "shelf_hours": 400}
+                                 "shelf_hours": 400}
+        self.hub["demand_radar"].setdefault("sku_inquiries", {})["seed"] = [{"ts": NOW, "miss": True}]
 
     def settle(self, seq, shop=URL, buyer="other", sku="G97cd0437", ts=NOW):
         return {"seq": seq, "ts": ts, "kind": "settle",
@@ -80,29 +81,27 @@ class RestockTests(unittest.TestCase):
         self.assertEqual(len(self.hub["demand_radar"]["own_sku_sold_ts"]["G97cd0437"]), 1)
 
     def test_requested_current_stocks(self):
-        for sku, n in zip(restock.TARGET_CAPS, [0, 1, 1, 2, 4]):
+        for sku, n in zip(self.catalog, [0, 1, 1, 2, 4]):
             self.stock(sku, n)
         buys = {x["sku"]: x["qty"] for x in self.plan()["buy"]}
         # Whitelist alone is not sales evidence; stocked SKUs need own velocity.
-        self.assertEqual([buys.get(s, 0) for s in restock.TARGET_CAPS], [0, 0, 0, 0, 0])
+        self.assertEqual([buys.get(s, 0) for s in self.catalog], [0, 0, 0, 0, 0])
 
     def test_sufficient_food_no_expansion_from_market(self):
         for i, name in enumerate(["kimchi", "water", "dumpling", "snack"]):
             self.catalog[name] = {"kind": "food", "category": name, "list_price": 10_000, "shelf_hours": 400}
             self.stock(name, 8)
-        for sku, n in restock.TARGET_CAPS.items():
-            self.stock(sku, n)
         rows = [self.settle(i+1, shop="https://other.invalid", sku="water") for i in range(100)]
         self.assertEqual(self.plan(rows)["buy"], [])
 
     def test_own_turnover_caps_and_short_shelf(self):
-        for sku, n in restock.TARGET_CAPS.items():
-            self.stock(sku, n)
         for sku, kind, qty in [("food", "food", 1), ("goods", "goods", 1), ("short", "food", 1)]:
-            self.catalog[sku] = {"kind": kind, "category": sku, "list_price": 1000,
+            self.catalog[sku] = {"kind": kind, "category": sku, "list_price": 20_000,
                                  "shelf_hours": 12 if sku == "short" else 400}
             self.stock(sku, qty)
         self.own_sales({"food": [NOW]*30, "goods": [NOW]*30, "short": [NOW-1201]*30})
+        self.hub["demand_radar"]["sku_inquiries"] = {
+            s: [{"ts": NOW, "miss": False}]*8 for s in ("food", "goods")}
         buys = {b["sku"]: b["qty"] for b in self.plan()["buy"]}
         # Own velocity now targets at most eight; short-shelf still receives no top-up.
         self.assertEqual(buys, {"food": 7, "goods": 7})
@@ -110,12 +109,13 @@ class RestockTests(unittest.TestCase):
     def test_high_ticket_budget_and_own_new_sku_restoration(self):
         self.stock("G97cd0437", 2)
         self.own_sales({"G07ec17d5": [NOW]*50, "new": [NOW]*50})
-        self.catalog["new"] = {"kind": "goods", "category": "new", "list_price": 1000}
+        self.catalog["new"] = {"kind": "goods", "category": "new", "list_price": 20_000}
+        self.hub["demand_radar"]["sku_inquiries"] = {
+            s.lower(): [{"ts": NOW, "miss": True}]*8 for s in ("G07ec17d5", "new")}
         plan = self.plan()
         buys = {b["sku"]: b["qty"] for b in plan["buy"]}
-        # Equity funding permits two high-ticket units within the core partition,
-        # not the velocity target of eight; cheap verified stock reaches eight.
-        self.assertEqual(buys.get("G07ec17d5"), 2)
+        # Hot targets replace own-sales velocity and obey the quarter-equity cap.
+        self.assertEqual(buys.get("G07ec17d5"), 5)
         self.assertEqual(buys.get("new"), 8)
         window = next(iter(self.hub["restock_windows"].values()))
         self.assertLessEqual(self.cost(plan), window["window_cap"])
@@ -128,7 +128,7 @@ class RestockTests(unittest.TestCase):
             total += self.cost(self.plan())
             store.save_hub(self.hub, path)
             self.hub = store.load_hub(path)
-        self.assertLessEqual(total, 200_000)
+        self.assertLessEqual(total, next(iter(self.hub["restock_windows"].values()))["window_cap"])
         self.assertTrue(total > 0)
         self.inv["restock"] = {"open": True, "opens_at": NOW-10, "closes_at": NOW+170}
         self.assertTrue(self.plan()["buy"])
@@ -137,13 +137,17 @@ class RestockTests(unittest.TestCase):
         self.hub["ledger_seq"] = 100
         rows = [{"seq": 2, "ts": NOW-5, "kind": "supply",
                  "data": {"shop": store.OWN_NAME, "total": 210_000, "qty": 10}}]
+        self.seed_catalog()
+        first = self.plan(rows)
+        self.assertTrue(first["buy"])
         self.assertEqual(self.plan(rows)["buy"], [])
-        self.assertEqual(self.plan(rows)["buy"], [])
+        self.assertEqual(next(iter(self.hub["restock_windows"].values()))["baseline_actual"], 210_000)
         self.assertEqual(len(self.hub["own_supplies"]), 1)
 
     def test_bootstrap_blocks_unknown_prior_spend_persistently_then_next_window(self):
         self.seed_catalog()
         path = self.path / "hub.json"
+        store.save_hub(self.hub, path)
         # The missing prior supply may already exceed 200k; a latest-400 fetch
         # returning no supply is not evidence of a zero-spend baseline.
         with patch.object(restock, "load_catalog", return_value=self.catalog), \
@@ -161,7 +165,7 @@ class RestockTests(unittest.TestCase):
                 self.inv["restock"] = {"open": True, "opens_at": NOW+1180, "closes_at": NOW+1360}
                 total = sum(self.cost(restock.build_restock_plan(self.path)) for _ in range(15))
                 self.assertGreater(total, 0)
-                self.assertLessEqual(total, restock.WINDOW_BUDGET)
+                self.assertLessEqual(total, store.load_hub(path)["restock_windows"][str(restock.supply_window(self.inv))]["window_cap"])
             self.assertTrue(store.load_hub(path)["restock_windows"][first_window]["blocked"])
 
     def test_old_cursor_sales_backfilled_by_seq_without_market_duplicates(self):
@@ -197,7 +201,7 @@ class RestockTests(unittest.TestCase):
         row = {"seq": 1, "ts": NOW, "kind": "supply",
                "data": {"shop": store.OWN_NAME, "total": first, "qty": 1}}
         second = self.cost(self.plan([row]))
-        self.assertLessEqual(first + second, 200_000)
+        self.assertLessEqual(first + second, next(iter(self.hub["restock_windows"].values()))["window_cap"])
         self.assertEqual(next(iter(self.hub["restock_windows"].values()))["reserved"], first+second)
 
     def test_closed_observes_and_missing_window_fails_closed(self):
@@ -213,7 +217,7 @@ class RestockTests(unittest.TestCase):
         self.seed_catalog()
         plan = self.plan()
         self.assertTrue(plan["buy"])
-        self.assertLessEqual(self.cost(plan), 200_000)
+        self.assertLessEqual(self.cost(plan), next(iter(self.hub["restock_windows"].values()))["window_cap"])
         self.assertTrue(all(1 <= b["qty"] <= 20 for b in plan["buy"]))
         self.inv["balance"] = 600_000
         self.assertEqual(self.plan()["buy"], [])
@@ -253,12 +257,14 @@ class RestockTests(unittest.TestCase):
             "kind": "goods", "category": "mattress", "list_price": 423_810
         }
         self.stock("G97cd0437", 1)
-        # Rich cash unlocks high-value buying only with recent market evidence.
-        plan = self.plan([self.settle(1, shop="https://other.invalid", sku="G1515d951"),
-                          self.settle(2, shop="https://other.invalid", sku="G1515d951")])
+        # Market 21+ qualifies as popular; public prices must also cover costs/storage.
+        rows = [self.settle(i+1, shop="https://other.invalid", sku="G1515d951") for i in range(21)]
+        for row in rows:
+            row["data"]["amount"] = 400_000
+        plan = self.plan(rows)
         bought_skus = [b["sku"] for b in plan["buy"]]
         self.assertIn("G1515d951", bought_skus)
-        self.assertLessEqual(self.cost(plan), restock.PROFITABLE_WINDOW_BUDGET)
+        self.assertLessEqual(self.cost(plan), next(iter(self.hub["restock_windows"].values()))["window_cap"])
 
 
 if __name__ == "__main__":

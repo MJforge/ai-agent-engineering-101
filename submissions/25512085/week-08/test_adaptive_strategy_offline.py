@@ -40,20 +40,20 @@ class AdaptiveRestockTests(unittest.TestCase):
 
     def test_twenty_minute_idempotence_and_restart_persistence(self):
         first = copy.deepcopy(self.decide())
-        self.assertEqual(first["mode"], "expand")
-        self.assertEqual(first["exploration_skus"], 60)
+        self.assertEqual(first["mode"], "metrics-only")
+        self.assertNotIn("exploration_skus", first)
         self.inv["balance"] = 0
         store.save_hub(self.hub, self.path / "hub.json")
         self.hub = store.load_hub(self.path / "hub.json")
         self.assertEqual(self.decide(NOW+1199), first)
         self.hub["adaptive_ledger_coverage"]["through"] = NOW+1200
-        self.assertEqual(self.decide(NOW+1200)["mode"], "maintain")
+        self.assertEqual(self.decide(NOW+1200)["mode"], "metrics-only")
 
     def test_incomplete_observation_keeps_current_policy(self):
         first = copy.deepcopy(self.decide())
         self.hub["adaptive_ledger_coverage"]["through"] = NOW-600
         result = self.decide(NOW+1200)
-        for field in ("mode", "exploration_skus", "exploration_factor", "baseline"):
+        for field in ("mode", "baseline"):
             self.assertEqual(result[field], first[field])
         self.assertIn("incomplete", result["reason"])
 
@@ -62,18 +62,18 @@ class AdaptiveRestockTests(unittest.TestCase):
             with self.subTest(fresh=fresh):
                 self.hub.pop("adaptive_strategy", None)
                 self.inv["units"] = units
-                self.assertEqual(self.decide(fresh=fresh)["mode"], "maintain")
+                self.assertEqual(self.decide(fresh=fresh)["mode"], "metrics-only")
 
     def test_no_own_turnover_never_expands_even_with_rank_or_cash(self):
         self.hub["own_sale_events"] = {}
         self.hub["rank"] = 99
         self.hub["demand_radar"]["missed_ts"] = {"core": [NOW]}
-        self.assertEqual(self.decide()["mode"], "maintain")
+        self.assertEqual(self.decide()["mode"], "metrics-only")
 
     def test_recent_interval_excludes_old_and_future_sales(self):
         self.hub["own_sale_events"] = {str(i): {"sku": "core", "ts": t}
                                        for i, t in enumerate([NOW-1200, NOW+1, NOW-1300])}
-        self.assertEqual(self.decide()["mode"], "maintain")
+        self.assertEqual(self.decide()["mode"], "metrics-only")
         self.assertEqual(self.hub["adaptive_strategy"]["baseline"]["own_sales"], 0)
 
     def test_buying_cash_drop_alone_does_not_trigger_recovery(self):
@@ -82,7 +82,7 @@ class AdaptiveRestockTests(unittest.TestCase):
         self.inv["units"] = [{"sku": "new", "cost": 1_200_000, "supplied_at": NOW}]
         self.hub["adaptive_ledger_coverage"]["through"] = NOW+1200
         self.hub["own_sale_events"] = {str(i): {"sku": "core", "ts": NOW+1200-i} for i in range(3)}
-        self.assertEqual(self.decide(NOW+1200)["mode"], "expand")
+        self.assertEqual(self.decide(NOW+1200)["mode"], "metrics-only")
 
     def catalog(self, n=70):
         return {f"sku{i}": {"list_price": 20_000, "kind": "goods", "category": f"cat{i}"}
@@ -95,12 +95,12 @@ class AdaptiveRestockTests(unittest.TestCase):
         catalog = self.catalog()
         for info in catalog.values():
             info["list_price"] = 100_000  # Existing full-catalog filter requires demand or high goods.
-        # Fully funded stock keeps deficit=0, isolating the adaptive base cap of 60.
+        # Adaptive no longer grants any exploration allowance without popularity.
         self.inv["units"] = [{"sku": f"sku{i}", "grade": "A", "cost": 120_000,
                                "supplied_at": NOW-100} for i in range(55)]
         plan = self.plan(catalog)
-        self.assertEqual(len(plan["buy"]), 5)
-        self.assertTrue(all(b["qty"] == 1 and int(b["sku"][3:]) >= 55 for b in plan["buy"]))
+        self.assertEqual(plan["buy"], [])
+        self.assertEqual(self.hub["adaptive_strategy"]["mode"], "metrics-only")
         self.assertEqual(self.plan(catalog)["buy"], [])
 
     def test_old_stock_reduces_exploration_only_and_preserves_core(self):
@@ -114,18 +114,20 @@ class AdaptiveRestockTests(unittest.TestCase):
         self.inv["units"] = [{"sku": "old", "grade": "A", "cost": 400_000,
                                "supplied_at": NOW-21601}]
         baseline_hub = copy.deepcopy(self.hub)
+        self.hub["demand_radar"]["sku_inquiries"] = {"core": [{"ts": NOW, "miss": True}]*4}
+        baseline_hub = copy.deepcopy(self.hub)
         plan = self.plan(catalog)
-        self.assertEqual(self.hub["adaptive_strategy"]["mode"], "recover")
-        # Three recent own sales target ceil(3 * 1.25) in both modes.
+        self.assertEqual(self.hub["adaptive_strategy"]["mode"], "metrics-only")
+        # Four inquiries set the hot target; age is only a risk metric.
         self.assertIn({"sku": "core", "qty": 4}, plan["buy"])
         window = next(iter(self.hub["restock_windows"].values()))
-        self.assertLessEqual(window["exploration_reserved"], 600_000)
+        self.assertNotIn("exploration_reserved", window)
         recover_buys = len(plan["buy"])
         self.hub = baseline_hub
         self.inv["units"][0]["supplied_at"] = NOW-100
         normal = self.plan(catalog)
         self.assertIn({"sku": "core", "qty": 4}, normal["buy"])
-        self.assertGreater(len(normal["buy"]), recover_buys)
+        self.assertEqual(len(normal["buy"]), recover_buys)
 
     def test_cash_floor_and_absolute_window_cap(self):
         catalog = self.catalog()
@@ -135,7 +137,7 @@ class AdaptiveRestockTests(unittest.TestCase):
         self.plan(catalog)
         for window in self.hub["restock_windows"].values():
             self.assertLessEqual(window["reserved"], 1_200_000)
-            self.assertLessEqual(window["window_cap"], 200_000)  # Started at low cash.
+            self.assertEqual(window["window_cap"], 0)  # Started below cash floor.
 
     def test_started_window_budget_does_not_increase_after_expansion(self):
         catalog = self.catalog()
@@ -145,8 +147,8 @@ class AdaptiveRestockTests(unittest.TestCase):
         self.hub["adaptive_strategy"].update(mode="expand", exploration_skus=60)
         self.plan(catalog)
         window = next(iter(self.hub["restock_windows"].values()))
-        self.assertEqual(window["window_cap"], 900_000)
-        self.assertLessEqual(window["reserved"], 900_000)
+        self.assertEqual(window["window_cap"], int(.4 * 5_600_000 / 3))
+        self.assertEqual(window["reserved"], 0)  # Expansion is not demand.
 
     def test_stocked_food_without_own_sales_gets_zero_more(self):
         catalog = self.catalog()
@@ -154,7 +156,8 @@ class AdaptiveRestockTests(unittest.TestCase):
         self.inv["units"] = [{"sku": "food", "grade": "A", "cost": 10_000,
                                "supplied_at": NOW-100}]
         self.hub["demand_radar"]["sku_sold_ts"] = {"food": [NOW]*100}
-        self.assertNotIn("food", {b["sku"] for b in self.plan(catalog)["buy"]})
+        # Market 21+ is now popular, even without own sales: top up to two.
+        self.assertIn({"sku": "food", "qty": 1}, self.plan(catalog)["buy"])
 
     def test_ledger_gap_resets_coverage_and_duplicate_rows_cannot_extend_it(self):
         hub = {}

@@ -36,20 +36,16 @@ class DemandAuditTests(unittest.TestCase):
     def test_lowercase_sku_and_raw_leaf_map_once_to_full_category(self):
         self.item("G12345678", "goods>침구")
         radar = self.hub["demand_radar"]
-        radar["missed_wants"] = {"g12345678": 2, "침구": 1}
-        scores = restock.compute_category_demand_scores(
-            self.hub, {"goods>침구", "김치"}, [], catalog=self.catalog)
-        self.assertEqual(scores["goods>침구"], 9)
-        radar["missed_wants"] = {"김치": 1}
-        self.assertEqual(restock.compute_category_demand_scores(
-            self.hub, {"김치"}, [])["김치"], 3)
+        radar["sku_inquiries"] = {"g12345678": [{"ts": assortment.NOW, "miss": True}]*2}
+        radar["missed_wants"] = {"침구": 1000}  # category totals no longer imply SKU demand
+        self.assertEqual(self.plan()["buy"], [{"sku": "G12345678", "qty": 2}])
 
     def test_missed_sku_price_gap_restores_one_not_stocked_depth(self):
         self.item("G12345678", "goods>침구", 120_000)
         self.item("G87654321", "goods>침구", 20_000)
         self.stock("G87654321")
         radar = self.hub["demand_radar"]
-        radar["missed_ts"] = {"g12345678": [assortment.NOW]}
+        radar["sku_inquiries"] = {"g12345678": [{"ts": assortment.NOW, "miss": True}]}
         self.assertEqual(self.plan()["buy"], [{"sku": "G12345678", "qty": 1}])
         self.assertEqual(self.plan()["buy"], [])
         path = self.path / "isolated-hub.json"
