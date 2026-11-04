@@ -1,0 +1,13 @@
+{
+  "repository": "MJforge/ai-agent-engineering-101",
+  "branch": "week-08",
+  "base_commit": "2fa90e6688696f0c23936a51f5f82f167f955d2b",
+  "before_sha256": {
+    "restock.py": "06cac4c5e1e3cf577ac7888ab40d7009e90c86f5258fb24a8fc74d9701a0f4b3",
+    "seller.py": "895ec55c7e7713808f3ec157755a686e5aaffa83c6e7e2304c0871a09581c179",
+    "store.py": "9cfe15cdccfe5ff55579c897dbb77973df4eec22df134b33157806a884f02e1d",
+    "POLICY.md": "7ec754275ff29a96f4ed3604d6eb178c3ff2f9dfb927fc1c9924a1f5793e183d"
+  },
+  "baseline": "205 offline tests passed after installing local test dependencies; initial missing-dependency failure is preserved in logs/seller-cash-before-20261104.log",
+  "scope": "seller restock, first quotes, truthful shop announcements; buyer unchanged"
+}
