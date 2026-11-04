@@ -705,9 +705,9 @@ class Seller(AgentExecutor):
                 }
                 taken_units = negotiating_units | set(self.committed_units.keys())
                 unit, demand_query = find_stock_unit(text, taken_units, inv, catalog)
-                record_inbound_inquiry(demand_query, matched=(unit is not None), raw_text=text)
 
                 if unit is None:
+                    record_inbound_inquiry(demand_query, matched=False, raw_text=text)
                     print(f"[stock-miss] Out of stock for buyer request: {text[:80]} (recorded demand: {demand_query})", flush=True)
                     await up.reject(say("Sorry, no matching stock meets your request (including any required shelf life plus checkout buffer). No receipt issued."))
                     return
@@ -784,6 +784,7 @@ class Seller(AgentExecutor):
                         f"{unit['name']} (sku={unit['sku']}), asking price {ask}. "
                         + food_use_question(hours_left)
                     )
+                record_inbound_inquiry(demand_query, matched=True, raw_text=text, sku=unit["sku"])
                 print(
                     f"[r3-quote] {unit['sku']} ({unit['name']}): cost={unit['cost']}, list={list_price}, "
                     f"grade={grade}, ask={ask}, r1_target={r1_target}, floor={hard_floor}, warranty={warranty}h",

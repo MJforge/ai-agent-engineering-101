@@ -240,7 +240,7 @@ def load_inventory(market_dir: Path) -> dict[str, Any]:
 
 
 def update_capital_stage(hub: dict[str, Any], inv: dict[str, Any]) -> dict[str, Any]:
-    """Compute current Coupang-style 3-Stage capital allocation limits from inventory.json."""
+    """Record capital metrics and the unified policy's cash-only spending limit."""
     if not inv:
         return hub["capital_stage"]
 
@@ -261,21 +261,16 @@ def update_capital_stage(hub: dict[str, Any], inv: dict[str, Any]) -> dict[str, 
     # Stage 3 (Scale-up): When total equity >= 6.0M, expand aggressively while keeping the cash floor below
     if total_equity >= 6_000_000:
         stage = 3
-        max_cap = int(2_500_000 + max(0, est_profit) * 0.85)
     elif est_profit >= 250_000 or cash_profit >= 0 and stock_cost >= 1_800_000:
         stage = 2
-        max_cap = int(2_500_000 + max(0, est_profit) * 0.75)
     else:
         stage = 1
-        max_cap = 2_500_000
 
-    # Cash floor scales with the balance: half of it, capped at 1,500,000, but never closer than 200,000 to the
-    # bankruptcy line (500,000). A fixed 1,500,000 floor froze a shop holding 0.5M-1.5M with no stock: it could
-    # neither restock nor file for bankruptcy. The 200,000 margin absorbs supply costs above our 65% estimate.
+    # Keep the existing capped base floor, then reserve one day of storage.
     bankrupt_line = int(inv.get("bankrupt_line") or 500_000)
     cash_floor = min(1_500_000, max(bankrupt_line + 200_000, balance // 2))
+    cash_floor += math.ceil(float(inv.get("storage_per_day", .01)) * stock_cost)
     available_to_spend = max(0, balance - cash_floor)
-    effective_cap = min(max_cap, stock_cost + available_to_spend)
 
     cs = hub["capital_stage"]
     cs.update({
@@ -285,9 +280,10 @@ def update_capital_stage(hub: dict[str, Any], inv: dict[str, Any]) -> dict[str, 
         "injected": injected,
         "stock_cost_value": stock_cost,
         "estimated_profit": est_profit,
-        "max_stock_cap": effective_cap,
-        "available_budget": max(0, effective_cap - stock_cost),
+        "cash_floor": cash_floor,
+        "available_budget": available_to_spend,
     })
+    cs.pop("max_stock_cap", None)
     return cs
 
 
@@ -379,6 +375,30 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
                              if now - 1800 <= sale["ts"] <= now),
                             key=lambda pair: (pair[1]["ts"], int(pair[0])))[-2000:])
     hub["own_sale_events"] = own_sales
+    # Last verified sale survives the short event tail, for supplied_at-based dead detection.
+    last_sales = hub.setdefault("own_last_sale_ts", {})
+    for e in rows:
+        d = e.get("data") or {}
+        raw = str(d.get("item") or d.get("sku") or "")
+        if (e.get("kind") == "settle" and str(d.get("shop") or d.get("seller") or "").rstrip("/") in own_urls
+                and d.get("buyer") != OWN_NAME and isinstance(d.get("amount"), (int, float))
+                and d["amount"] > 0 and isinstance(e.get("ts"), (int, float)) and e["ts"] <= now):
+            sku = cat_lookup.get(raw.lower(), (raw, "general"))[0]
+            if sku in catalog:
+                last_sales[sku] = max(last_sales.get(sku, 0), e["ts"])
+    for sale in own_sales.values():
+        last_sales[sale["sku"]] = max(last_sales.get(sale["sku"], 0), sale["ts"])
+    # Actual unit costs, not settlement prices, are the preferred procurement estimate.
+    costs = hub.setdefault("purchase_costs", {})
+    for e in rows:
+        d = e.get("data") or {}
+        sku = cat_lookup.get(str(d.get("sku") or d.get("item") or "").lower(), ("", ""))[0]
+        qty, total = d.get("qty"), d.get("total")
+        if (e.get("kind") == "supply" and d.get("shop") == OWN_NAME and sku
+                and isinstance(qty, (int, float)) and qty > 0
+                and isinstance(total, (int, float)) and total > 0):
+            if e.get("ts", 0) >= costs.get(sku, {}).get("ts", 0):
+                costs[sku] = {"cost": math.ceil(total / qty), "ts": e.get("ts", 0)}
     own_sold_ts: dict[str, list[float]] = {}
     for sale in own_sales.values():
         own_sold_ts.setdefault(sale["sku"], []).append(sale["ts"])
@@ -511,13 +531,32 @@ def sync_broken_and_payments(hub: dict[str, Any], market_dir: Path) -> list[dict
     return newly_attributed
 
 
-def record_inbound_inquiry(category_or_item: str, matched: bool, path: Path = STATE_FILE, raw_text: str = "") -> None:
+def record_inbound_inquiry(category_or_item: str, matched: bool, path: Path = STATE_FILE, raw_text: str = "", *, sku: str = "") -> None:
     """Record a buyer inquiry arriving at seller.py (including missed demand when out of stock)."""
     if not category_or_item:
         return
     now = time.time()
     with mutate_hub(path) as hub:
         radar = hub.setdefault("demand_radar", default_hub()["demand_radar"])
+        import re
+        keys = {sku} if sku else set(re.findall(r"\b([gfGF][0-9a-fA-F]{7,10})\b", raw_text))
+        if re.fullmatch(r"[gfGF][0-9a-fA-F]{7,10}", category_or_item):
+            keys.add(category_or_item)
+        inquiries = radar.setdefault("sku_inquiries", {})
+        for key in keys:
+            key = key.lower()
+            events = [e for e in inquiries.get(key, []) if 0 <= now - e["ts"] <= 7200]
+            events.append({"ts": now, "miss": not matched})
+            inquiries[key] = events[-100:]
+        # At most 500 SKU buckets, 5,000 events globally; evict oldest observations.
+        flattened = sorted((e["ts"], k, i, e) for k, es in inquiries.items()
+                           for i, e in enumerate(es) if 0 <= now - e["ts"] <= 7200)[-5000:]
+        recent_keys = set(k for _, k, _, _ in sorted(flattened, reverse=True)[:5000])
+        recent_keys = set(sorted(recent_keys, key=lambda k: max(e["ts"] for e in inquiries[k]), reverse=True)[:500])
+        radar["sku_inquiries"] = {}
+        for _, k, _, e in flattened:
+            if k in recent_keys:
+                radar["sku_inquiries"].setdefault(k, []).append(e)
         radar["inbound_wants"][category_or_item] = radar["inbound_wants"].get(category_or_item, 0) + 1
         if not matched:
             radar["missed_wants"][category_or_item] = radar["missed_wants"].get(category_or_item, 0) + 1
