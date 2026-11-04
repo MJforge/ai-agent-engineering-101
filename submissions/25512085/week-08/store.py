@@ -303,6 +303,23 @@ def fetch_ledger_rows(seq: int, timeout: float = 4.0) -> list[dict[str, Any]]:
         return []
 
 
+def fetch_public_buying_data(timeout: float = 2.0):
+    """Public financials and FULL stock; call only outside mutate_hub."""
+    try:
+        results = []
+        for endpoint in ("board", "shops"):
+            req = urllib.request.Request(f"{MARKET_URL}/api/{endpoint}", headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=min(3.0, timeout)) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            rows = data.get("shops") if isinstance(data, dict) else data
+            if not isinstance(rows, list):
+                return None
+            results.append(rows)
+        return results[1], results[0]
+    except Exception:
+        return None
+
+
 def fetch_own_shop_urls(timeout: float = 2.0) -> list[str]:
     """Public identity bootstrap only; callers must perform this outside the hub lock."""
     try:

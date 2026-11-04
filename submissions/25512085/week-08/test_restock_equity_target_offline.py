@@ -44,7 +44,7 @@ class EquityTargetTests(BuyingFixture, unittest.TestCase):
         self.inquiry(sku, 2)
         self.plan()
         first = self.state()["window_cap"]
-        with patch.object(restock, "market_ratio", return_value=(.6, {"source": "mock", "default": False})):
+        with patch.object(restock, "resolve_market_ratio", return_value=(.6, {"source": "mock", "default": False})):
             self.plan()
         self.assertEqual(self.state()["window_cap"], first)
 

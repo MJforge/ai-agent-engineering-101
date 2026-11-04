@@ -14,8 +14,8 @@ from typing import Any
 from adaptive_strategy import decide_restock
 from store import (
     ROUND_END_TS, STOP_BUYING_BEFORE_END_S, apply_ledger_rows,
-    fetch_ledger_rows, fetch_own_shop_urls, load_catalog, load_hub,
-    load_inventory, load_json_safe, mutate_hub, queue_forum_action,
+    fetch_ledger_rows, fetch_own_shop_urls, fetch_public_buying_data, load_catalog, load_hub,
+    load_inventory, mutate_hub, queue_forum_action,
     update_capital_stage,
 )
 
@@ -27,6 +27,7 @@ WINDOW_LEAD_S = 60
 MIN_FOOD_LIST_PRICE = 10_000
 MAX_FOOD_LIST_PRICE = 120_000
 DEFAULT_RATIO = .40
+RATIO_CACHE_S = 30 * 60
 
 
 def supply_window(inv: dict[str, Any]) -> tuple[float, float] | None:
@@ -41,10 +42,8 @@ def supply_window(inv: dict[str, Any]) -> tuple[float, float] | None:
     return None
 
 
-def market_ratio(market_dir, catalog):
-    """Only existing public files; missing financial observations fail safe, never fetch."""
-    shops = load_json_safe(market_dir / "shops.json", []) or []
-    board = load_json_safe(market_dir / "board.json", {}) or {}
+def market_ratio(shops, board, catalog):
+    """Pure calculation from full public API snapshots, never order-specific files."""
     shops = shops.get("shops", []) if isinstance(shops, dict) else shops
     board = board.get("shops", []) if isinstance(board, dict) else board
     metrics = {s.get("name"): s for s in board if isinstance(s, dict)}
@@ -71,7 +70,23 @@ def market_ratio(market_dir, catalog):
                                "shops": len(ratios)}
     top = sorted(ratios, key=lambda r: (-r[0], r[1]))[:5]
     return max(.30, min(.60, statistics.median(r[2] for r in top))), {
-        "source": "shops.json+board.json: top revenue median", "default": False, "shops": len(top)}
+        "source": "/api/shops+/api/board: top revenue median", "default": False, "shops": len(top)}
+
+
+def resolve_market_ratio(hub, observation=None):
+    now = time.time()
+    if observation is not None and not observation[1]["default"]:
+        ratio, source = observation
+        hub["market_ratio_cache"] = {"ratio": ratio, "ts": now, "shops": source["shops"], "source": source["source"]}
+        return ratio, {**source, "cached": False, "ts": now}
+    cached = hub.get("market_ratio_cache", {})
+    ratio, ts = cached.get("ratio"), cached.get("ts")
+    if (isinstance(ratio, (int, float)) and .30 <= ratio <= .60
+            and isinstance(ts, (int, float)) and 0 <= now - ts <= RATIO_CACHE_S):
+        return ratio, {"source": cached["source"], "shops": cached["shops"], "ts": ts,
+                       "default": False, "cached": True, "refresh_failed": True}
+    return DEFAULT_RATIO, {"source": "default: public API unavailable/insufficient, no fresh cache",
+                           "default": True, "cached": False, "shops": 0}
 
 
 def popularity(inquiries, misses, settlements):
@@ -96,7 +111,7 @@ def build_restock_plan(market_dir: Path) -> dict[str, Any]:
         cs = update_capital_stage({"capital_stage": {}}, inv)
         stock = cs.get("stock_cost_value", 0)
         equity = int(inv.get("balance") or 0) + stock
-        ratio, source = market_ratio(market_dir, catalog)
+        ratio, source = resolve_market_ratio(load_hub())
         print(json.dumps({"E": equity, "R": ratio, "R_source": source, "T": ratio * equity,
                           "deficit": max(0, ratio * equity - stock), "W": 0,
                           "grades": {g: {"skus": 0, "reserved": 0} for g in ("hot", "popular", "observe")},
@@ -119,6 +134,8 @@ def build_restock_plan(market_dir: Path) -> dict[str, Any]:
     if window and str(window) not in snapshot.get("restock_windows", {}):
         rows += fetch_ledger_rows(0)
     own_urls = fetch_own_shop_urls()
+    public_data = fetch_public_buying_data()
+    observation = market_ratio(*public_data, catalog) if public_data is not None else None
     try:
         fresh = 0 <= time.time() - (market_dir / "inventory.json").stat().st_mtime <= 120
     except OSError:
@@ -128,10 +145,11 @@ def build_restock_plan(market_dir: Path) -> dict[str, Any]:
         if window and not hub.get("restock_windows"):
             hub.setdefault("restock_windows", {})[str(window)] = {
                 "baseline_actual": 0, "reserved": 0, "blocked": True}
-        return plan_with_hub(hub, market_dir, catalog, inv, rows, inventory_fresh=fresh)
+        return plan_with_hub(hub, market_dir, catalog, inv, rows, inventory_fresh=fresh,
+                             ratio_observation=observation)
 
 
-def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False):
+def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False, ratio_observation=None):
     """Locked caller persists reservations, inquiries and dead history atomically."""
     now = time.time()
     apply_ledger_rows(hub, rows, catalog)
@@ -161,7 +179,7 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False)
     coverage = hub.get("adaptive_ledger_coverage", {})
     covered = (coverage.get("since", now) <= now - NO_DEMAND_S
                and 0 <= now - coverage.get("through", 0) <= 120)
-    ratio, source = market_ratio(market_dir, catalog)
+    ratio, source = resolve_market_ratio(hub, ratio_observation)
     stock = cs["stock_cost_value"]
     equity = int(inv.get("balance") or 0) + stock
     target = ratio * equity

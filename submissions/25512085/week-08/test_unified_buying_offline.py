@@ -83,10 +83,11 @@ class UnifiedBuyingTests(BuyingFixture, unittest.TestCase):
                    for i in range(len(costs))]
         (self.path / "shops.json").write_text(json.dumps({"shops": shops}), encoding="utf-8")
         (self.path / "board.json").write_text(json.dumps({"shops": metrics}), encoding="utf-8")
+        self.public_data = shops, metrics
 
     def test_ratio_median_top_five(self):
         self.public_shops([5_000_000]*5+[0], [10, 9, 8, 7, 6, 0])
-        r, source = restock.market_ratio(self.path, self.catalog)
+        r, source = restock.market_ratio(*self.public_data, self.catalog)
         self.assertEqual(r, .5)
         self.assertFalse(source["default"])
         self.assertEqual(source["shops"], 5)
@@ -94,16 +95,89 @@ class UnifiedBuyingTests(BuyingFixture, unittest.TestCase):
     def test_ratio_clamp_both_bounds(self):
         for cost, expected in [(0, .3), (50_000_000, .6)]:
             self.public_shops([cost]*3)
-            self.assertEqual(restock.market_ratio(self.path, self.catalog)[0], expected)
+            self.assertEqual(restock.market_ratio(*self.public_data, self.catalog)[0], expected)
 
     def test_ratio_defaults_missing_and_under_three(self):
-        self.assertEqual(restock.market_ratio(self.path, {})[0], .4)
+        self.assertEqual(restock.market_ratio([], [], {})[0], .4)
         self.public_shops([5_000_000]*2)
-        r, source = restock.market_ratio(self.path, self.catalog)
+        r, source = restock.market_ratio(*self.public_data, self.catalog)
         self.assertEqual(r, .4)
         self.assertTrue(source["default"])
         (self.path / "board.json").unlink()
-        self.assertTrue(restock.market_ratio(self.path, self.catalog)[1]["default"])
+        self.assertTrue(restock.market_ratio(self.public_data[0], [], self.catalog)[1]["default"])
+
+    def build_with_public_api(self, payloads=None, now=NOW):
+        path = self.path / "api-hub.json"
+        locked = []
+
+        @contextlib.contextmanager
+        def mutate():
+            with store.mutate_hub(path) as hub:
+                locked.append(True)
+                try:
+                    yield hub
+                finally:
+                    locked.pop()
+
+        def urlopen(req, timeout):
+            self.assertFalse(locked, "public API I/O inside hub lock")
+            self.assertLessEqual(timeout, 3)
+            self.assertEqual(req.get_method(), "GET")
+            if payloads is None:
+                raise OSError("offline failure")
+            endpoint = req.full_url.rsplit("/", 1)[-1]
+            return io.BytesIO(json.dumps(payloads[endpoint]).encode())
+
+        with patch.object(restock.time, "time", return_value=now), \
+             patch.object(restock, "load_catalog", return_value=self.catalog), \
+             patch.object(restock, "load_inventory", return_value=self.inv), \
+             patch.object(restock, "load_hub", side_effect=lambda: store.load_hub(path)), \
+             patch.object(restock, "mutate_hub", side_effect=mutate), \
+             patch.object(restock, "fetch_ledger_rows", return_value=[]), \
+             patch.object(restock, "fetch_own_shop_urls", return_value=[]), \
+             patch.object(store.urllib.request, "urlopen", side_effect=urlopen) as mocked:
+            restock.build_restock_plan(self.path)
+        return store.load_hub(path), mocked
+
+    def test_public_api_full_stock_outside_lock_and_cache_persistence(self):
+        self.public_shops([5_000_000]*3)
+        shops, board = self.public_data
+        # Poison both local files: neither belongs to the production R input contract.
+        (self.path / "shops.json").write_text(json.dumps([{"name": "0", "offers": []}]), encoding="utf-8")
+        (self.path / "board.json").write_text("{}", encoding="utf-8")
+        hub, mocked = self.build_with_public_api({"shops": {"shops": shops}, "board": {"shops": board}})
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(hub["market_ratio_cache"], {"ratio": .5, "ts": NOW, "shops": 3,
+                         "source": "/api/shops+/api/board: top revenue median"})
+        self.assertEqual(self.diag()["R"], .5)
+        self.assertFalse(self.diag()["R_source"]["cached"])
+
+    def test_public_api_failure_uses_fresh_cache_then_expires(self):
+        self.public_shops([5_000_000]*3)
+        shops, board = self.public_data
+        self.build_with_public_api({"shops": shops, "board": board})
+        hub, _ = self.build_with_public_api(now=NOW+1800)
+        self.assertEqual(self.diag()["R"], .5)
+        self.assertTrue(self.diag()["R_source"]["cached"])
+        self.assertEqual(hub["market_ratio_cache"]["ts"], NOW)  # failures cannot renew cache
+        self.build_with_public_api(now=NOW+1801)
+        self.assertEqual(self.diag()["R"], .4)
+        self.assertTrue(self.diag()["R_source"]["default"])
+
+    def test_public_api_failure_without_cache_ignores_local_files(self):
+        self.public_shops([5_000_000]*3)
+        hub, _ = self.build_with_public_api()
+        self.assertEqual(self.diag()["R"], .4)
+        self.assertNotIn("market_ratio_cache", hub)
+
+    def test_insufficient_public_api_shops_does_not_replace_cache(self):
+        self.public_shops([5_000_000]*3)
+        shops, board = self.public_data
+        self.build_with_public_api({"shops": shops, "board": board})
+        hub, _ = self.build_with_public_api({"shops": shops[:2], "board": board}, now=NOW+1)
+        self.assertEqual(self.diag()["R"], .5)
+        self.assertTrue(self.diag()["R_source"]["cached"])
+        self.assertEqual(hub["market_ratio_cache"]["ts"], NOW)
 
     def test_equity_target_deficit_and_window_formula(self):
         sku = self.item()
