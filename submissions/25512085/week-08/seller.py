@@ -424,14 +424,25 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
             open_ask = max(hard_floor, int(list_price * 0.65))
             r1_target = max(hard_floor, int(list_price * 0.55))
             r2_target = hard_floor
-        elif hl < 48.0 or grade == "C":
+        elif hl < 48.0:
             # Moderate urgency (< 48h remaining or Grade C quality drop): breakeven / slight discount
             hard_floor = max(10, int(cost * 0.80 if hl < 48.0 else cost * 0.78))
             open_ask = max(hard_floor, int(list_price * 0.72))
             r1_target = max(hard_floor, int(list_price * 0.64))
             r2_target = hard_floor
+        elif hl < 72.0:
+            # Start discounting while buyers can still use the remaining shelf life (POLICY 11).
+            hard_floor = max(10, int(cost * 1.00))
+            open_ask = max(hard_floor, int(list_price * 0.80))
+            r1_target = max(hard_floor, int(list_price * 0.74))
+            r2_target = hard_floor
+        elif grade == "C":
+            hard_floor = max(10, int(cost * 0.78))
+            open_ask = max(hard_floor, int(list_price * 0.72))
+            r1_target = max(hard_floor, int(list_price * 0.64))
+            r2_target = hard_floor
         else:
-            # Fresh Food (hours_left >= 48h): maintain standard margins
+            # Fresh Food (hours_left >= 72h): maintain standard margins
             if grade == "A":
                 hard_floor = max(cost + 10, int(cost * 1.03))
                 open_ask = max(int(cost * 1.20), min(int(list_price * 0.95), max(market_anchor, int(list_price * 0.90))))

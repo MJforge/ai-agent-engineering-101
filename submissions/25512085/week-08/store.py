@@ -153,6 +153,20 @@ def file_lock(path: Path = STATE_FILE, timeout: float = 8.0):
                 pass
 
 
+def migrate_no_rebuy(hub: dict[str, Any]) -> None:
+    """Preserve round-long bans and observation warmup from older deployments."""
+    legacy = hub.pop("dead_skus", {})
+    if legacy:
+        current = hub.setdefault("no_rebuy", {})
+        for sku, ts in legacy.items():
+            current.setdefault(sku, ts)
+    if "dead_detection_since" in hub:
+        hub.setdefault("no_rebuy_detection_since", hub.pop("dead_detection_since"))
+    if "dead_skus_overflow" in hub:
+        overflow = hub.pop("dead_skus_overflow")
+        hub["no_rebuy_overflow"] = bool(hub.get("no_rebuy_overflow") or overflow)
+
+
 def load_hub(path: Path = STATE_FILE) -> dict[str, Any]:
     """Load state_hub.json with exponential backoff retries against Windows sharing locks."""
     hub = default_hub()
@@ -167,6 +181,7 @@ def load_hub(path: Path = STATE_FILE) -> dict[str, Any]:
                         hub[k].update(v)
                     else:
                         hub[k] = v
+            migrate_no_rebuy(hub)
             return hub
         except (OSError, ValueError):
             if attempt < 4:

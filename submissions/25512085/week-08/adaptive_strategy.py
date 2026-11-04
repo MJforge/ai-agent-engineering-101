@@ -39,7 +39,7 @@ def decide_restock(hub, inv, now, *, inventory_fresh=False):
     coverage plus fresh, fully costed/aged inventory is required for a change.
     """
     state = hub.setdefault("adaptive_strategy", {})
-    detection_since = hub.setdefault("dead_detection_since", now)
+    detection_since = hub.setdefault("no_rebuy_detection_since", now)
     state["mode"] = "metrics-only"
     state.pop("exploration_factor", None)
     state.pop("exploration_skus", None)

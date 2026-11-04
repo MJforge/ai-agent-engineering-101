@@ -105,7 +105,7 @@ class EndgameTaperTests(BuyingFixture, unittest.TestCase):
 
     def test_endgame_keeps_dead_ban_cash_floor_window_cap_and_reservations(self):
         self.prepare()
-        self.hub["dead_skus"] = {"hot": NOW-1}
+        self.hub["no_rebuy"] = {"hot": NOW-1}
         buys, diag = self.run_at(60*3600)
         self.assertNotIn("hot", buys)
         self.assertEqual(diag["excluded"]["dead"], 1)

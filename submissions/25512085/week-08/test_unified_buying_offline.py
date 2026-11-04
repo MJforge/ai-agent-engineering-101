@@ -20,7 +20,7 @@ class BuyingFixture:
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name)
         self.hub = store.default_hub()
-        self.hub["dead_detection_since"] = NOW - restock.DEAD_AGE_S
+        self.hub["no_rebuy_detection_since"] = NOW - restock.NO_REBUY_AGE_S
         self.catalog = {}
         self.inv = {"balance": 6_000_000, "units": [], "storage_per_day": .01,
                     "restock": {"opens_at": NOW-20, "closes_at": NOW+160}}
@@ -293,20 +293,20 @@ class UnifiedBuyingTests(BuyingFixture, unittest.TestCase):
             self.stock(sku, age=14_400)
             self.inquiry(sku, 4)
         self.assertEqual(self.buys(), {})
-        self.assertEqual(set(self.hub["dead_skus"]), {"goods", "food"})
-        self.assertEqual(self.diag()["dead_new"], 2)
+        self.assertEqual(set(self.hub["no_rebuy"]), {"goods", "food"})
+        self.assertEqual(self.diag()["no_rebuy_new"], 2)
 
     def test_deployment_old_inventory_does_not_bootstrap_mass_dead(self):
-        self.hub.pop("dead_detection_since")
+        self.hub.pop("no_rebuy_detection_since")
         for i in range(100):
             self.stock(self.item(str(i), kind="food" if i % 2 else "goods"), age=24*3600)
         self.plan()
-        self.assertEqual(self.hub["dead_detection_since"], NOW)
-        self.assertEqual(self.hub["dead_skus"], {})
-        self.assertEqual(self.diag()["dead_new"], 0)
+        self.assertEqual(self.hub["no_rebuy_detection_since"], NOW)
+        self.assertEqual(self.hub["no_rebuy"], {})
+        self.assertEqual(self.diag()["no_rebuy_new"], 0)
 
     def test_bootstrap_since_persists_and_dead_requires_full_four_hours(self):
-        self.hub.pop("dead_detection_since")
+        self.hub.pop("no_rebuy_detection_since")
         sku = self.item()
         self.stock(sku, age=24*3600)
         self.plan()
@@ -315,14 +315,14 @@ class UnifiedBuyingTests(BuyingFixture, unittest.TestCase):
         self.hub = store.load_hub(path)
         with patch.object(restock.time, "time", return_value=NOW+14_399):
             self.plan()
-            self.assertEqual(self.hub["dead_skus"], {})
+            self.assertEqual(self.hub["no_rebuy"], {})
         with patch.object(restock.time, "time", return_value=NOW+14_400):
             self.plan()
-            self.assertIn(sku, self.hub["dead_skus"])
-        self.assertEqual(self.hub["dead_detection_since"], NOW)
+            self.assertIn(sku, self.hub["no_rebuy"])
+        self.assertEqual(self.hub["no_rebuy_detection_since"], NOW)
 
     def test_sale_during_bootstrap_survives_short_tail_and_prevents_dead(self):
-        self.hub.pop("dead_detection_since")
+        self.hub.pop("no_rebuy_detection_since")
         sku = self.item()
         self.stock(sku, age=24*3600)
         self.hub["own_shop_urls"] = ["https://own.invalid"]
@@ -332,26 +332,26 @@ class UnifiedBuyingTests(BuyingFixture, unittest.TestCase):
                 "shop": "https://own.invalid", "buyer": "other", "item": sku, "amount": 19_000}}])
         with patch.object(restock.time, "time", return_value=NOW+14_400):
             self.plan()
-            self.assertNotIn(sku, self.hub["dead_skus"])
+            self.assertNotIn(sku, self.hub["no_rebuy"])
             self.assertEqual(self.hub["own_sale_events"], {})
             self.assertEqual(self.hub["own_last_sale_ts"][sku], NOW+3600)
 
     def test_new_unit_after_bootstrap_must_itself_age_four_hours(self):
-        self.hub["dead_detection_since"] = NOW-24*3600
+        self.hub["no_rebuy_detection_since"] = NOW-24*3600
         sku = self.item()
         self.stock(sku, age=14_399)
         self.plan()
-        self.assertNotIn(sku, self.hub["dead_skus"])
+        self.assertNotIn(sku, self.hub["no_rebuy"])
 
     def test_adaptive_old_cost_has_same_bootstrap_guard(self):
-        self.hub.pop("dead_detection_since")
+        self.hub.pop("no_rebuy_detection_since")
         a, b = self.item("unsold"), self.item("sold")
         self.stock(a, age=24*3600)
         self.stock(b, age=24*3600)
         self.hub["adaptive_ledger_coverage"] = {"since": NOW-1201, "through": NOW}
         state = restock.decide_restock(self.hub, self.inv, NOW, inventory_fresh=True)
         self.assertEqual(state["baseline"]["old_cost"], 0)
-        self.assertEqual(self.hub["dead_detection_since"], NOW)
+        self.assertEqual(self.hub["no_rebuy_detection_since"], NOW)
         self.hub["own_last_sale_ts"] = {b: NOW+3600}
         self.hub["adaptive_ledger_coverage"]["through"] = NOW+14_400
         state = restock.decide_restock(self.hub, self.inv, NOW+14_400, inventory_fresh=True)
@@ -365,7 +365,7 @@ class UnifiedBuyingTests(BuyingFixture, unittest.TestCase):
         self.inquiry(a, 4)
         self.inquiry(b, 4)
         self.assertEqual(self.buys(), {a: 3, b: 3})
-        self.assertFalse(self.hub["dead_skus"])
+        self.assertFalse(self.hub["no_rebuy"])
 
     def test_sale_before_unit_arrival_does_not_clear_dead(self):
         sku = self.item()
@@ -384,15 +384,15 @@ class UnifiedBuyingTests(BuyingFixture, unittest.TestCase):
         self.inv["units"] = []
         self.inquiry(sku, 8)
         self.assertEqual(self.buys(), {})
-        self.assertEqual(self.diag()["dead_total"], 1)
+        self.assertEqual(self.diag()["no_rebuy_total"], 1)
 
     def test_dead_history_bounded_without_eviction(self):
-        self.hub["dead_skus"] = {str(i): NOW-1 for i in range(500)}
+        self.hub["no_rebuy"] = {str(i): NOW-1 for i in range(500)}
         sku = self.item()
         self.stock(sku, age=14_400)
         self.plan()
-        self.assertEqual(len(self.hub["dead_skus"]), 500)
-        self.assertTrue(self.hub["dead_skus_overflow"])
+        self.assertEqual(len(self.hub["no_rebuy"]), 500)
+        self.assertTrue(self.hub["no_rebuy_overflow"])
 
     def test_no_demand_two_hour_gate_with_coverage(self):
         sku = self.item()
@@ -428,8 +428,8 @@ class UnifiedBuyingTests(BuyingFixture, unittest.TestCase):
         self.assertGreater(self.cost(first), 0)
 
     def test_food_price_and_shelf_safety_hot_exception(self):
-        for price, shelf, hot, expected in [(9999, 400, False, False), (10000, 96, False, True),
-                (120000, 96, False, True), (120001, 96, False, False), (20000, 95, False, False),
+        for price, shelf, hot, expected in [(9999, 400, False, False), (10000, 180, False, True),
+                (120000, 180, False, True), (120001, 180, False, False), (20000, 179, False, False),
                 (9999, 12, True, True), (120001, 12, True, True)]:
             with self.subTest(price=price, shelf=shelf, hot=hot):
                 self.hub = store.default_hub()
@@ -495,7 +495,7 @@ class UnifiedBuyingTests(BuyingFixture, unittest.TestCase):
         row = {"seq": 1, "ts": NOW-10_000, "kind": "settle", "data": {
             "shop": "https://own.invalid", "buyer": "other", "item": sku, "amount": 19_000}}
         self.plan([row])
-        self.assertNotIn(sku, self.hub["dead_skus"])
+        self.assertNotIn(sku, self.hub["no_rebuy"])
         self.assertEqual(self.hub["own_last_sale_ts"][sku], NOW-10_000)
 
 

@@ -15,17 +15,18 @@ from adaptive_strategy import decide_restock
 from store import (
     ROUND_END_TS, STOP_BUYING_BEFORE_END_S, apply_ledger_rows,
     fetch_ledger_rows, fetch_own_shop_urls, fetch_public_buying_data, load_catalog, load_hub,
-    load_inventory, mutate_hub, queue_forum_action,
+    load_inventory, migrate_no_rebuy, mutate_hub, queue_forum_action,
     update_capital_stage,
 )
 
 POPULARITY_S = 40 * 60
 NO_DEMAND_S = 2 * 3600
-DEAD_AGE_S = 4 * 3600
-MAX_DEAD_SKUS = 500
+NO_REBUY_AGE_S = 4 * 3600
+MAX_NO_REBUY_SKUS = 500
 WINDOW_LEAD_S = 60
 MIN_FOOD_LIST_PRICE = 10_000
 MAX_FOOD_LIST_PRICE = 120_000
+FOOD_MIN_SHELF_HOURS = 180
 DEFAULT_RATIO = .40
 RATIO_CACHE_S = 30 * 60
 RATIO_MIN, RATIO_MAX = .30, .75   # Growth phase: allow up to the top shops' stock ratio (POLICY 9.1)
@@ -143,7 +144,7 @@ def build_restock_plan(market_dir: Path) -> dict[str, Any]:
                           "deficit": max(0, ratio * equity - stock), "W": 0,
                           "grades": {g: {"skus": 0, "reserved": 0} for g in ("hot", "popular", "observe")},
                           "grade_budget": {"hot_popular": 0, "observe": 0},
-                          "dead_new": 0, "dead_total": len(load_hub().get("dead_skus", {})),
+                          "no_rebuy_new": 0, "no_rebuy_total": len(load_hub().get("no_rebuy", {})),
                           "excluded": {}, "stop": reason, **endgame}), file=sys.stderr, flush=True)
         return {"buy": [], "bankrupt": True} if bankrupt else {"buy": []}
 
@@ -177,10 +178,11 @@ def build_restock_plan(market_dir: Path) -> dict[str, Any]:
 
 
 def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False, ratio_observation=None):
-    """Locked caller persists reservations, inquiries and dead history atomically."""
+    """Locked caller persists reservations, inquiries and no-rebuy history atomically."""
     now = time.time()
+    migrate_no_rebuy(hub)
     apply_ledger_rows(hub, rows, catalog)
-    detection_since = hub.setdefault("dead_detection_since", now)
+    detection_since = hub.setdefault("no_rebuy_detection_since", now)
     cs = update_capital_stage(hub, inv)
     decide_restock(hub, inv, now, inventory_fresh=inventory_fresh)  # metrics only
     radar = hub.get("demand_radar", {})
@@ -193,18 +195,18 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
             sku, ts = u["sku"], u.get("supplied_at", 0)
             if ts >= costs.get(sku, {}).get("ts", 0):
                 costs[sku] = {"cost": u["cost"], "ts": ts}
-    dead = hub.setdefault("dead_skus", {})
-    new_dead = 0
+    no_rebuy = hub.setdefault("no_rebuy", {})
+    new_no_rebuy = 0
     for u in units:
         sku, supplied = u.get("sku"), u.get("supplied_at")
         if (sku in catalog and isinstance(supplied, (int, float)) and supplied > 0
-                and now - max(supplied, detection_since) >= DEAD_AGE_S
-                and hub.get("own_last_sale_ts", {}).get(sku, 0) < supplied and sku not in dead):
-            if len(dead) < MAX_DEAD_SKUS:
-                dead[sku] = now
-                new_dead += 1
+                and now - max(supplied, detection_since) >= NO_REBUY_AGE_S
+                and hub.get("own_last_sale_ts", {}).get(sku, 0) < supplied and sku not in no_rebuy):
+            if len(no_rebuy) < MAX_NO_REBUY_SKUS:
+                no_rebuy[sku] = now
+                new_no_rebuy += 1
             else:
-                hub["dead_skus_overflow"] = True  # never evict a round-long prohibition
+                hub["no_rebuy_overflow"] = True  # never evict a round-long prohibition
     coverage = hub.get("adaptive_ledger_coverage", {})
     covered = (coverage.get("since", now) <= now - NO_DEMAND_S
                and 0 <= now - coverage.get("through", 0) <= 120)
@@ -232,8 +234,8 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
         expected_price = statistics.median(prices) if prices else .95 * lp
         margin = expected_price * .97 - cost  # net expected proceeds, including settlement fee
         reason = None
-        if sku in dead or hub.get("dead_skus_overflow"):
-            reason = "dead" if sku in dead else "dead_history_full"
+        if sku in no_rebuy or hub.get("no_rebuy_overflow"):
+            reason = "no_rebuy" if sku in no_rebuy else "no_rebuy_history_full"
         elif covered and not any(0 <= now - t <= NO_DEMAND_S for t in sales) and not any(
                 0 <= now - e["ts"] <= NO_DEMAND_S for e in events):
             reason = "no_demand_2h"
@@ -245,7 +247,7 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
             reason = "invalid_price"
         elif (info.get("kind") == "food" and grade != "hot"
               and (not MIN_FOOD_LIST_PRICE <= lp <= MAX_FOOD_LIST_PRICE
-                   or (not held[sku] and (info.get("shelf_hours") or 0) < 96))):
+                    or (not held[sku] and (info.get("shelf_hours") or 0) < FOOD_MIN_SHELF_HOURS))):
             reason = "food_safety"
         elif margin < 2 * storage * cost:
             reason = "storage_margin"
@@ -265,7 +267,7 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
             "W": calculated, "cash_floor": cs["cash_floor"], "restore_cost": restore,
             "grades": {g: {"skus": len(v), "reserved": 0} for g, v in candidates.items()},
             "grade_budget": {"hot_popular": calculated, "observe": calculated // 2},
-            "dead_new": new_dead, "dead_total": len(dead), "excluded": excluded,
+            "no_rebuy_new": new_no_rebuy, "no_rebuy_total": len(no_rebuy), "excluded": excluded,
             "no_demand_deferred": not covered, **endgame}
 
     def finish(orders, reason=None):
