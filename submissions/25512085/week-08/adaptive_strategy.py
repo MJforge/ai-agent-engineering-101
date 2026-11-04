@@ -10,9 +10,6 @@ import math
 import sys
 
 INTERVAL_S = 1200
-MAX_WINDOW_BUDGET = 3_000_000
-MAX_EXPLORATION_SKUS = 60
-MAX_EXPLORATION_UNITS = 95  # Base cash-rich cap before equity-target expansion.
 MAX_FAILURE_EVENTS = 600
 
 
@@ -36,7 +33,7 @@ def note_ledger_coverage(hub, rows, now):
 
 
 def decide_restock(hub, inv, now, *, inventory_fresh=False):
-    """Return overrides only; cash floors, caps, safety and buy evidence live in restock.
+    """Record observations only; no expansion/recovery overrides affect buying.
 
     All event counts use (now-1200, now]. At least 20 min continuous ledger
     coverage plus fresh, fully costed/aged inventory is required for a change.
@@ -45,8 +42,9 @@ def decide_restock(hub, inv, now, *, inventory_fresh=False):
     if now - state.get("last_decision", -INTERVAL_S) < INTERVAL_S:
         return state
     state["last_decision"] = now
-    state.setdefault("mode", "maintain")
-    state.setdefault("exploration_factor", 1.0)
+    state["mode"] = "metrics-only"
+    state.pop("exploration_factor", None)
+    state.pop("exploration_skus", None)
     coverage = hub.get("adaptive_ledger_coverage", {})
     units = inv.get("units")
     complete = (inventory_fresh and isinstance(units, list) and number(inv.get("balance"))
@@ -66,29 +64,17 @@ def decide_restock(hub, inv, now, *, inventory_fresh=False):
         misses = sum(sum(now - INTERVAL_S < t <= now for t in times)
                      for times in radar.get("missed_ts", {}).values())
         cost = sum(u["cost"] for u in active)
-        # Age + cost exposure + no *recent* own turnover, not cash-profit delta.
+        # Same supplied_at/no-sale definition as buying; exposure is a metric only.
         old_cost = sum(u["cost"] for u in active
-                       if now - u["supplied_at"] >= 6 * 3600 and u["sku"] not in sold)
+                       if now - u["supplied_at"] >= 4 * 3600
+                       and hub.get("own_last_sale_ts", {}).get(u["sku"], 0) < u["supplied_at"])
         obs = {"at": now, "since": now - INTERVAL_S, "balance": inv["balance"],
                "own_sales": len(sales), "misses": misses, "stock_cost": cost,
                "old_cost": old_cost, "old_cost_share": old_cost / cost if cost else 0,
                "held_skus": len({u["sku"] for u in active})}
-        if old_cost >= 300_000 and obs["old_cost_share"] >= .35 and inv.get("balance", 0) < 10_000_000:
-            state.update(mode="recover", exploration_factor=.5,
-                         reason="aged-cost exposure; core restoration unchanged")
-        elif inv["balance"] >= 6_200_000 and sales and (len(sales) >= 3 or misses > 0):
-            state.update(mode="expand", exploration_factor=1.0,
-                         exploration_skus=MAX_EXPLORATION_SKUS,
-                         reason="cash headroom and own turnover/missed demand")
-        else:
-            state.update(mode="maintain", exploration_factor=1.0,
-                         reason="no expansion evidence")
-            state.pop("exploration_skus", None)
+        state["reason"] = "observations only: POLICY section 9 controls buying"
         state["baseline"] = obs
     # JSON-escaped, local numeric/categorical summary only; never seller prose.
-    print(json.dumps("[adaptive] " + json.dumps({k: state.get(k) for k in
-          ("last_decision", "mode", "exploration_skus", "exploration_factor", "reason", "baseline")},
-          sort_keys=True)), file=sys.stderr, flush=True)
     return state
 
 

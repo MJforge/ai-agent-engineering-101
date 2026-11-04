@@ -86,13 +86,13 @@ def default_hub() -> dict[str, Any]:
             "recent_refs": [],        # recent ledger seqs for forum citations (max 25)
         },
         "capital_stage": {
-            "stage": 1,               # 1: Seed (50% cap), 2: Growth (profit reinvestment), 3: Scale-up
+            "stage": 1,               # Reporting only; no inventory cap.
             "balance": 5_000_000,
             "start": 5_000_000,
             "injected": 0,
             "stock_cost_value": 0,
             "estimated_profit": 0,
-            "max_stock_cap": 2_500_000,
+            "cash_floor": 0,
         },
         "shop_trust": {},             # shop_url -> {name, honest, dishonest, broken, settled, refuses, last_ts}
         "my_purchases": [],           # list of {sku, name, category, shop_url, shop_name, price, list_price, warranty_hours, ts, ledger, broke}
@@ -255,10 +255,7 @@ def update_capital_stage(hub: dict[str, Any], inv: dict[str, Any]) -> dict[str, 
     est_profit = total_equity - start
     cash_profit = balance - start - injected
 
-    # Stage transitions:
-    # Stage 1 (Seed): Initial 2.5M cap (50% of 5M starting capital) focused on non-expiring high-margin goods
-    # Stage 2 (Growth): Reinvest 75% of positive equity gains into expanding inventory cap (up to 4.2M)
-    # Stage 3 (Scale-up): When total equity >= 6.0M, expand aggressively while keeping the cash floor below
+    # Legacy stages remain reporting metrics only, not purchase limits.
     if total_equity >= 6_000_000:
         stage = 3
     elif est_profit >= 250_000 or cash_profit >= 0 and stock_cost >= 1_800_000:
@@ -533,8 +530,9 @@ def sync_broken_and_payments(hub: dict[str, Any], market_dir: Path) -> list[dict
 
 def record_inbound_inquiry(category_or_item: str, matched: bool, path: Path = STATE_FILE, raw_text: str = "", *, sku: str = "") -> None:
     """Record a buyer inquiry arriving at seller.py (including missed demand when out of stock)."""
-    if not category_or_item:
+    if not category_or_item and not sku:
         return
+    category_or_item = category_or_item or sku
     now = time.time()
     with mutate_hub(path) as hub:
         radar = hub.setdefault("demand_radar", default_hub()["demand_radar"])
