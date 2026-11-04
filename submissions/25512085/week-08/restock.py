@@ -98,21 +98,23 @@ LIVE_BESTSELLER_CAPS = {
 }
 MEGA_BESTSELLER_CAPS = {
     "G1515d951": 5,  # 423,810 Queen hybrid mattress
-    "G07ec17d5": 5,  # 279,000 SS hybrid spring mattress
+    "G07ec17d5": 6,  # 279,000 SS hybrid spring mattress
     "Gcc06fe5c": 5,  # 471,000 Luxury heating mat DS 312NSF
-    "G8ec51935": 2,  # 2,320,000 Jakomo 4-person sofa
+    "G8ec51935": 3,  # 2,320,000 Jakomo 4-person sofa
     "G00327e80": 2,  # 2,246,800 Dauning 4-person leather sofa
     "G03d0199f": 2,  # 1,380,000 La Cloud hotel bed frame+mattress set
     "G2cb8041b": 4,  # 296,000 Office mesh chair
     "G5cd4ffbc": 5,  # 199,000 Microfiber comforter set
     "Ge62449c9": 6,  # 87,900 Hotel comforter
-    "G75f11c19": 5,  # 122,900 Modal comforter pad set Q
+    "G75f11c19": 6,  # 122,900 Modal comforter pad set Q
     "G6f632932": 2,  # 116,000 Wood dining chair
     "Gd19f1a46": 2,  # 111,370 Blackout curtain
     "G0be9ed07": 6,  # 39,900 Modal sofa pad
     "G81ade83e": 2,  # 34,740 Denim blackout curtain
     "G200e39a3": 4,  # 37,900 Kimchi 10kg
     "Gef4d3036": 3,  # 28,900 Busa apple
+    "Gdf79cd07": 4,  # 12,900 Pulmuone water 500ml 60-pack
+    "G00b8acf0": 4,  # 4,900 Montbest water 2L 6-pack
 }
 EXPLORATION_SKUS = 35
 EXPLORATION_UNITS = 80
@@ -500,7 +502,7 @@ def plan_with_hub(
             held_count[s] > 0 and not (is_live_catalog and s in bestseller_caps and held_count[s] < bestseller_caps.get(s, 2) and (s in proven or sku_market_recent.get(s, 0) >= 2)),
             catalog.get(s, {}).get("kind", "goods") == "food",
             not (s in proven or s in missed_skus_1h or (s in active_caps and sku_market_recent.get(s, 0) >= 2)),
-            -(2 if (is_live_catalog and balance_now >= 10_000_000 and s in ("G8ec51935", "G00327e80", "G03d0199f") and held_count[s] < bestseller_caps.get(s, 2))
+            -(2 if (is_live_catalog and balance_now >= 10_000_000 and s in ("G8ec51935", "G00327e80", "G03d0199f") and held_count[s] < bestseller_caps.get(s, 3))
               else (1 if (is_live_catalog and s in bestseller_caps and sku_market_recent.get(s, 0) >= 2) else 0)),
             -missed_skus_1h.get(s, 0),
             -sku_recent.get(s, 0),
