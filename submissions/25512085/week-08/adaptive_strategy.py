@@ -11,6 +11,8 @@ import sys
 
 INTERVAL_S = 1200
 MAX_FAILURE_EVENTS = 600
+STOCKOUT_SKIP_S = 600       # buyer skips a (shop, SKU) pair after one "out of stock" reply
+MISMATCH_SKIP_S = 300       # ... after one "no unit meets expiry/grade/warranty" reply
 
 
 def number(value):
@@ -80,7 +82,8 @@ def decide_restock(hub, inv, now, *, inventory_fresh=False):
 
 def record_failure(hub, order, url, sku, reason, now):
     """One failure per order/pair, not one per counter/retry. No inferred shop guilt."""
-    if not order or reason not in ("price", "rejected", "timeout", "network-timeout", "unsigned"):
+    if not order or reason not in ("price", "rejected", "timeout", "network-timeout", "unsigned",
+                                   "stockout", "unit_mismatch"):
         return
     state = hub.setdefault("adaptive_strategy", {})
     events = [e for e in state.get("buyer_failures", []) if now - INTERVAL_S < e["ts"] <= now]
@@ -116,9 +119,16 @@ def filter_candidates(candidates, hub, now):
     """Keep ordinary utility ranking; if all soft-cooled, try the least failed safe pair."""
     active = [c for c in hub.get("adaptive_strategy", {}).get("buyer_cooldowns", [])
               if now < c["until"] <= now + INTERVAL_S]
+    # A single stock-out/mismatch reply is enough: the pair is skipped outright (no fallback),
+    # unlike price/rejection cooldowns that need three distinct orders.
+    stale = {(e["url"], e["sku"]) for e in hub.get("adaptive_strategy", {}).get("buyer_failures", [])
+             if (e.get("reason") == "stockout" and 0 <= now - e["ts"] < STOCKOUT_SKIP_S)
+             or (e.get("reason") == "unit_mismatch" and 0 <= now - e["ts"] < MISMATCH_SKIP_S)}
     available, fallback = [], []
     for candidate in candidates:
         _, shop, sku = candidate
+        if (shop["url"].rstrip("/"), sku["sku"]) in stale:
+            continue
         matches = [c for c in active if c["url"] == shop["url"]
                    and (not c["sku"] or c["sku"] == sku["sku"])]
         if not matches:

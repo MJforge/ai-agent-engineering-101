@@ -74,9 +74,31 @@ def seller_response_text(response: dict) -> str:
     return " ".join(text.split())[:160]
 
 
+# Seller refusals that mean "the snapshot was stale", not "the price was wrong" (11/04 audit:
+# 46 of 91 failures were 0-round rejections, mostly these texts). Matched case-insensitively.
+STOCKOUT_PATTERNS = ("none of that in stock", "no matching stock", "out of stock", "not in stock",
+                     "sold out", "no stock")
+UNIT_MISMATCH_PATTERNS = ("no available unit meets", "meets the requested expiry")
+# Skip windows live in adaptive_strategy (STOCKOUT_SKIP_S=600, MISMATCH_SKIP_S=300).
+
+
+def classify_seller_refusal(seller_text: str) -> str | None:
+    """Untrusted text is only matched, never echoed into reviews or executed."""
+    text = (seller_text or "").lower()
+    if any(p in text for p in UNIT_MISMATCH_PATTERNS):
+        return "unit_mismatch"
+    if any(p in text for p in STOCKOUT_PATTERNS):
+        return "stockout"
+    return None
+
+
 def failure_kind(failure_reason: str) -> str:
     """Classify trusted reason before appending any seller-controlled snippet."""
     reason = failure_reason.split(' | seller: "', 1)[0].lower()
+    if "had no stock of" in reason:
+        return "out_of_stock"
+    if "no unit matching" in reason:
+        return "unit_mismatch"
     if "timeout" in reason or "deadline" in reason:
         return "timeout"
     if "no candidates" in reason or "no shop currently" in reason:
@@ -1182,7 +1204,17 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         stars = 3 if (seller_ask and seller_ask <= int(budget * 1.15) and has_service) else 2
         template = random.choice(FUNNY_NO_DEAL_REVIEWS)
         review = template.format(rounds=rounds, ask=seller_ask or "high", budget=budget)
-        if is_round3:
+        refusal = (classify_seller_refusal(active.get("seller_text", ""))
+                   if is_round3 and task_state == "TASK_STATE_REJECTED" else None)
+        if refusal == "stockout":
+            # Stale shops.json snapshot: say so instead of a "seller clung to high" template.
+            active["failure"] = "stockout"
+            review = f"No deal: {shop_name} had no stock of {sku_code or item} (seller said out of stock)."
+        elif refusal == "unit_mismatch":
+            active["failure"] = "unit_mismatch"
+            review = (f"No deal: {shop_name} had no unit matching the order's expiry/grade/warranty "
+                      f"for {sku_code or item}.")
+        elif is_round3:
             if not active.get("failure") and seller_ask is not None and seller_ask > offer_limit:
                 active["failure"] = "price"
             elif not active.get("failure") and task_state == "TASK_STATE_REJECTED":
