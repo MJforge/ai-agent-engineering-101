@@ -32,10 +32,32 @@ def get_gemini_api_key() -> str:
 
 
 def call_gemini_api(prompt: str) -> str:
-    """Call Google Gemini API (gemini-2.5-flash) as an ultra-fast, zero-cost fallback."""
+    """Call Google Gemini API (gemini-3.5-flash-lite) as an ultra-fast, zero-cost fallback."""
     api_key = get_gemini_api_key()
     if not api_key:
         return ""
+    # Try gemini-3.5-flash-lite first, fallback to gemini-3.8-flash if needed
+    for model in ("gemini-3.5-flash-lite", "gemini-3.8-flash"):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 64},
+        }
+        try:
+            with httpx.Client(timeout=6.0) as client:
+                resp = client.post(url, json=payload, headers={"Content-Type": "application/json"})
+                if resp.status_code == 200:
+                    data = resp.json()
+                    candidates = data.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        if parts:
+                            text = parts[0].get("text", "").strip()
+                            if text:
+                                return text
+        except Exception as e:
+            print(f"[Gemini Fallback Warning ({model})]: {e}", file=sys.stderr)
+    return ""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
