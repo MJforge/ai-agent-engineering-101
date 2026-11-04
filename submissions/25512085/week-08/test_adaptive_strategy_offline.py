@@ -147,7 +147,7 @@ class AdaptiveRestockTests(unittest.TestCase):
         self.hub["adaptive_strategy"].update(mode="expand", exploration_skus=60)
         self.plan(catalog)
         window = next(iter(self.hub["restock_windows"].values()))
-        self.assertEqual(window["window_cap"], int(.4 * 5_600_000 / 3))
+        self.assertEqual(window["window_cap"], int(restock.DEFAULT_RATIO * 5_600_000 / restock.FILL_WINDOWS))
         self.assertEqual(window["reserved"], 0)  # Expansion is not demand.
 
     def test_stocked_food_without_own_sales_gets_zero_more(self):

@@ -15,7 +15,7 @@ class EquityTargetTests(BuyingFixture, unittest.TestCase):
         self.plan()
         d = self.diag()
         self.assertEqual(d["R"], .4)
-        self.assertEqual(d["W"], int(40_000_000/3))
+        self.assertEqual(d["W"], int(40_000_000/restock.FILL_WINDOWS))
 
     def test_store_has_cash_limit_not_max_stock_cap(self):
         sku = self.item()

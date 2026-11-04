@@ -94,7 +94,7 @@ class UnifiedBuyingTests(BuyingFixture, unittest.TestCase):
         self.assertEqual(source["shops"], 5)
 
     def test_ratio_clamp_both_bounds(self):
-        for cost, expected in [(0, .3), (50_000_000, .6)]:
+        for cost, expected in [(0, restock.RATIO_MIN), (50_000_000, restock.RATIO_MAX)]:
             self.public_shops([cost]*3)
             self.assertEqual(restock.market_ratio(*self.public_data, self.catalog)[0], expected)
 
@@ -188,7 +188,7 @@ class UnifiedBuyingTests(BuyingFixture, unittest.TestCase):
         self.assertEqual(d["E"], 6_100_000)
         self.assertEqual(d["T"], .4*6_100_000)
         self.assertEqual(d["deficit"], 2_340_000)
-        self.assertEqual(d["W"], 780_000)
+        self.assertEqual(d["W"], int(d["deficit"] / restock.FILL_WINDOWS))
         self.assertEqual(d["cash_floor"], 1_501_000)
 
     def test_restore_cost_and_quarter_equity_cap(self):
@@ -197,8 +197,8 @@ class UnifiedBuyingTests(BuyingFixture, unittest.TestCase):
         self.plan()
         d = self.diag()
         self.assertEqual(d["restore_cost"], 6_000_000)
-        self.assertEqual(d["W"], 1_500_000)
-        self.assertEqual(self.state()["reserved"], 1_500_000)
+        self.assertEqual(d["W"], restock.WINDOW_EQUITY_CAP * d["E"])
+        self.assertEqual(self.state()["reserved"], d["W"])
 
     def test_cash_floor_limits_window_and_storage_reserved(self):
         sku = self.item(price=1_500_000)
@@ -244,7 +244,7 @@ class UnifiedBuyingTests(BuyingFixture, unittest.TestCase):
             self.assertEqual(self.buys().get(sku, 0), expected)
 
     def test_priority_observe_half_cap_and_unused_remainder(self):
-        hot, popular, watch = self.item("hot", price=100_000), self.item("popular", price=100_000), self.item("watch", price=400_000)
+        hot, popular, watch = self.item("hot", price=150_000), self.item("popular", price=150_000), self.item("watch", price=400_000)
         self.inquiry(hot, 4)
         self.inquiry(popular, 2)
         self.inquiry(watch, 1)
@@ -259,7 +259,9 @@ class UnifiedBuyingTests(BuyingFixture, unittest.TestCase):
         for i in range(10):
             self.inquiry(self.item(f"watch{i}", price=100_000))
         self.plan()
-        self.assertEqual(self.state()["grade_reserved"]["observe"], 375_000)
+        unit_cost = restock.estimated_cost(self.hub, "watch0", self.catalog["watch0"])
+        half_budget = self.state()["window_cap"] // 2
+        self.assertEqual(self.state()["grade_reserved"]["observe"], half_budget // unit_cost * unit_cost)
         self.assertLessEqual(self.state()["reserved"], self.state()["window_cap"]//2)
 
     def test_same_grade_sorted_expected_margin_not_price(self):

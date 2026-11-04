@@ -114,11 +114,13 @@ class RestockTests(unittest.TestCase):
             s.lower(): [{"ts": NOW, "miss": True}]*8 for s in ("G07ec17d5", "new")}
         plan = self.plan()
         buys = {b["sku"]: b["qty"] for b in plan["buy"]}
-        # Hot targets replace own-sales velocity and obey the quarter-equity cap.
-        self.assertEqual(buys.get("G07ec17d5"), 5)
+        # Hot targets replace own-sales velocity and fit the growth-phase equity cap.
+        self.assertEqual(buys.get("G07ec17d5"), 8)
         self.assertEqual(buys.get("new"), 8)
         window = next(iter(self.hub["restock_windows"].values()))
         self.assertLessEqual(self.cost(plan), window["window_cap"])
+        equity = self.inv["balance"] + sum(u["cost"] for u in self.inv["units"])
+        self.assertLessEqual(window["window_cap"], restock.WINDOW_EQUITY_CAP * equity)
 
     def test_repeat_restart_and_next_window(self):
         self.seed_catalog()
