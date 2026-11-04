@@ -10,6 +10,7 @@ import json
 import math
 from pathlib import Path
 import statistics
+from adaptive_strategy import note_ledger_coverage
 
 CONFIG_PATH = Path(__file__).with_name('seller_cash_policy.json')
 PRIOR_BREAK = {'A': .03, 'B': .15, 'C': .35}
@@ -30,6 +31,8 @@ def number(x):
 def observe(hub, rows, catalog, now, own_urls, own_name):
     """Idempotent eight-hour sale/break observations shared under the existing lock."""
     state = hub.setdefault('seller_cash', {})
+    # An older shared cursor does not prove that this new observer saw the same history.
+    note_ledger_coverage({'adaptive_ledger_coverage':state.setdefault('coverage',{})},rows,now)
     sales = state.setdefault('sales', {})
     breaks = state.setdefault('breaks', {})
     lookup = {s.lower(): s for s in catalog}
@@ -55,10 +58,13 @@ def observe(hub, rows, catalog, now, own_urls, own_name):
 
 def ready(hub, inv, now, inventory_fresh, phase):
     p, coverage = config(), hub.get('adaptive_ledger_coverage', {})
+    observed = hub.get('seller_cash',{}).get('coverage',{})
     return bool(p.get('enabled') and phase == 'normal' and inventory_fresh and inv.get('round', 0) >= 3
                 and number(inv.get('balance')) and inv['balance'] >= p.get('minimum_growth_balance', 6200000)
                 and number(coverage.get('since')) and coverage['since'] <= now-1200
-                and number(coverage.get('through')) and 0 <= now-coverage['through'] <= 120)
+                and number(coverage.get('through')) and 0 <= now-coverage['through'] <= 120
+                and number(observed.get('since')) and observed['since'] <= now-1200
+                and number(observed.get('through')) and 0 <= now-observed['through'] <= 120)
 
 
 def sale_rows(hub):

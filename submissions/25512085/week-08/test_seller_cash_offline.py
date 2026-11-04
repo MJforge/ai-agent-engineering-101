@@ -78,6 +78,7 @@ class CashMathTests(unittest.TestCase):
 
     def test_warmup_freshness_and_endgame_gate(self):
         self.hub['adaptive_ledger_coverage']={'since':NOW-1200,'through':NOW}
+        self.hub['seller_cash']={'coverage':{'since':NOW-1200,'through':NOW}}
         inv={'round':3,'balance':10000000}
         self.assertTrue(cash.ready(self.hub,inv,NOW,True,'normal'))
         self.assertFalse(cash.ready(self.hub,inv,NOW,False,'normal'))
@@ -85,13 +86,19 @@ class CashMathTests(unittest.TestCase):
         self.hub['adaptive_ledger_coverage']['since']=NOW-60
         self.assertFalse(cash.ready(self.hub,inv,NOW,True,'normal'))
 
+    def test_old_shared_history_does_not_skip_new_observer_warmup(self):
+        self.hub['adaptive_ledger_coverage']={'since':NOW-7200,'through':NOW}
+        self.hub['seller_cash']={'coverage':{'since':NOW-60,'through':NOW}}
+        self.assertFalse(cash.ready(self.hub,{'round':3,'balance':30000000},NOW,True,'normal'))
+
 
 class CashRestockTests(BuyingFixture,unittest.TestCase):
     def test_live_growth_runs_through_real_planner_without_duplicate_buys(self):
         sku=self.item('G00000001',price=100000)
         self.inv.update(round=3,balance=30000000,surge=[])
         self.hub['adaptive_ledger_coverage']={'since':NOW-1200,'through':NOW}
-        self.hub['seller_cash']={'sales':{str(i):sale(sku,NOW-i,own=i<8) for i in range(40)}}
+        self.hub['seller_cash']={'sales':{str(i):sale(sku,NOW-i,own=i<8) for i in range(40)},
+                                 'coverage':{'since':NOW-1200,'through':NOW}}
         p=restock.plan_with_hub(self.hub,self.path,self.catalog,self.inv,[],inventory_fresh=True)
         self.assertGreater(sum(x['qty'] for x in p['buy']),8)
         self.assertTrue(self.diag()['seller_cash_policy']['active'])
