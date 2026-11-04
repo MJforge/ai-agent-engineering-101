@@ -107,9 +107,9 @@ class AdaptiveRestockTests(unittest.TestCase):
         catalog = self.catalog()
         for info in catalog.values():
             info["list_price"] = 300_000
-        # Keep core spend at 450k after the velocity target changes from 3 to 4,
+        # Keep core spend at 360k after the velocity target changes from 3 to 4,
         # so remaining budget still distinguishes recovery from normal breadth.
-        catalog["core"] = {"list_price": 150_000, "kind": "goods", "category": "core"}
+        catalog["core"] = {"list_price": 120_000, "kind": "goods", "category": "core"}
         catalog["old"] = {"list_price": 600_000, "kind": "goods", "category": "old"}
         self.inv["units"] = [{"sku": "old", "grade": "A", "cost": 400_000,
                                "supplied_at": NOW-21601}]
