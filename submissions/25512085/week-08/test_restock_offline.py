@@ -104,7 +104,8 @@ class RestockTests(unittest.TestCase):
             self.stock(sku, qty)
         self.own_sales({"food": [NOW]*30, "goods": [NOW]*30, "short": [NOW-1201]*30})
         buys = {b["sku"]: b["qty"] for b in self.plan()["buy"]}
-        self.assertEqual(buys, {"food": 2, "goods": 2})  # Short-shelf SKU still receives no top-up.
+        # Own velocity now targets at most eight; short-shelf still receives no top-up.
+        self.assertEqual(buys, {"food": 7, "goods": 7})
 
     def test_high_ticket_budget_and_own_new_sku_restoration(self):
         self.stock("G97cd0437", 2)
@@ -113,9 +114,9 @@ class RestockTests(unittest.TestCase):
         plan = self.plan()
         buys = {b["sku"]: b["qty"] for b in plan["buy"]}
         # Equity funding permits two high-ticket units within the core partition,
-        # not the full live target of four; cheap verified stock restores to three.
+        # not the velocity target of eight; cheap verified stock reaches eight.
         self.assertEqual(buys.get("G07ec17d5"), 2)
-        self.assertEqual(buys.get("new"), 3)
+        self.assertEqual(buys.get("new"), 8)
         window = next(iter(self.hub["restock_windows"].values()))
         self.assertLessEqual(self.cost(plan), window["window_cap"])
 

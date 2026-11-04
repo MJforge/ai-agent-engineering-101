@@ -116,7 +116,7 @@ class AssortmentTests(unittest.TestCase):
             self.item(s, s, kind=kind)
             self.stock(s)
             self.own(s, 1 if s == "equal" else 30)
-        self.assertEqual(self.buys(), {"food": 2, "goods": 2, "equal": 2})
+        self.assertEqual(self.buys(), {"food": 7, "goods": 7, "equal": 2})
 
     def test_whitelist_no_signal_does_not_buy(self):
         for s in restock.HIGH_VALUE_CAPS:
@@ -281,11 +281,11 @@ class AssortmentTests(unittest.TestCase):
         for i in range(35):
             price = 180_000 if i < 10 else 30_000
             self.item(f"G{i:08d}", f"goodscat{i}", price=price, kind="goods")
-        self.own("G00000000", n=4, age=300)  # Equity deficit restores proven goods to depth 3.
+        self.own("G00000000", n=4, age=300)  # Target five, clipped by the core budget partition.
         self.hub["demand_radar"]["missed_ts"] = {"g00000001": [NOW - 600]}  # 1h missed SKU
         plan = self.plan()
         buys = {b["sku"]: b["qty"] for b in plan["buy"]}
-        self.assertEqual(buys.get("G00000000"), 3)
+        self.assertEqual(buys.get("G00000000"), 4)
         self.assertEqual(buys.get("G00000001"), 1)
         self.assertNotIn("food1", buys)
         self.assertTrue(all(q == 1 for s, q in buys.items() if s != "G00000000"))

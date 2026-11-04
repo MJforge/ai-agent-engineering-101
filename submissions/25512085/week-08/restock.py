@@ -67,6 +67,7 @@ MISSED_RECENT_S = 3600              # 1-hour window for out-of-stock missed inqu
 MAX_ACTIVE_FOOD_UNITS = 20          # Tight food inventory cap: stop buying food when >= 20 food units are held
 HIGH_GOODS_MIN_PRICE = 100_000      # Prioritize >= 100,000 KRW non-food categories for new assortment expansion
 OWN_RECENT_S = 20 * 60
+MAX_OWN_VELOCITY_DEPTH = 8          # Own 20-minute sales only; never market volume.
 TARGET_CAPS = {"G97cd0437": 2, "Gef4d3036": 2, "G0be9ed07": 2,
                "Ge62449c9": 2, "G07ec17d5": 3}
 HIGH_VALUE_CAPS = {
@@ -468,6 +469,7 @@ def plan_with_hub(
         return (0 < lp <= (max_goods_price if kind == "goods" else MAX_FOOD_LIST_PRICE)
                 and not (kind == "food" and (info.get("shelf_hours") or 0) < 96 and not own))
 
+    depth_diagnostics = []
     for sku in dict.fromkeys(candidates):
         if len(buy_orders) >= 10:
             break
@@ -486,8 +488,11 @@ def plan_with_hub(
         )
         if (deficit > 0 and sku in proven
                 and (kind == "goods" or (info.get("shelf_hours") or 0) >= 96)):
-            target_depth = max(3, LIVE_BESTSELLER_CAPS.get(sku, 0))
+            target_depth = min(MAX_OWN_VELOCITY_DEPTH, max(
+                3, LIVE_BESTSELLER_CAPS.get(sku, 0), math.ceil(count * 1.25)))
             need = max(0, target_depth - held_count[sku])
+            depth_diagnostics.append({"sku": sku, "own20m": count, "target": target_depth,
+                                      "held": held_count[sku], "shortfall": need})
         elif held_count[sku] and sku not in proven:
             # Market popularity alone never justifies depth, even for bestsellers.
             need = 0
@@ -520,6 +525,11 @@ def plan_with_hub(
                 continue
             cost = math.ceil(lp * .75)
             limit = core_limit
+            if (count and deficit > 0 and need > 0
+                    and (kind == "goods" or (info.get("shelf_hours") or 0) >= 96)):
+                # Live catalogs used to allow core stock to consume the whole
+                # window. New velocity depth keeps the existing breadth partition.
+                limit = min(limit, max(0, int(eff_window_budget * .6) - used))
             # One expensive unit may cross the 60% partition, but leaves 50k
             # for breadth in a rich window (e.g. the 423,810 mattress).
             allowance = (is_cash_rich and high_unit_allowed and not held_count[sku]
@@ -541,6 +551,10 @@ def plan_with_hub(
                 if allowance or baseline_allowance:
                     high_unit_allowed = False
                     budget_state["high_unit_allowance"] = True
+
+    print(json.dumps({"restock_depth": sorted(depth_diagnostics,
+          key=lambda d: (-d["own20m"], -d["shortfall"], d["sku"]))[:5]},
+          ensure_ascii=False), file=sys.stderr, flush=True)
 
     # Soft caps stop experiments, not proven/core stockout restoration above.
     # Rank all categories: absent category first, then 1h missed/demand, then >=100k non-food (goods).
