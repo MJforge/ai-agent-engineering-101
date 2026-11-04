@@ -20,6 +20,7 @@ class BuyingFixture:
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name)
         self.hub = store.default_hub()
+        self.hub["dead_detection_since"] = NOW - restock.DEAD_AGE_S
         self.catalog = {}
         self.inv = {"balance": 6_000_000, "units": [], "storage_per_day": .01,
                     "restock": {"opens_at": NOW-20, "closes_at": NOW+160}}
@@ -292,6 +293,67 @@ class UnifiedBuyingTests(BuyingFixture, unittest.TestCase):
         self.assertEqual(self.buys(), {})
         self.assertEqual(set(self.hub["dead_skus"]), {"goods", "food"})
         self.assertEqual(self.diag()["dead_new"], 2)
+
+    def test_deployment_old_inventory_does_not_bootstrap_mass_dead(self):
+        self.hub.pop("dead_detection_since")
+        for i in range(100):
+            self.stock(self.item(str(i), kind="food" if i % 2 else "goods"), age=24*3600)
+        self.plan()
+        self.assertEqual(self.hub["dead_detection_since"], NOW)
+        self.assertEqual(self.hub["dead_skus"], {})
+        self.assertEqual(self.diag()["dead_new"], 0)
+
+    def test_bootstrap_since_persists_and_dead_requires_full_four_hours(self):
+        self.hub.pop("dead_detection_since")
+        sku = self.item()
+        self.stock(sku, age=24*3600)
+        self.plan()
+        path = self.path / "bootstrap.json"
+        store.save_hub(self.hub, path)
+        self.hub = store.load_hub(path)
+        with patch.object(restock.time, "time", return_value=NOW+14_399):
+            self.plan()
+            self.assertEqual(self.hub["dead_skus"], {})
+        with patch.object(restock.time, "time", return_value=NOW+14_400):
+            self.plan()
+            self.assertIn(sku, self.hub["dead_skus"])
+        self.assertEqual(self.hub["dead_detection_since"], NOW)
+
+    def test_sale_during_bootstrap_survives_short_tail_and_prevents_dead(self):
+        self.hub.pop("dead_detection_since")
+        sku = self.item()
+        self.stock(sku, age=24*3600)
+        self.hub["own_shop_urls"] = ["https://own.invalid"]
+        self.plan()
+        with patch.object(restock.time, "time", return_value=NOW+3600):
+            self.plan([{"seq": 1, "ts": NOW+3600, "kind": "settle", "data": {
+                "shop": "https://own.invalid", "buyer": "other", "item": sku, "amount": 19_000}}])
+        with patch.object(restock.time, "time", return_value=NOW+14_400):
+            self.plan()
+            self.assertNotIn(sku, self.hub["dead_skus"])
+            self.assertEqual(self.hub["own_sale_events"], {})
+            self.assertEqual(self.hub["own_last_sale_ts"][sku], NOW+3600)
+
+    def test_new_unit_after_bootstrap_must_itself_age_four_hours(self):
+        self.hub["dead_detection_since"] = NOW-24*3600
+        sku = self.item()
+        self.stock(sku, age=14_399)
+        self.plan()
+        self.assertNotIn(sku, self.hub["dead_skus"])
+
+    def test_adaptive_old_cost_has_same_bootstrap_guard(self):
+        self.hub.pop("dead_detection_since")
+        a, b = self.item("unsold"), self.item("sold")
+        self.stock(a, age=24*3600)
+        self.stock(b, age=24*3600)
+        self.hub["adaptive_ledger_coverage"] = {"since": NOW-1201, "through": NOW}
+        state = restock.decide_restock(self.hub, self.inv, NOW, inventory_fresh=True)
+        self.assertEqual(state["baseline"]["old_cost"], 0)
+        self.assertEqual(self.hub["dead_detection_since"], NOW)
+        self.hub["own_last_sale_ts"] = {b: NOW+3600}
+        self.hub["adaptive_ledger_coverage"]["through"] = NOW+14_400
+        state = restock.decide_restock(self.hub, self.inv, NOW+14_400, inventory_fresh=True)
+        self.assertEqual(state["baseline"]["old_cost"], 15_000)
 
     def test_dead_not_before_four_hours_and_sale_after_arrival(self):
         a, b = self.item("young"), self.item("sold")

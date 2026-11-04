@@ -153,6 +153,7 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
     """Locked caller persists reservations, inquiries and dead history atomically."""
     now = time.time()
     apply_ledger_rows(hub, rows, catalog)
+    detection_since = hub.setdefault("dead_detection_since", now)
     cs = update_capital_stage(hub, inv)
     decide_restock(hub, inv, now, inventory_fresh=inventory_fresh)  # metrics only
     radar = hub.get("demand_radar", {})
@@ -169,7 +170,8 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
     new_dead = 0
     for u in units:
         sku, supplied = u.get("sku"), u.get("supplied_at")
-        if (sku in catalog and isinstance(supplied, (int, float)) and 0 < supplied <= now - DEAD_AGE_S
+        if (sku in catalog and isinstance(supplied, (int, float)) and supplied > 0
+                and now - max(supplied, detection_since) >= DEAD_AGE_S
                 and hub.get("own_last_sale_ts", {}).get(sku, 0) < supplied and sku not in dead):
             if len(dead) < MAX_DEAD_SKUS:
                 dead[sku] = now

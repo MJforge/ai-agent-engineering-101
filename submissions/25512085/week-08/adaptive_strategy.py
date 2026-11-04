@@ -39,6 +39,7 @@ def decide_restock(hub, inv, now, *, inventory_fresh=False):
     coverage plus fresh, fully costed/aged inventory is required for a change.
     """
     state = hub.setdefault("adaptive_strategy", {})
+    detection_since = hub.setdefault("dead_detection_since", now)
     state["mode"] = "metrics-only"
     state.pop("exploration_factor", None)
     state.pop("exploration_skus", None)
@@ -65,7 +66,7 @@ def decide_restock(hub, inv, now, *, inventory_fresh=False):
         cost = sum(u["cost"] for u in active)
         # Same supplied_at/no-sale definition as buying; exposure is a metric only.
         old_cost = sum(u["cost"] for u in active
-                       if now - u["supplied_at"] >= 4 * 3600
+                       if now - max(u["supplied_at"], detection_since) >= 4 * 3600
                        and hub.get("own_last_sale_ts", {}).get(u["sku"], 0) < u["supplied_at"])
         obs = {"at": now, "since": now - INTERVAL_S, "balance": inv["balance"],
                "own_sales": len(sales), "misses": misses, "stock_cost": cost,
