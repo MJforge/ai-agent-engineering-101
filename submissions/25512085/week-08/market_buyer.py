@@ -25,6 +25,7 @@ import sys
 import tempfile
 import time
 import uuid
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,51 @@ REQUEST_DEADLINE = ContextVar("buyer_request_deadline", default=None)
 def diagnostic(message: str) -> None:
     """Escape even seller-controlled newlines; never emit a forged JSON line."""
     print(json.dumps(f"[buyer] {message}", ensure_ascii=False), file=sys.stderr, flush=True)
+
+
+def seller_response_text(response: dict) -> str:
+    """Untrusted last response only; status text takes precedence over artifacts."""
+    task = response.get("task", response)
+    parts = ((task.get("status") or {}).get("message") or {}).get("parts") or []
+    texts = [p["text"] for p in parts if isinstance(p.get("text"), str)]
+    if not any(t.strip() for t in texts):
+        texts = [p["text"] for art in task.get("artifacts") or []
+                 for p in art.get("parts") or [] if isinstance(p.get("text"), str)]
+    text = "".join(" " if c.isspace() or unicodedata.category(c).startswith("C") else c
+                   for c in " ".join(texts))
+    return " ".join(text.split())[:160]
+
+
+def failure_kind(failure_reason: str) -> str:
+    """Classify trusted reason before appending any seller-controlled snippet."""
+    reason = failure_reason.split(' | seller: "', 1)[0].lower()
+    if "timeout" in reason or "deadline" in reason:
+        return "timeout"
+    if "no candidates" in reason or "no shop currently" in reason:
+        return "no_candidates"
+    if "rpc" in reason or "opening inquiry" in reason or "card endpoint failed" in reason:
+        return "rpc_error"
+    if "unsigned" in reason:
+        return "unsigned"
+    if any(s in reason for s in ("declined-price-policy", "invalid receipt", "break rate")):
+        return "receipt_policy"
+    if "task_state_rejected" in reason:
+        return "rejected_open" if "0 round" in reason else "rejected_after_offer"
+    if "counter limit" in reason:
+        return "counter_limit"
+    if "exceeds price limit" in reason:
+        return "price_above_limit"
+    return "other"
+
+
+def failure_diagnostic(reason: str, seller_text: str = "") -> None:
+    kind = failure_kind(reason)
+    if seller_text:
+        reason += f' | seller: "{seller_text}"'
+    # Keep the existing JSON-string diagnostic envelope, including for hostile text.
+    diagnostic("attempt failed: " + json.dumps({
+        "failure_reason": reason, "failure_kind": kind, "seller_text": seller_text,
+    }, ensure_ascii=False))
 
 
 def request_timeout(default: float) -> float:
@@ -694,6 +740,7 @@ def run_round3(shops, memory, hub, catalog, order_data, item, budget, deadline):
                     remaining_shops, memory, hub, catalog, order_data, budget)
                 if chosen is None:
                     diagnostic(f"[retry] no candidates: {reason}")
+                    failure_diagnostic(f"no candidates: {reason}")
                     break
                 url = chosen.get("url", "").rstrip("/")
                 remaining_shops = [s for s in remaining_shops if s.get("url", "").rstrip("/") != url]
@@ -712,6 +759,7 @@ def run_round3(shops, memory, hub, catalog, order_data, item, budget, deadline):
                 diagnostic(f"[attempt {attempt}/3] failed: {result['review']}")
             except TimeoutError:
                 diagnostic(f"[attempt {attempt}/3] stopped: total/order deadline exhausted")
+                failure_diagnostic("total/order deadline exhausted")
                 result["review"] = "No deal: total/order deadline exhausted."
                 break
     finally:
@@ -723,6 +771,7 @@ def run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
                 order_data, item, budget, cleanup_deadline=None):
     active = {}
     selected = False
+    result = None
     try:
         result = _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
                               order_data, item, budget, active)
@@ -736,9 +785,12 @@ def run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         if isinstance(exc, TimeoutError) and active.get("id") and not active.get("failure"):
             # Negotiation deadline is pair-local, not proof the whole shop's network failed.
             active["failure"] = "timeout"
-        return {"shop": chosen_shop["url"], "receipt": None, "stars": None,
-                "review": f"No deal: attempt failed ({type(exc).__name__}: {exc})."}
+        result = {"shop": chosen_shop["url"], "receipt": None, "stars": None,
+                  "review": f"No deal: attempt failed ({type(exc).__name__}: {exc})."}
+        return result
     finally:
+        if order_data.get("acceptable") and not selected and result is not None:
+            failure_diagnostic(result["review"], active.get("seller_text", ""))
         if not selected and active.get("pending") is not None:
             # Remove only this attempt's record, not a concurrent replacement.
             with mutate_hub() as current_hub:
@@ -829,6 +881,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         if is_round3:
             request_timeout(1)
         res = rpc_call(rpc_url, "SendMessage", {"message": msg})
+        active["seller_text"] = seller_response_text(res)
     except Exception as e:
         review = f"No deal in 0 rounds: shop did not respond to opening inquiry ({type(e).__name__})."
         if isinstance(e, (TimeoutError, httpx.TimeoutException)):
@@ -957,6 +1010,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         }
         try:
             res = rpc_call(rpc_url, "SendMessage", {"message": follow_up})
+            active["seller_text"] = seller_response_text(res)
         except Exception as exc:
             failure_reason = f"counter RPC failed ({type(exc).__name__})"
             if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
@@ -994,6 +1048,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
                 "taskId": task_id,
                 "parts": [{"text": f"I offer {seller_ask} for this certified item."}],
             }})
+            active["seller_text"] = seller_response_text(res)
             if "error" in res:
                 failure_reason = f"final acceptance RPC error: {res['error']}"
             else:
