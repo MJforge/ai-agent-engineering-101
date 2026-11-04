@@ -538,7 +538,7 @@ def record_inbound_inquiry(category_or_item: str, matched: bool, path: Path = ST
         radar = hub.setdefault("demand_radar", default_hub()["demand_radar"])
         import re
         keys = {sku} if sku else set(re.findall(r"\b([gfGF][0-9a-fA-F]{7,10})\b", raw_text))
-        if re.fullmatch(r"[gfGF][0-9a-fA-F]{7,10}", category_or_item):
+        if not sku and re.fullmatch(r"[gfGF][0-9a-fA-F]{7,10}", category_or_item):
             keys.add(category_or_item)
         inquiries = radar.setdefault("sku_inquiries", {})
         for key in keys:

@@ -327,6 +327,13 @@ class UnifiedBuyingTests(BuyingFixture, unittest.TestCase):
         self.assertLessEqual(len(events), 500)
         self.assertLessEqual(sum(map(len, events.values())), 5000)
 
+    def test_quote_records_only_actual_offered_sku_not_requested_substitute(self):
+        path = self.path / "quote.json"
+        store.record_inbound_inquiry("G87654321", True, path, raw_text="G87654321", sku="G12345678")
+        inquiries = store.load_hub(path)["demand_radar"]["sku_inquiries"]
+        self.assertEqual(set(inquiries), {"g12345678"})
+        self.assertEqual(inquiries["g12345678"], [{"ts": NOW, "miss": False}])
+
     def test_build_early_stops_emit_one_json_diagnostic_without_network(self):
         sku = self.item()
         with patch.object(restock, "load_catalog", return_value=self.catalog), \
