@@ -109,6 +109,12 @@ class GradeWarrantyTests(unittest.TestCase):
         hub['forum_state']={'availability_announced':{sku:self.now-10}}
         self.assertIsNone(cash.availability_plan([u],hub,self.catalog,self.now))
 
+    def test_settlement_review_availability_word_is_not_a_new_purchase_request(self):
+        sku,u,hub=self.grade('C')
+        feed=[{'id':125,'ts':self.now,'role':'buyer','owner':'outside',
+               'text':'Settled SKU='+sku+'; One observed purchase, not a guarantee of future quality or availability.'}]
+        self.assertIsNone(cash.availability_plan([u],hub,self.catalog,self.now,feed))
+
     def test_blocked_analytics_writer_does_not_block_the_seller_thread(self):
         started=threading.Event();release=threading.Event()
         def blocked(*args,**kwargs):started.set();release.wait(2)

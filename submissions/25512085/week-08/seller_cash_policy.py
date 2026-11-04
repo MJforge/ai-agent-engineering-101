@@ -267,12 +267,13 @@ def availability_plan(units, hub, catalog, now, forum=None):
         return '\n'.join(lines)
     posts=forum.get('posts',[]) if isinstance(forum,dict) else forum if isinstance(forum,list) else []
     replied=set(state.get('availability_replied_threads',[]))
-    request=re.compile(r'looking for|want to buy|stock request|availability|in stock\?|구매\s*(?:희망|원|요청)|재고\s*(?:있|문의)|찾(?:아요|습니다|고 있어)',re.I)
+    request=re.compile(r'looking for|want to buy|stock request|(?:check\s+)?availability\s*(?:of|\?)|in stock\?|구매\s*(?:희망|원|요청)|재고\s*(?:있|문의)|찾(?:아요|습니다|고 있어)',re.I)
+    report=re.compile(r'\bsettled\b|\bpaid\b|\bpurchased\b|\bbought\b|not a guarantee|정산|구매\s*(?:완료|후기)|거래\s*(?:완료|후기)|리포트',re.I)
     for post in sorted(posts,key=lambda x:x.get('ts',0),reverse=True):
         pid=post.get('id');body=str(post.get('text') or '')
         if (post.get('role')!='buyer' or str(post.get('owner') or '').lower()=='mjforge'
                 or not number(post.get('ts')) or not 0<=now-post['ts']<=1200
-                or pid is None or str(pid) in replied or not request.search(body)):
+                or pid is None or str(pid) in replied or report.search(body) or not request.search(body)):
             continue
         skus=sorted({lookup[k.lower()] for k in re.findall(r'\b[GgFf][0-9a-fA-F]{7,10}\b',body) if k.lower() in lookup})
         if skus:
