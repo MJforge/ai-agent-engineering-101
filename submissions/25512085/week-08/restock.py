@@ -414,7 +414,11 @@ def plan_with_hub(
         if c in cat_map and c not in candidate_categories:
             candidate_categories.append(c)
 
-    max_goods_price = MAX_GOODS_STAGE3_PRICE if stage >= 3 else MAX_GOODS_STAGE1_PRICE
+    is_live_catalog = len(catalog) >= 500
+    max_goods_price = (
+        1_450_000 if (stage >= 3 and is_live_catalog and balance_now >= 10_000_000)
+        else (MAX_GOODS_STAGE3_PRICE if stage >= 3 else MAX_GOODS_STAGE1_PRICE)
+    )
     buy_orders: list[dict[str, Any]] = []
     spent_est = 0
     exploration_spent = 0
@@ -532,6 +536,10 @@ def plan_with_hub(
         else:
             need = 0
         if need > 0:
+            if lp > MAX_GOODS_STAGE3_PRICE:
+                need = 1 if held_count[sku] == 0 else 0
+            if need <= 0:
+                continue
             if kind == "food":
                 need = min(need, max(0, MAX_ACTIVE_FOOD_UNITS - held_food_units))
             experiment = sku not in active_caps and sku not in proven and sku not in missed_skus_1h
