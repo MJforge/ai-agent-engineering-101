@@ -28,6 +28,9 @@ MIN_FOOD_LIST_PRICE = 10_000
 MAX_FOOD_LIST_PRICE = 120_000
 DEFAULT_RATIO = .40
 RATIO_CACHE_S = 30 * 60
+RATIO_MIN, RATIO_MAX = .30, .75   # Growth phase: allow up to the top shops' stock ratio (POLICY 9.1)
+FILL_WINDOWS = 2                  # Close the stock deficit over ~2 supply windows (~40 min)
+WINDOW_EQUITY_CAP = .50           # Runaway guard per supply window
 
 
 def supply_window(inv: dict[str, Any]) -> tuple[float, float] | None:
@@ -69,7 +72,7 @@ def market_ratio(shops, board, catalog):
         return DEFAULT_RATIO, {"source": "default: insufficient public shops/financials", "default": True,
                                "shops": len(ratios)}
     top = sorted(ratios, key=lambda r: (-r[0], r[1]))[:5]
-    return max(.30, min(.60, statistics.median(r[2] for r in top))), {
+    return max(RATIO_MIN, min(RATIO_MAX, statistics.median(r[2] for r in top))), {
         "source": "/api/shops+/api/board: top revenue median", "default": False, "shops": len(top)}
 
 
@@ -81,7 +84,7 @@ def resolve_market_ratio(hub, observation=None):
         return ratio, {**source, "cached": False, "ts": now}
     cached = hub.get("market_ratio_cache", {})
     ratio, ts = cached.get("ratio"), cached.get("ts")
-    if (isinstance(ratio, (int, float)) and .30 <= ratio <= .60
+    if (isinstance(ratio, (int, float)) and RATIO_MIN <= ratio <= RATIO_MAX
             and isinstance(ts, (int, float)) and 0 <= now - ts <= RATIO_CACHE_S):
         return ratio, {"source": cached["source"], "shops": cached["shops"], "ts": ts,
                        "default": False, "cached": True, "refresh_failed": True}
@@ -226,7 +229,7 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
     for group in candidates.values():
         group.sort(key=lambda c: (-c[3], c[0]))
     restore = sum(n * c for g in ("hot", "popular") for s, n, c, m in candidates[g] if not held[s])
-    calculated = max(0, int(min(cs["available_budget"], max(restore, deficit / 3), .25 * equity)))
+    calculated = max(0, int(min(cs["available_budget"], max(restore, deficit / FILL_WINDOWS), WINDOW_EQUITY_CAP * equity)))
     diag = {"E": equity, "R": ratio, "R_source": source, "T": target, "deficit": deficit,
             "W": calculated, "cash_floor": cs["cash_floor"], "restore_cost": restore,
             "grades": {g: {"skus": len(v), "reserved": 0} for g, v in candidates.items()},
