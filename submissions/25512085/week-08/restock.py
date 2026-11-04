@@ -97,22 +97,24 @@ LIVE_BESTSELLER_CAPS = {
     "Gef4d3036": 3,  # 28,900 Busa apple
 }
 MEGA_BESTSELLER_CAPS = {
-    "G1515d951": 5,  # 423,810 Queen hybrid mattress
-    "G07ec17d5": 6,  # 279,000 SS hybrid spring mattress
+    "G1515d951": 6,  # 423,810 Queen hybrid mattress
+    "G07ec17d5": 8,  # 279,000 SS hybrid spring mattress
     "Gcc06fe5c": 5,  # 471,000 Luxury heating mat DS 312NSF
     "G8ec51935": 3,  # 2,320,000 Jakomo 4-person sofa
-    "G00327e80": 2,  # 2,246,800 Dauning 4-person leather sofa
+    "G00327e80": 3,  # 2,246,800 Dauning 4-person leather sofa
     "G03d0199f": 2,  # 1,380,000 La Cloud hotel bed frame+mattress set
     "G2cb8041b": 4,  # 296,000 Office mesh chair
     "G5cd4ffbc": 5,  # 199,000 Microfiber comforter set
     "Ge62449c9": 6,  # 87,900 Hotel comforter
-    "G75f11c19": 6,  # 122,900 Modal comforter pad set Q
+    "G75f11c19": 8,  # 122,900 Modal comforter pad set Q
     "G6f632932": 2,  # 116,000 Wood dining chair
     "Gd19f1a46": 2,  # 111,370 Blackout curtain
     "G0be9ed07": 6,  # 39,900 Modal sofa pad
     "G81ade83e": 2,  # 34,740 Denim blackout curtain
-    "G200e39a3": 4,  # 37,900 Kimchi 10kg
+    "G200e39a3": 5,  # 37,900 Kimchi 10kg
+    "G010744b7": 5,  # 30,900 HBAF nuts 50-pack
     "Gef4d3036": 3,  # 28,900 Busa apple
+    "G1831f2c0": 5,  # 12,900 Pringles assorted
     "Gdf79cd07": 4,  # 12,900 Pulmuone water 500ml 60-pack
     "G00b8acf0": 4,  # 4,900 Montbest water 2L 6-pack
 }
@@ -326,7 +328,9 @@ def plan_with_hub(
     target = target_ratio * equity
     deficit = max(0, target - stock_cost)
     if is_cash_rich and is_full_catalog:
-        if balance_now >= 10_000_000:
+        if balance_now >= 20_000_000:
+            eff_window_budget = 8_500_000
+        elif balance_now >= 10_000_000:
             eff_window_budget = MEGA_CASH_WINDOW_BUDGET
         elif balance_now >= 6_200_000:
             eff_window_budget = SUPER_CASH_WINDOW_BUDGET
@@ -343,7 +347,10 @@ def plan_with_hub(
     if deficit > 0:
         exp_skus_cap = min(120, exp_skus_cap + math.ceil(deficit / 150_000))
         exp_units_cap = min(250, exp_units_cap + math.ceil(deficit / 100_000))
-    effective_max_window = 6_500_000 if (is_live_catalog and balance_now >= 10_000_000) else MAX_WINDOW_BUDGET
+    effective_max_window = (
+        8_500_000 if (is_live_catalog and balance_now >= 20_000_000)
+        else (6_500_000 if (is_live_catalog and balance_now >= 10_000_000) else MAX_WINDOW_BUDGET)
+    )
     eff_window_budget = min(effective_max_window, max(eff_window_budget, int(deficit * 35 / 100)))
     # A policy/cash change never raises an already-started window's cap.
     eff_window_budget = min(eff_window_budget, effective_max_window,
@@ -575,7 +582,10 @@ def plan_with_hub(
             need = 0
         if need > 0:
             if lp > MAX_GOODS_STAGE3_PRICE:
-                need = 1 if held_count[sku] == 0 else 0
+                if is_live_catalog and balance_now >= 10_000_000 and sku in bestseller_caps:
+                    need = min(bestseller_caps[sku], max(0, bestseller_caps[sku] - held_count[sku]))
+                else:
+                    need = 1 if held_count[sku] == 0 else 0
             if need <= 0:
                 continue
             if kind == "food":
