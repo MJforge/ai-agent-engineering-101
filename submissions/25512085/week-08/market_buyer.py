@@ -336,12 +336,16 @@ def pick_round3_shop_and_sku(
             if order_data.get("kind") == "food" and not positive_number(sku_meta.get("list_price")):
                 continue
             list_price = int(sku_meta.get("list_price") or budget)
-            # A shop can sell a SKU if its cost (~60-70% of list_price) is <= our budget.
-            # If list_price is way above budget (e.g. > 1.55x budget), the shop's cost floor may exceed our budget.
+            # A shop can sell a SKU if its cost (~60-75% of list_price) is <= our budget.
+            # If list_price is way above budget, the shop's 75% supply cost floor may exceed our budget.
             est_cost_floor = int(list_price * 0.65)
+            wholesale_floor = int(list_price * 0.76)
             if est_cost_floor > budget:
                 # High risk of walkaway because our budget is below the shop's likely supply cost
-                feasibility_mult = 0.25
+                feasibility_mult = 0.15
+            elif wholesale_floor > budget:
+                # Budget is between 65% and 76% of list_price: only B/C grade or legacy stock can close
+                feasibility_mult = 0.45
             else:
                 feasibility_mult = 1.0
 
