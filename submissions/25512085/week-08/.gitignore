@@ -6,5 +6,8 @@ state_hub.json
 state_hub.lock
 *.tmp
 logs/*under-test*.log
+.test-deps/
+__pycache__/
+
 
 

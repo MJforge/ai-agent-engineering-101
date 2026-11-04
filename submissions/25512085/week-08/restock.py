@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from adaptive_strategy import decide_restock
+import seller_cash_policy as cash_policy
 from store import (
     ROUND_END_TS, STOP_BUYING_BEFORE_END_S, apply_ledger_rows,
     fetch_ledger_rows, fetch_own_shop_urls, fetch_public_buying_data, load_catalog, load_hub,
@@ -212,6 +213,10 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
                and 0 <= now - coverage.get("through", 0) <= 120)
     ratio, source = resolve_market_ratio(hub, ratio_observation)
     phase, endgame = endgame_phase(now)
+    growth = cash_policy.ready(hub, inv, now, inventory_fresh, phase['name'])
+    cash_policy.note_stock(hub, held, now)
+    cash_signals = {r['sku'] for r in cash_policy.sale_rows(hub) if 0 <= now-r['ts'] <= 3600}
+    cash_models = {}
     ratio = taper_ratio(ratio, phase)
     stock = cs["stock_cost_value"]
     equity = int(inv.get("balance") or 0) + stock
@@ -229,10 +234,28 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
         sales = radar.get("sku_sold_ts", {}).get(sku, [])
         grade, depth = popularity(inquiries, misses, sum(0 <= now - t <= POPULARITY_S for t in sales),
                                   hot_max_depth=phase["hot_max_depth"])
+        if growth and (grade != 'none' or sku in cash_signals):
+            model = cash_policy.forecast(hub, sku, info, catalog, now, inquiries)
+            if model['own20'] >= 2 or inquiries >= 4:
+                grade = 'hot'
+            elif model['market60'] >= 10 or model['own60'] or misses:
+                grade = 'popular'
+            elif model['market60'] >= 3:
+                grade = 'observe'
+            depth = model['depth'] if grade != 'none' else 0
+            cash_models[sku] = model
         lp, cost = int(info.get("list_price", 0)), estimated_cost(hub, sku, info)
         prices = radar.get("sku_settles", {}).get(sku, [])
         expected_price = statistics.median(prices) if prices else .95 * lp
         margin = expected_price * .97 - cost  # net expected proceeds, including settlement fee
+        if growth and sku in cash_models:
+            estimate = cash_policy.procurement(hub,sku,info,inv,max(0,depth-held[sku]),catalog,now)
+            if estimate is None:
+                margin = -math.inf
+            else:
+                cost,margin = estimate['reservation_unit_cost'],estimate['expected_unit_contribution']
+                cash_models[sku].update(estimate)
+                cash_models[sku]['score20'] = cash_models[sku]['prediction20']*margin
         reason = None
         if sku in no_rebuy or hub.get("no_rebuy_overflow"):
             reason = "no_rebuy" if sku in no_rebuy else "no_rebuy_history_full"
@@ -261,6 +284,10 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
         group.sort(key=lambda c: (-c[3], c[0]))
     restore = sum(n * c for g in ("hot", "popular") for s, n, c, m in candidates[g] if not held[s])
     calculated = max(0, int(min(cs["available_budget"], max(restore, deficit / FILL_WINDOWS), WINDOW_EQUITY_CAP * equity)))
+    if growth:
+        calculated, reserve = cash_policy.spending_budget(hub,inv,cs['cash_floor'],now)
+        cs['available_budget'] = min(cs['available_budget'],max(0,inv['balance']-reserve))
+        cs['cash_floor'] = reserve
     if phase["ratio_cap"] is not None and deficit <= 0:
         calculated = 0
     diag = {"E": equity, "R": ratio, "R_source": source, "T": target, "deficit": deficit,
@@ -269,6 +296,8 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
             "grade_budget": {"hot_popular": calculated, "observe": calculated // 2},
             "no_rebuy_new": new_no_rebuy, "no_rebuy_total": len(no_rebuy), "excluded": excluded,
             "no_demand_deferred": not covered, **endgame}
+    diag['seller_cash_policy'] = {'active':growth,'objective':'forecast own 20m sales * refund-adjusted contribution',
+                                  'models':cash_models if growth else {}}
 
     def finish(orders, reason=None):
         if reason:
@@ -293,35 +322,37 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
     planned = state.setdefault("planned_skus", {})
     grade_spent = state.setdefault("grade_reserved", {g: 0 for g in candidates})
     spent, orders = 0, []
-    for grade, group in candidates.items():
-        for sku, need, cost, margin in group:
-            if sku in planned:
-                excluded["window_duplicate"] += 1
-                continue
-            allowance = budget - spent
-            if grade == "observe":
-                allowance = min(allowance, max(0, cap // 2 - grade_spent[grade]))
-            qty = min(need, 20, max(0, allowance) // cost)
-            if not qty or len(orders) >= 10:
-                continue
-            orders.append({"sku": sku, "qty": qty})
-            planned[sku] = qty
-            spent += qty * cost
-            grade_spent[grade] += qty * cost
+    groups = [(g,c) for g,group in candidates.items() for c in group]
+    if growth:
+        orders,spent = cash_policy.allocate(groups,cash_models,held,budget,cap,grade_spent,planned)
+    for grade, candidate in ([] if growth else groups):
+        sku, need, cost, margin = candidate
+        if sku in planned:
+            excluded["window_duplicate"] += 1
+            continue
+        allowance = budget - spent
+        if grade == "observe":
+            allowance = min(allowance, max(0, cap // 2 - grade_spent[grade]))
+        qty = min(need, 20*(10-len(orders)) if growth else 20, max(0, allowance) // cost)
+        if not qty or len(orders) >= 10:
+            continue
+        remaining = qty
+        while remaining:
+            batch = min(20,remaining)
+            orders.append({"sku":sku,'qty':batch})
+            remaining -= batch
+        planned[sku] = qty
+        spent += qty * cost
+        grade_spent[grade] += qty * cost
     state["reserved"] += spent
     for grade in candidates:
         diag["grades"][grade]["reserved"] = grade_spent[grade]
     diag["grade_budget"] = {"hot_popular": cap, "observe": cap // 2}
-    # Preserve the existing optional shop promotion; it does not affect buying.
+    # Advertise only actual certified stock, using the seller's own first-quote calculation.
     last_post = int(hub.get("forum_state", {}).get("last_shop_post_ts", 0))
-    if len(active) >= 6 and now - last_post >= 330:
-        refs = (radar.get("recent_refs") or [])[-3:]
-        cats = sorted({u.get("category", "").split(">")[-1] for u in active if u.get("category")})[:5]
-        text = (f"[mjforge Fulfillment Report] Stage-{cs['stage']} inventory active ({len(active)} certified units across "
-                f"{', '.join(cats)}). All units ship with market certificate (cert=true), honest grade claims, "
-                "6h Safe-Care (안심케어) full-refund warranty on all goods (A/B can drop it for a lower price), "
-                "and instant 1-turn discount below list price.")
-        queue_forum_action(market_dir, {"post": text, "refs": refs, "as": "shop"})
+    text = cash_policy.stock_post(active,hub,catalog,now) if now-last_post >= cash_policy.config().get('forum_interval_seconds',1200) else None
+    if text:
+        queue_forum_action(market_dir, {"post": text, "refs": [], "as": "shop"})
         hub.setdefault("forum_state", {})["last_shop_post_ts"] = int(now)
     return finish(orders)
 
@@ -335,3 +366,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

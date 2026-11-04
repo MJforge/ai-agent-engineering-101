@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import seller_cash_policy as cash_policy
 import uvicorn
 from cryptography.hazmat.primitives import serialization
 from starlette.applications import Starlette
@@ -356,7 +357,8 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
     """Compute High-Anchor opening ask, Fast-Close r1_target, hard reserve floor, and warranty_hours
     for a Round 3 stock unit, with differentiated clearance logic for expiring food vs aged goods."""
     cost = int(unit.get("cost") or 100)
-    list_price = max(cost, int(unit.get("list_price") or int(cost * 1.5)))
+    # Catalog value never changes merely because wholesale cost exceeds it.
+    list_price = max(1, int(unit.get("list_price") or 1))
     kind = unit.get("kind", "goods")
     grade = str(unit.get("live_grade") or unit.get("grade") or "A")
     hours_left = unit.get("hours_left")
@@ -461,6 +463,12 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
 
         default_warranty = 0
 
+    first_quote = None
+    if clearance_factor() == 1.0:
+        first_quote = cash_policy.quote(unit,hub,load_catalog(MARKET_DIR),now)
+    if first_quote:
+        open_ask,r1_target,r2_target,hard_floor = (first_quote[k] for k in ('open_ask','r1_target','r2_target','hard_floor'))
+        break_rate = first_quote['break_rate']
     open_ask = max(open_ask, hard_floor)
     r1_target = min(open_ask, max(hard_floor, r1_target))
     r2_target = min(r1_target, max(hard_floor, r2_target))
@@ -472,7 +480,7 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
         salvage = max(1, int(cost * 0.25))
         open_ask, r1_target, r2_target, hard_floor = (
             int(salvage + (p - salvage) * f) for p in (open_ask, r1_target, r2_target, hard_floor))
-    disc_from_list = max(1, int(round((1.0 - open_ask / max(1, list_price)) * 100)))
+    disc_from_list = max(0, int(round((1.0 - open_ask / max(1, list_price)) * 100)))
     return {
         "open_ask": open_ask,
         "r1_target": r1_target,
@@ -485,6 +493,7 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
         "warranty_hours": default_warranty,
         "break_rate": break_rate,
         "disc_pct": disc_from_list,
+        "cash_first_quote": bool(first_quote),
     }
 
 
@@ -785,9 +794,11 @@ class Seller(AgentExecutor):
                     if grade in NO_CARE_GRADES:
                         care_note += (f" Without Safe-Care: {no_care_price(ask, unit['cost'], pricing['break_rate'])}"
                                       f" (no refund); say 'without care' to take that option.")
+                price_relation = (f"{list_price-ask} below catalog list" if ask < list_price else
+                                  "at catalog list" if ask == list_price else f"{ask-list_price} above catalog list")
                 opening_msg = (
                     f"{unit['name']} ({', '.join(spec_parts)}): asking price {ask} "
-                    f"({pricing['disc_pct']}% below list price {list_price}).{care_note} "
+                    f"({price_relation} {list_price}).{care_note} "
                     f"Send your offer as a number or reply {ask} for an instant Ed25519-signed receipt."
                 )
                 if is_food and required_hours is None:
@@ -798,7 +809,8 @@ class Seller(AgentExecutor):
                 record_inbound_inquiry(demand_query, matched=True, raw_text=text, sku=unit["sku"])
                 print(
                     f"[r3-quote] {unit['sku']} ({unit['name']}): cost={unit['cost']}, list={list_price}, "
-                    f"grade={grade}, ask={ask}, r1_target={r1_target}, floor={hard_floor}, warranty={warranty}h",
+                    f"grade={grade}, ask={ask}, r1_target={r1_target}, floor={hard_floor}, warranty={warranty}h, "
+                    f"task={task.id}, cash_first_quote={pricing['cash_first_quote']}",
                     flush=True,
                 )
                 # Immediate Opening Ask Lock: unit is bound to this task so concurrent buyers cannot touch it
@@ -807,6 +819,8 @@ class Seller(AgentExecutor):
                     "unit": unit,
                     "item": unit["sku"],
                     "ask": ask,
+                    "initial_ask": ask,
+                    "cash_first_quote": pricing['cash_first_quote'],
                     "r1_target": r1_target,
                     "r2_target": pricing["r2_target"],
                     "hard_floor": hard_floor,
@@ -948,6 +962,13 @@ class Seller(AgentExecutor):
                 or (deal["rounds"] == 2 and offer >= r2_target)
                 or (deal["rounds"] >= 3 and offer >= hard_floor)
             )
+            if deal.get('cash_first_quote'):
+                final_target = max(hard_floor,math.ceil(in_mode(deal['initial_ask'])*.99))
+                should_accept = offer >= final_target
+                if not should_accept and deal['rounds'] >= 2:
+                    await up.reject(say(f"Our final price is {final_target}, including the stated certificate and warranty. No deal at {offer}."))
+                    del self.open[task.id]
+                    return
 
             # Never below cost, except in the end-of-round clearance, where the floor itself goes below cost
             if should_accept and offer >= min(cost, hard_floor):
@@ -986,7 +1007,8 @@ class Seller(AgentExecutor):
                 profit_est = final_price - cost
                 print(
                     f"[r3-deal] Sold {u['sku']} ({u['name']}) unit={u['unit']} at {final_price} "
-                    f"(cost={cost}, profit=+{profit_est}, grade={live_grade}, warranty={warranty}h) in {deal['rounds']} turn(s)!",
+                    f"(cost={cost}, gross_before_refunds={profit_est}, grade={live_grade}, warranty={warranty}h, "
+                    f"task={task.id}, first_quote_accepted={final_price == deal.get('initial_ask')}) in {deal['rounds']} turn(s); receipt signed, payment not yet confirmed.",
                     flush=True,
                 )
                 # Elevate to committed lock before deleting negotiation state
@@ -1007,6 +1029,8 @@ class Seller(AgentExecutor):
             # deal["ask"] stays in Safe-Care terms; the message quotes the price for the option the buyer is on
             care_targets = (int(deal.get("r1_target") or 0), int(deal.get("r2_target") or 0), int(deal.get("hard_floor") or 0))
             step = care_targets[0] if deal["rounds"] == 1 else (care_targets[1] if deal["rounds"] == 2 else care_targets[2])
+            if deal.get('cash_first_quote'):
+                step = max(care_targets[2],math.ceil(deal['initial_ask']*.99))
             deal["ask"] = max(care_targets[2], step)
             new_ask = in_mode(deal["ask"])
 
@@ -1120,3 +1144,4 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=9999)
     args = parser.parse_args()
     uvicorn.run(build_app(args.port), host="127.0.0.1", port=args.port, log_level="warning")
+

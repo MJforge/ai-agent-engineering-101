@@ -377,6 +377,9 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
                 supplies[str(e.get("seq"))] = {"ts": float(e["ts"]), "total": math.ceil(total),
                                                "qty": data.get("qty")}
     hub["own_shop_urls"] = sorted(own_urls)
+    # Separate idempotent seller-only observations; never change the buyer's ranking state.
+    from seller_cash_policy import observe
+    observe(hub, rows, catalog, time.time(), own_urls, OWN_NAME)
 
     # Fast case-insensitive catalog lookup for canonical SKU & category
     cat_lookup: dict[str, tuple[str, str]] = {}
@@ -488,6 +491,7 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
             "expires_at": data.get("expires_at"), "shelf_hours": data.get("shelf_hours"),
             "shop": data.get("shop") or data.get("seller"),
             "order": data.get("order"), "seq": s_id,
+            "warranty_hours": data.get("warranty_hours"),
         })
         radar["sku_comparables"][canonical_sku] = observations[-50:]
 
@@ -636,3 +640,4 @@ def queue_forum_action(market_dir: Path, payload: dict[str, Any]) -> None:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
     except OSError:
         pass
+
