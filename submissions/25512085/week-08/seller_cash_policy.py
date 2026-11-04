@@ -18,6 +18,71 @@ PRIOR_BREAK = {'A': .03, 'B': .15, 'C': .35}
 MAX_BREAK_SKUS = 5000
 MAX_BREAK_PENDING = 20000
 BREAK_MATURITY_S = 6*3600
+BREAK_RETENTION_S = 8*3600
+
+
+def compact_cash_sales(hub, now):
+    """Own warranties need eight hours; other sales only feed one-hour counts.
+
+    Keep seq identities (rather than rounded minute buckets) for exact replay
+    deduplication and inclusive rolling-window boundaries.
+    """
+    state = hub.get('seller_cash', {})
+    market = state.setdefault('market_sales', {})
+    own = {}
+    for seq, row in state.get('sales', {}).items():
+        if row.get('own'):
+            if now-8*3600 <= row['ts'] <= now:
+                own[seq] = row
+                market.get(row['sku'], {}).pop(seq, None)
+        elif now-3600 <= row['ts'] <= now:
+            market.setdefault(row['sku'], {})[seq] = row['ts']
+    state['sales'] = own
+    state['market_sales'] = {sku: recent for sku, events in market.items()
+                             if (recent := {seq:ts for seq,ts in events.items()
+                                            if now-3600 <= ts <= now})}
+
+
+def compact_break_orders(hub, now, *, mature=False):
+    """Market rows are [sku, grade, ts, flags]; flags: sold=1, broken=2.
+
+    Only own sales keep named order records. Mature market sales contribute to
+    counters once, then retain only the small late-break/replay identity.
+    """
+    state = hub.get('break_observer', {})
+    market = state.setdefault('market_orders', {})
+    own = {}
+    for order, row in state.get('orders', {}).items():
+        if row.get('own'):
+            own[order] = row
+        else:
+            market[order] = [row['sku'], row['grade'], row['ts'],
+                             int(row['sold']) | (int(row['broken']) << 1)]
+    for row in (list(own.values()) + list(market.values()) if mature else ()):
+        is_own = isinstance(row, dict)
+        sku, grade, ts, sold = ((row['sku'], row['grade'], row['ts'], row['sold'])
+                                if is_own else (row[0], row[1], row[2], row[3] & 1))
+        if not sold and now-ts >= BREAK_MATURITY_S:
+            stats = hub.setdefault('break_stats' if is_own else 'market_break_stats', {})
+            stat = stats.setdefault(sku, {}).setdefault(grade, {'sold':0, 'broken':0, 'last_ts':ts})
+            stat['sold'] += 1
+            stat['last_ts'] = max(stat['last_ts'], ts)
+            if is_own:
+                row['sold'] = True
+            else:
+                row[3] |= 1
+    def bounded(rows, timestamp):
+        if len(rows) > MAX_BREAK_PENDING:
+            return dict(sorted(rows.items(), key=lambda p:timestamp(p[1]))[-MAX_BREAK_PENDING:])
+        return rows
+    state['orders'] = bounded({k:r for k,r in own.items()
+                               if not r['sold'] or now-r['ts'] <= BREAK_RETENTION_S}, lambda r:r['ts'])
+    state['market_orders'] = bounded({k:r for k,r in market.items()
+                                      if not r[3] & 1 or now-r[2] <= BREAK_RETENTION_S}, lambda r:r[2])
+    state['unmatched'] = bounded({k:t for k,t in state.get('unmatched', {}).items()
+                                  if now-t <= BREAK_RETENTION_S}, lambda t:t)
+
+
 # Pre-deployment own-shop observations, only sales aged at least six hours.
 # G07ec17d5 C and G8ec51935 C were not measured; do not invent samples.
 seed_break_stats = {
@@ -30,7 +95,7 @@ seed_break_stats = {
 def observe_break_stats(hub, rows, catalog, now, own_urls, own_name):
     """Persistent disjoint own/other-shop counts, with a separate replay cursor.
 
-    Keep order identities for seven days (late/out-of-order breaks), bounded even
+    Keep order identities for eight hours (six-hour break window plus margin), bounded even
     if the ledger is hostile. The cursor prevents replay after order eviction.
     """
     own = hub.setdefault('break_stats', {})
@@ -42,7 +107,10 @@ def observe_break_stats(hub, rows, catalog, now, own_urls, own_name):
                 own[sku] = {g: {'sold':s, 'broken':b, 'last_ts':now}
                             for g,(s,b) in grades.items()}
         state['seeded'] = True
+    if 'market_orders' not in state:
+        compact_break_orders(hub, now)
     orders = state.setdefault('orders', {})
+    market_orders = state.setdefault('market_orders', {})
     unmatched = state.setdefault('unmatched', {})
     cursor = state.get('seq', -1)
     lookup = {s.lower():s for s in catalog}
@@ -63,19 +131,30 @@ def observe_break_stats(hub, rows, catalog, now, own_urls, own_name):
         order = str(d['order'])
         if e.get('kind') == 'settle':
             sku = lookup.get(str(d.get('sku') or d.get('item') or '').lower())
-            if (order in orders or sku is None or d.get('grade') not in PRIOR_BREAK
+            if (order in orders or order in market_orders or sku is None or d.get('grade') not in PRIOR_BREAK
                     or d.get('buyer') == own_name or not number(d.get('amount')) or d['amount'] <= 0):
                 continue
             row = {'sku':sku, 'grade':d['grade'], 'ts':ts, 'sold':False,
                    'broken':False, 'own':str(d.get('shop') or d.get('seller') or '').rstrip('/') in urls}
-            orders[order] = row
+            if row['own']:
+                orders[order] = row
             if order in unmatched:
                 row['broken'] = True
                 counter(row)['broken'] += 1
                 unmatched.pop(order)
+            if not row['own']:
+                market_orders[order] = [sku, row['grade'], ts, int(row['broken']) << 1]
         elif e.get('kind') == 'broken':
             row = orders.get(order)
-            if row is None:
+            market_row = market_orders.get(order)
+            if market_row is not None:
+                if not market_row[3] & 2:
+                    market_row[3] |= 2
+                    stat = market.setdefault(market_row[0], {}).setdefault(
+                        market_row[1], {'sold':0, 'broken':0, 'last_ts':market_row[2]})
+                    stat['broken'] += 1
+                    stat['last_ts'] = max(stat['last_ts'], ts)
+            elif row is None:
                 unmatched[order] = ts
             elif not row['broken']:
                 row['broken'] = True
@@ -83,16 +162,7 @@ def observe_break_stats(hub, rows, catalog, now, own_urls, own_name):
                 stat['broken'] += 1
                 stat['last_ts'] = max(stat['last_ts'], ts)
     state['seq'] = cursor
-    for row in orders.values():
-        if not row['sold'] and now-row['ts'] >= BREAK_MATURITY_S:
-            stat = counter(row)
-            stat['sold'] += 1
-            stat['last_ts'] = max(stat['last_ts'], row['ts'])
-            row['sold'] = True
-    state['orders'] = dict(sorted(((k,r) for k,r in orders.items() if now-r['ts'] <= 7*86400),
-                                 key=lambda p:p[1]['ts'])[-MAX_BREAK_PENDING:])
-    state['unmatched'] = dict(sorted(((k,t) for k,t in unmatched.items() if now-t <= 7*86400),
-                                    key=lambda p:p[1])[-MAX_BREAK_PENDING:])
+    compact_break_orders(hub, now, mature=True)
     for stats in (own, market):
         keep = sorted(stats, key=lambda s:max((v['last_ts'] for v in stats[s].values()), default=0))[-MAX_BREAK_SKUS:]
         for sku in set(stats)-set(keep):
@@ -118,6 +188,7 @@ def observe(hub, rows, catalog, now, own_urls, own_name):
     # An older shared cursor does not prove that this new observer saw the same history.
     note_ledger_coverage({'adaptive_ledger_coverage':state.setdefault('coverage',{})},rows,now)
     sales = state.setdefault('sales', {})
+    market_sales = state.setdefault('market_sales', {})
     breaks = state.setdefault('breaks', {})
     lookup = {s.lower(): s for s in catalog}
     excluded = set(config().get('excluded_buyers', [])) | {own_name}
@@ -132,12 +203,18 @@ def observe(hub, rows, catalog, now, own_urls, own_name):
         sku = lookup.get(str(d.get('sku') or d.get('item') or '').lower())
         if sku is None:
             continue
+        is_own = str(d.get('shop') or '').rstrip('/') in own_urls
+        if not is_own:
+            if ts >= now-3600:
+                market_sales.setdefault(sku, {})[str(int(seq))] = ts
+            continue
         sales[str(int(seq))] = {'ts': ts, 'sku': sku, 'amount': d['amount'], 'grade': d.get('grade'),
                                 'warranty_hours': d.get('warranty_hours'), 'order': d.get('order'),
-                                'own': str(d.get('shop') or '').rstrip('/') in own_urls}
+                                'own': True}
     state['sales'] = dict(sorted(((s,d) for s,d in sales.items() if now-8*3600 <= d['ts'] <= now),
                                 key=lambda pair: pair[1]['ts'])[-40000:])
     state['breaks'] = {k:d for k,d in breaks.items() if now-8*3600 <= d['ts'] <= now}
+    compact_cash_sales(hub, now)
 
 
 def ready(hub, inv, now, inventory_fresh, phase):
@@ -152,7 +229,10 @@ def ready(hub, inv, now, inventory_fresh, phase):
 
 
 def sale_rows(hub):
-    return list(hub.get('seller_cash', {}).get('sales', {}).values())
+    state = hub.get('seller_cash', {})
+    return (list(state.get('sales', {}).values()) +
+            [{'sku':sku, 'ts':ts} for sku, events in state.get('market_sales', {}).items()
+             for ts in events.values()])
 
 
 def refund_probability(hub, sku, grade, catalog, now):
@@ -239,12 +319,23 @@ def note_stock(hub, held, now):
 
 def forecast(hub, sku, info, catalog, now, inquiries=0):
     p = config()
-    rows = [r for r in sale_rows(hub) if 0 <= now-r['ts'] <= 3600]
+    state = hub.get('seller_cash', {})
+    rows = [r for r in state.get('sales', {}).values() if 0 <= now-r['ts'] <= 3600]
     market = [r for r in rows if r['sku'] == sku]
     own = [r for r in market if r.get('own')]
     category = [r for r in rows if catalog.get(r['sku'],{}).get('category') == info.get('category')]
-    share = len(own)/len(market) if market else 0
-    cat_share = sum(bool(r.get('own')) for r in category)/len(category) if category else 0
+    market_count, category_count = len(market), len(category)
+    for sold_sku, events in state.get('market_sales', {}).items():
+        same_sku = sold_sku == sku
+        same_category = catalog.get(sold_sku, {}).get('category') == info.get('category')
+        if same_sku or same_category:
+            count = sum(0 <= now-ts <= 3600 for ts in events.values())
+            if same_sku:
+                market_count += count
+            if same_category:
+                category_count += count
+    share = len(own)/market_count if market_count else 0
+    cat_share = sum(bool(r.get('own')) for r in category)/category_count if category_count else 0
     target_share = min(1, max(share,cat_share,p.get('cold_start_share',.02))*p.get('share_growth_multiplier',1.5))
     own20 = sum(now-r['ts'] <= 1200 for r in own)
     # Correct only measured short gaps; a missing heartbeat never proves inventory availability.
@@ -252,12 +343,12 @@ def forecast(hub, sku, info, catalog, now, inquiries=0):
     available = sum(b['ts']-a['ts'] for a,b in zip(observations,observations[1:])
                     if 0 < b['ts']-a['ts'] <= 90 and sku in a['skus'])
     corrected = len(own)*1200/available if available >= 300 else len(own)/3
-    prediction = max(own20,len(own)/3,corrected,len(market)*target_share/3,inquiries/3)
-    if market:
-        prediction = min(prediction,max(len(market)/3,own20,inquiries/3))
+    prediction = max(own20,len(own)/3,corrected,market_count*target_share/3,inquiries/3)
+    if market_count:
+        prediction = min(prediction,max(market_count/3,own20,inquiries/3))
     minimum = p.get('minimum_proven_depth',4) if own or inquiries else p.get('minimum_new_depth',3)
     depth = min(p.get('maximum_depth',40),max(minimum,math.ceil(prediction*p.get('forecast_minutes',30)/20*p.get('target_multiplier',1.75))))
-    return {'own20':own20,'own60':len(own),'market60':len(market),'prediction20':prediction,'depth':depth,'target_share':target_share}
+    return {'own20':own20,'own60':len(own),'market60':market_count,'prediction20':prediction,'depth':depth,'target_share':target_share}
 
 
 def procurement(hub, sku, info, inv, qty, catalog, now):
@@ -296,7 +387,8 @@ def procurement(hub, sku, info, inv, qty, catalog, now):
 
 def spending_budget(hub, inv, existing_floor, now):
     p = config()
-    pending = sum(r['amount']*PRIOR_BREAK.get(r.get('grade'),.35) for r in sale_rows(hub)
+    pending = sum(r['amount']*PRIOR_BREAK.get(r.get('grade'),.35)
+                  for r in hub.get('seller_cash', {}).get('sales', {}).values()
                   if r.get('own') and 0 <= now-r['ts'] <= 6*3600 and (r.get('warranty_hours') or 0) >= 6
                   and r.get('order') not in hub.get('seller_cash',{}).get('breaks',{}))
     reserve = max(existing_floor,p.get('minimum_cash_reserve',5000000),math.ceil(pending*2))

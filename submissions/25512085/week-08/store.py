@@ -167,7 +167,27 @@ def migrate_no_rebuy(hub: dict[str, Any]) -> None:
         hub["no_rebuy_overflow"] = bool(hub.get("no_rebuy_overflow") or overflow)
 
 
-def load_hub(path: Path = STATE_FILE) -> dict[str, Any]:
+def compact_hub(hub: dict[str, Any], now: float) -> None:
+    """Lossless for current consumers: all 50 samples within their 3h window.
+
+    A smaller sample cap changes medians. Do not truncate to 15 just to meet a
+    byte target. No consumer reads shop/order/seq/shelf_hours on comparables.
+    """
+    from seller_cash_policy import compact_cash_sales, compact_break_orders, number
+    radar = hub.get('demand_radar', {})
+    fields = ('ts', 'amount', 'grade', 'expires_at', 'warranty_hours')
+    radar['sku_comparables'] = {
+        sku: kept for sku, rows in radar.get('sku_comparables', {}).items()
+        if (kept := [{k:r[k] for k in fields if k in r and r[k] is not None}
+                     for r in rows if number(r.get('ts')) and now-10800 <= r['ts'] <= now])}
+    if 'seller_cash' in hub:
+        compact_cash_sales(hub, now)
+    if 'break_observer' in hub:
+        compact_break_orders(hub, now)
+    hub['hub_compaction'] = {'version':1, 'ts':now}
+
+
+def load_hub(path: Path = STATE_FILE, *, _locked: bool = False) -> dict[str, Any]:
     """Load state_hub.json with exponential backoff retries against Windows sharing locks."""
     hub = default_hub()
     if not path.exists():
@@ -182,6 +202,14 @@ def load_hub(path: Path = STATE_FILE) -> dict[str, Any]:
                     else:
                         hub[k] = v
             migrate_no_rebuy(hub)
+            if hub.get('hub_compaction', {}).get('version') != 1:
+                if not _locked:
+                    # Re-read under lock: never overwrite a concurrent writer's
+                    # newer state with the initial, unlocked migration read.
+                    with file_lock(path):
+                        return load_hub(path, _locked=True)
+                compact_hub(hub, time.time())
+                _save_hub_unlocked(hub, path)
             return hub
         except (OSError, ValueError):
             if attempt < 4:
@@ -192,6 +220,9 @@ def load_hub(path: Path = STATE_FILE) -> dict[str, Any]:
 def _save_hub_unlocked(hub: dict[str, Any], path: Path) -> None:
     """Internal helper to write temporary JSON and replace file with retry backoff."""
     hub["updated_at"] = int(time.time())
+    # Sweep at most once per minute, not for every inquiry/save/load.
+    if time.time()-hub.get('hub_compaction', {}).get('ts', 0) >= 60:
+        compact_hub(hub, time.time())
     tmp = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         tmp.write_text(json.dumps(hub, ensure_ascii=False, separators=(',',':')), encoding="utf-8")
@@ -227,7 +258,7 @@ def save_hub(hub: dict[str, Any], path: Path = STATE_FILE) -> None:
 def mutate_hub(path: Path = STATE_FILE, timeout: float = 8.0):
     """Context manager to safely load, mutate, and save state_hub.json under an exclusive lock."""
     with file_lock(path, timeout=timeout):
-        hub = load_hub(path)
+        hub = load_hub(path, _locked=True)
         yield hub
         _save_hub_unlocked(hub, path)
 
