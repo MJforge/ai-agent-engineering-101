@@ -354,7 +354,7 @@ def no_care_price(price: int, cost: int, break_rate: float) -> int:
 
 def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) -> dict[str, Any]:
     """Compute High-Anchor opening ask, Fast-Close r1_target, hard reserve floor, and warranty_hours
-    for a Round 3 stock unit."""
+    for a Round 3 stock unit, with differentiated clearance logic for expiring food vs aged goods."""
     cost = int(unit.get("cost") or 100)
     list_price = max(cost, int(unit.get("list_price") or int(cost * 1.5)))
     kind = unit.get("kind", "goods")
@@ -362,12 +362,15 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
     hours_left = unit.get("hours_left")
     sku = str(unit.get("sku") or "")
 
+    now = time.time()
+    supp_ts = float(unit.get("supplied_at") or 0)
+    age_h = max(0.0, (now - supp_ts) / 3600.0) if supp_ts > 1_700_000_000 else 0.0
+
     market_anchor = get_sku_market_anchor(hub, sku, list_price)
 
     if kind == "goods":
-        # Non-food ("goods"): Grade is permanent (A/B/C), no expiration, 1%/day storage fee.
-        # Prices here include Safe-Care. Expected profit with it is (1 - break_rate) x price - cost, so the floor
-        # covers the expected refund plus 5% net margin: A >= cost x 1.082 (~81.2% list), B >= cost x 1.19, C >= cost x 1.62.
+        # Non-food ("goods"): Grade is permanent (A/B/C), no expiration, negligible storage fee (~10-50 KRW/day).
+        # Normal goods: Prices include Safe-Care with target margins (A >= cost x 1.082, B >= cost x 1.19, C >= cost x 1.62).
         break_rate = BREAK_RATE.get(grade, BREAK_RATE["C"])
         hard_floor = max(cost + 50, int(cost * 1.08), int(cost / (1.0 - break_rate) * 1.05))
         if grade == "A":
@@ -387,25 +390,64 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
             open_ask = max(int(cost * 1.38), int(list_price * 0.80))
             r1_target = max(hard_floor, int(list_price * 0.68))
             r2_target = max(hard_floor, int(list_price * 0.60))
+
+        # Clearance for aged non-food inventory:
+        # Non-food doesn't spoil, so NO panic dumping. But long-held units lock up cash capital:
+        # - age >= 12h: soften reserve floor down to cost * 0.95 and lower targets so bargain hunters close
+        # - 8h <= age < 12h: soften floor to cost * 1.02 (near cost/breakeven)
+        if age_h >= 12.0:
+            hard_floor = max(10, int(cost * 0.95))
+            open_ask = max(hard_floor, min(open_ask, int(list_price * 0.82)))
+            r1_target = max(hard_floor, int(round(cost * 1.02)))
+            r2_target = hard_floor
+        elif age_h >= 8.0:
+            hard_floor = max(cost + 10, int(cost * 1.02))
+            open_ask = max(hard_floor, min(open_ask, int(list_price * 0.88)))
+            r1_target = max(hard_floor, int(round(cost * 1.06)))
+            r2_target = hard_floor
+
         default_warranty = CARE_HOURS
     else:
         break_rate = 0.0
-        # Perishable/Non-perishable Food ("food"): no storage fee, markdown dynamically as shelf life drops
-        if grade == "A":
-            hard_floor = max(cost + 10, int(cost * 1.03))
-            open_ask = max(int(cost * 1.20), min(int(list_price * 0.95), max(market_anchor, int(list_price * 0.90))))
-            r1_target = max(int(cost * 1.08), int(round(cost + (open_ask - cost) * 0.42)))
-            r2_target = max(hard_floor, int(round(cost + (open_ask - cost) * 0.14)))
-        elif grade == "B":
-            hard_floor = cost
-            open_ask = max(int(cost * 1.12), int(list_price * 0.84))
-            r1_target = max(int(cost * 1.04), int(list_price * 0.76))
+        hl = float(hours_left) if hours_left is not None else float("inf")
+        # Perishable/Non-perishable Food ("food"): no storage fee, but expires (100% total loss if expired).
+        # Shelf life remaining (hours_left) drives urgency, NOT age_h!
+        if hl < 12.0:
+            # Critical urgency (< 12h remaining): salvage price floor to avoid 100% discard loss
+            hard_floor = max(10, int(cost * 0.35))
+            open_ask = max(hard_floor, int(list_price * 0.50))
+            r1_target = max(hard_floor, int(list_price * 0.42))
             r2_target = hard_floor
-        else:
-            hard_floor = max(1, int(cost * 0.78))
+        elif hl < 24.0:
+            # High urgency (< 24h remaining): aggressive markdown below wholesale cost
+            hard_floor = max(10, int(cost * 0.55))
+            open_ask = max(hard_floor, int(list_price * 0.65))
+            r1_target = max(hard_floor, int(list_price * 0.55))
+            r2_target = hard_floor
+        elif hl < 48.0 or grade == "C":
+            # Moderate urgency (< 48h remaining or Grade C quality drop): breakeven / slight discount
+            hard_floor = max(10, int(cost * 0.80 if hl < 48.0 else cost * 0.78))
             open_ask = max(hard_floor, int(list_price * 0.72))
             r1_target = max(hard_floor, int(list_price * 0.64))
             r2_target = hard_floor
+        else:
+            # Fresh Food (hours_left >= 48h): maintain standard margins
+            if grade == "A":
+                hard_floor = max(cost + 10, int(cost * 1.03))
+                open_ask = max(int(cost * 1.20), min(int(list_price * 0.95), max(market_anchor, int(list_price * 0.90))))
+                r1_target = max(int(cost * 1.08), int(round(cost + (open_ask - cost) * 0.42)))
+                r2_target = max(hard_floor, int(round(cost + (open_ask - cost) * 0.14)))
+            elif grade == "B":
+                hard_floor = cost
+                open_ask = max(int(cost * 1.12), int(list_price * 0.84))
+                r1_target = max(int(cost * 1.04), int(list_price * 0.76))
+                r2_target = hard_floor
+            else:
+                hard_floor = max(1, int(cost * 0.78))
+                open_ask = max(hard_floor, int(list_price * 0.72))
+                r1_target = max(hard_floor, int(list_price * 0.64))
+                r2_target = hard_floor
+
         default_warranty = 0
 
     open_ask = max(open_ask, hard_floor)

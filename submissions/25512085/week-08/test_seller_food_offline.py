@@ -295,6 +295,34 @@ class FoodSafetyTests(unittest.TestCase):
         receipt = self.receipt(self.turn("offer 36000"))
         self.assertEqual(receipt["warranty_hours"], 6)
 
+    def test_differentiated_clearance_food_vs_goods(self):
+        hub = {}
+        # Food (<12h): Salvage floor 35% of cost to prevent 100% expiration loss
+        crit_food = dict(cost=1000, list_price=2000, kind="food", grade="B", live_grade="B", hours_left=10.0, sku="f1")
+        crit_p = seller.compute_unit_pricing_and_terms(crit_food, hub)
+        self.assertEqual(crit_p["hard_floor"], 350)
+        self.assertEqual(crit_p["r1_target"], 840)  # max(350, 2000 * 0.42)
+
+        # Food (<24h): Urgent markdown 55% of cost
+        urg_food = dict(cost=1000, list_price=2000, kind="food", grade="B", live_grade="B", hours_left=20.0, sku="f2")
+        urg_p = seller.compute_unit_pricing_and_terms(urg_food, hub)
+        self.assertEqual(urg_p["hard_floor"], 550)
+
+        # Fresh Food (>=48h Grade A): Full margin preserved
+        fresh_food = dict(cost=1000, list_price=2000, kind="food", grade="A", live_grade="A", hours_left=100.0, sku="f3")
+        fresh_p = seller.compute_unit_pricing_and_terms(fresh_food, hub)
+        self.assertEqual(fresh_p["hard_floor"], 1030)  # cost * 1.03
+
+        # Fresh Goods (<8h): Full margin & Safe-Care reserve preserved
+        fresh_goods = dict(cost=1000, list_price=2000, kind="goods", grade="A", live_grade="A", supplied_at=self.now - 2 * 3600, sku="g1")
+        fresh_gp = seller.compute_unit_pricing_and_terms(fresh_goods, hub)
+        self.assertGreaterEqual(fresh_gp["hard_floor"], 1080)
+
+        # Aged Goods (>=12h): Floor softened to cost * 0.95 to clear idle capital without panic dumping
+        aged_goods = dict(cost=1000, list_price=2000, kind="goods", grade="A", live_grade="A", supplied_at=self.now - 14 * 3600, sku="g2")
+        aged_gp = seller.compute_unit_pricing_and_terms(aged_goods, hub)
+        self.assertEqual(aged_gp["hard_floor"], 950)  # cost * 0.95
+
     def test_memory_compile(self):
         for name in ("seller.py", Path(__file__).name):
             path = Path(__file__).with_name(name)
