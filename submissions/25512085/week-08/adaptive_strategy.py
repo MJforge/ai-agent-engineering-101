@@ -10,9 +10,9 @@ import math
 import sys
 
 INTERVAL_S = 1200
-MAX_WINDOW_BUDGET = 1_200_000
+MAX_WINDOW_BUDGET = 3_000_000
 MAX_EXPLORATION_SKUS = 60
-MAX_EXPLORATION_UNITS = 95  # Existing cash-rich cap; never raise depth.
+MAX_EXPLORATION_UNITS = 95  # Base cash-rich cap before equity-target expansion.
 MAX_FAILURE_EVENTS = 600
 
 

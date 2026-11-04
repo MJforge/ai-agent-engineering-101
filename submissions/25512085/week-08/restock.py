@@ -1,4 +1,4 @@
-"""Own-turnover restoration, then bounded assortment; persistent 200k/450k windows.
+"""Own-turnover restoration and equity-target assortment; persistent window caps.
 
 Market settlements select candidates, never purchase depth. Existing cash-floor,
 shelf-life, bankruptcy and end-of-round safeguards remain in force.
@@ -94,6 +94,7 @@ LIVE_BESTSELLER_CAPS = {
 EXPLORATION_SKUS = 35
 EXPLORATION_UNITS = 80
 EXPLORATION_PER_WINDOW = 4
+STOCK_TARGET_RATIO = 0.45
 
 
 def price_covered(info: dict[str, Any], held: set[str], catalog: dict[str, Any]) -> bool:
@@ -291,6 +292,10 @@ def plan_with_hub(
     # Failed plans stay reserved for this window. Actual successes replace, rather
     # than double-charge, those estimates; deployment's prior actual spending stays charged.
     balance_now = int(inv.get("balance") or 0)
+    stock_cost = int(cs.get("stock_cost_value", 0))
+    equity = balance_now + stock_cost
+    target = STOCK_TARGET_RATIO * equity
+    deficit = max(0, target - stock_cost)
     is_cash_rich = balance_now >= 5_500_000
     is_full_catalog = len(catalog) >= 50
     if is_cash_rich and is_full_catalog:
@@ -302,9 +307,16 @@ def plan_with_hub(
     exp_units_cap = MAX_EXPLORATION_UNITS if (is_cash_rich and is_full_catalog) else EXPLORATION_UNITS
     if is_cash_rich and is_full_catalog:
         exp_skus_cap = min(MAX_EXPLORATION_SKUS, max(exp_skus_cap, strategy.get("exploration_skus", exp_skus_cap)))
+    if deficit > 0:
+        exp_skus_cap = min(120, exp_skus_cap + math.ceil(deficit / 150_000))
+        exp_units_cap = min(250, exp_units_cap + math.ceil(deficit / 100_000))
+    eff_window_budget = min(MAX_WINDOW_BUDGET, max(eff_window_budget, int(deficit * 35 / 100)))
     # A policy/cash change never raises an already-started window's cap.
     eff_window_budget = min(eff_window_budget, MAX_WINDOW_BUDGET,
                             budget_state.setdefault("window_cap", eff_window_budget))
+    print(f"[restock] equity={equity} target={target:.0f} stock_cost={stock_cost} "
+          f"deficit={deficit:.0f} sku_cap={exp_skus_cap} units_cap={exp_units_cap} "
+          f"window_cap={eff_window_budget}", file=sys.stderr, flush=True)
     # Core restoration is visited first. Maintain/expand retain the old residual
     # budget (including a single high-price exploratory unit); recover alone halves it.
     exploration_cap = int(eff_window_budget * max(.5, min(1., strategy.get("exploration_factor", 1.))))
@@ -471,7 +483,13 @@ def plan_with_hub(
             is_live_catalog and is_cash_rich and sku in LIVE_BESTSELLER_CAPS
             and (sku in proven or sku in missed_skus_1h or count > 0 or sku_market_recent.get(sku, 0) >= 2)
         )
-        if is_live_bestseller:
+        if deficit > 0 and sku in proven:
+            target_depth = max(3, LIVE_BESTSELLER_CAPS.get(sku, 0))
+            need = max(0, target_depth - held_count[sku])
+        elif held_count[sku] and sku not in proven:
+            # Market popularity alone never justifies depth, even for bestsellers.
+            need = 0
+        elif is_live_bestseller:
             target_depth = min(cap, 2 if lp >= 250_000 else 3)
             need = min(2, max(0, target_depth - held_count[sku]))
         elif held_count[sku]:
@@ -490,6 +508,8 @@ def plan_with_hub(
         else:
             need = 0
         if need > 0:
+            if kind == "food":
+                need = min(need, max(0, MAX_ACTIVE_FOOD_UNITS - held_food_units))
             experiment = sku not in active_caps and sku not in proven and sku not in missed_skus_1h
             if experiment and (
                     len(held_skus) >= exp_skus_cap or projected_units >= exp_units_cap
