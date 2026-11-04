@@ -77,6 +77,20 @@ HIGH_VALUE_CAPS = {
     "Ge62449c9": 3,  # 87,900 Hotel comforter (#5 market revenue SKU)
     "G200e39a3": 3,  # 37,900 Kimchi 10kg (#6 market revenue SKU)
 }
+LIVE_BESTSELLER_CAPS = {
+    "G1515d951": 3,  # 423,810 Queen hybrid mattress
+    "G07ec17d5": 4,  # 279,000 SS hybrid spring mattress
+    "G2cb8041b": 3,  # 296,000 Office mesh chair
+    "G5cd4ffbc": 3,  # 199,000 Microfiber comforter set
+    "Ge62449c9": 4,  # 87,900 Hotel comforter
+    "G75f11c19": 2,  # 122,900 Modal comforter pad set Q
+    "G6f632932": 2,  # 116,000 Wood dining chair
+    "Gd19f1a46": 2,  # 111,370 Blackout curtain
+    "G0be9ed07": 4,  # 39,900 Modal sofa pad
+    "G81ade83e": 2,  # 34,740 Denim blackout curtain
+    "G200e39a3": 3,  # 37,900 Kimchi 10kg
+    "Gef4d3036": 3,  # 28,900 Busa apple
+}
 EXPLORATION_SKUS = 35
 EXPLORATION_UNITS = 80
 EXPLORATION_PER_WINDOW = 4
@@ -405,7 +419,13 @@ def plan_with_hub(
         return qty
 
     # Known small baselines are targets, never orders to purchase regardless of stock.
-    active_caps = {**TARGET_CAPS, **HIGH_VALUE_CAPS} if is_cash_rich else TARGET_CAPS
+    is_live_catalog = len(catalog) >= 500
+    if is_cash_rich and is_live_catalog:
+        active_caps = {**TARGET_CAPS, **HIGH_VALUE_CAPS, **LIVE_BESTSELLER_CAPS}
+    elif is_cash_rich:
+        active_caps = {**TARGET_CAPS, **HIGH_VALUE_CAPS}
+    else:
+        active_caps = TARGET_CAPS
     hot_market_skus = [s for s, n in sku_market_recent.items()
                        if is_cash_rich and n >= 2
                        and catalog.get(s, {}).get("kind", "goods") == "goods"
@@ -414,16 +434,17 @@ def plan_with_hub(
         set(active_caps) | set(proven) | set(missed_skus_1h) | set(sku_recent) | set(hot_market_skus),
         key=lambda s: (
             s not in proven and s not in missed_skus_1h and s not in active_caps,
-            held_count[s] > 0,
+            held_count[s] > 0 and not (is_live_catalog and s in LIVE_BESTSELLER_CAPS and held_count[s] < 2 and (s in proven or sku_market_recent.get(s, 0) >= 2)),
             catalog.get(s, {}).get("kind", "goods") == "food",
             not (s in proven or s in missed_skus_1h or (s in active_caps and sku_market_recent.get(s, 0) >= 2)),
+            -(1 if (is_live_catalog and s in LIVE_BESTSELLER_CAPS and sku_market_recent.get(s, 0) >= 2) else 0),
             -missed_skus_1h.get(s, 0),
             -sku_recent.get(s, 0),
             -sku_market_recent.get(s, 0) * int(catalog.get(s, {}).get("list_price", 0)),
             s,
         ),
     )
-    core_limit = min(tick_budget, max(0, int(eff_window_budget * .6) - used))
+    core_limit = tick_budget if (is_cash_rich and is_live_catalog) else min(tick_budget, max(0, int(eff_window_budget * .6) - used))
     high_unit_allowed = not budget_state.get("high_unit_allowance", False)
 
     def eligible(info: dict[str, Any], own: bool = False) -> bool:
@@ -445,8 +466,15 @@ def plan_with_hub(
         lp = int(info.get("list_price", 0))
         if not eligible(info, sku in proven or sku in missed_skus_1h):
             continue
-        cap = min(active_caps.get(sku, 3 if kind == "goods" else 4), 3 if kind == "goods" else 4)
-        if held_count[sku]:
+        cap = min(active_caps.get(sku, 3 if kind == "goods" else 4), 4)
+        is_live_bestseller = (
+            is_live_catalog and is_cash_rich and sku in LIVE_BESTSELLER_CAPS
+            and (sku in proven or sku in missed_skus_1h or count > 0 or sku_market_recent.get(sku, 0) >= 2)
+        )
+        if is_live_bestseller:
+            target_depth = min(cap, 2 if lp >= 250_000 else 3)
+            need = min(2, max(0, target_depth - held_count[sku]))
+        elif held_count[sku]:
             # Market popularity or rich cash never justifies topping up stocked SKUs.
             need = min(cap, math.ceil(count * 1.25)) - held_count[sku] if count > held_count[sku] else 0
         elif lp >= MIN_FOOD_LIST_PRICE and (kind == "goods" or (info.get("shelf_hours") or 0) >= 96):
@@ -514,6 +542,8 @@ def plan_with_hub(
                 or len(held_skus) >= exp_skus_cap or projected_units >= exp_units_cap):
             break
         if cat in expanded:
+            continue
+        if is_live_catalog and len(held_skus) >= 32 and demand_scores.get(cat, 0) < 2.0:
             continue
         if is_cash_rich and is_full_catalog and demand_scores.get(cat, 0) <= 0 and not cat_has_high_goods.get(cat, False):
             continue
