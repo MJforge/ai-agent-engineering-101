@@ -360,10 +360,15 @@ def pick_round3_shop_and_sku(
                 est_pay = min(budget, max(est_cost_floor, int(list_price * 0.80)))
             est_surplus = max(500, list_price - est_pay)
             # Combined utility: expected surplus * feasibility * trust weight
+            # Give an extra preference to market bestsellers with proven trading liquidity
+            bestseller_boost = 1.35 if sku in (
+                "G1515d951", "G07ec17d5", "G8ec51935", "G03d0199f",
+                "G2cb8041b", "G5cd4ffbc", "Ge62449c9", "G75f11c19", "G0be9ed07", "G200e39a3"
+            ) else 1.0
             trust_factor = max(0.5, min(1.4, (c["score"] / 4.2) - div_pen))
             if int(c.get("deals") or 0) >= 20:
                 trust_factor *= 1.15
-            utility = est_surplus * feasibility_mult * trust_factor
+            utility = est_surplus * feasibility_mult * trust_factor * bestseller_boost
             best_candidates.append((utility, c, {"sku": sku, "name": off.get("name", sku), "list_price": list_price, "est_cost": est_cost_floor}))
 
     best_candidates = filter_candidates(best_candidates, hub, now_ts)
