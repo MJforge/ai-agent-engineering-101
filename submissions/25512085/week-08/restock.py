@@ -223,6 +223,9 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
     target = ratio * equity
     deficit = max(0, target - stock)
     excluded = collections.Counter()
+    break_models = {}
+    break_penalized = 0
+    negative_combinations = 0
     candidates = {g: [] for g in ("hot", "popular", "observe")}
     storage = float(inv.get("storage_per_day", .01))
     for sku, info in catalog.items():
@@ -248,8 +251,12 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
         prices = radar.get("sku_settles", {}).get(sku, [])
         expected_price = statistics.median(prices) if prices else .95 * lp
         margin = expected_price * .97 - cost  # net expected proceeds, including settlement fee
+        estimate = cash_policy.procurement(hub,sku,info,inv,max(0,depth-held[sku]),catalog,now)
+        if estimate is not None:
+            break_models[sku] = estimate
+            negative_combinations += len(estimate['negative_grades'])
+            break_penalized += int(estimate['break_penalty'])
         if growth and sku in cash_models:
-            estimate = cash_policy.procurement(hub,sku,info,inv,max(0,depth-held[sku]),catalog,now)
             if estimate is None:
                 margin = -math.inf
             else:
@@ -268,6 +275,10 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
             reason = "endgame_grade"
         elif lp <= 0:
             reason = "invalid_price"
+        elif estimate is None or estimate['expected_unit_contribution'] < 0:
+            # Supply accepts SKU/qty only: reject negative random-grade mixtures,
+            # not individual grades which we cannot select at purchase time.
+            reason = "break_expected_loss"
         elif (info.get("kind") == "food" and grade != "hot"
               and (not MIN_FOOD_LIST_PRICE <= lp <= MAX_FOOD_LIST_PRICE
                     or (not held[sku] and (info.get("shelf_hours") or 0) < FOOD_MIN_SHELF_HOURS))):
@@ -281,7 +292,7 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
         else:
             candidates[grade].append((sku, depth - held[sku], cost, margin))
     for group in candidates.values():
-        group.sort(key=lambda c: (-c[3], c[0]))
+        group.sort(key=lambda c: (break_models.get(c[0],{}).get('break_penalty',False), -c[3], c[0]))
     restore = sum(n * c for g in ("hot", "popular") for s, n, c, m in candidates[g] if not held[s])
     calculated = max(0, int(min(cs["available_budget"], max(restore, deficit / FILL_WINDOWS), WINDOW_EQUITY_CAP * equity)))
     if growth:
@@ -297,7 +308,12 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
             "no_rebuy_new": new_no_rebuy, "no_rebuy_total": len(no_rebuy), "excluded": excluded,
             "no_demand_deferred": not covered, **endgame}
     diag['seller_cash_policy'] = {'active':growth,'objective':'forecast own 20m sales * refund-adjusted contribution',
-                                  'models':cash_models if growth else {}}
+                                   'models':cash_models if growth else {}}
+    diag['break_rate'] = {
+        'top': [{'sku':s, 'rates':m['break_rates'], 'negative_grades':m['negative_grades']}
+                for s,m in sorted(break_models.items(), key=lambda p:(-max(p[1]['break_rates'].values()),p[0]))[:5]],
+        'excluded':excluded['break_expected_loss'], 'penalized':break_penalized,
+        'negative_combinations':negative_combinations, 'grade_selectable':False}
 
     def finish(orders, reason=None):
         if inventory_fresh:

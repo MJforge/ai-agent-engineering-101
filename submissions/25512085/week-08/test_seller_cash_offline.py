@@ -28,10 +28,11 @@ class CashMathTests(unittest.TestCase):
         self.assertTrue(self.hub['seller_cash']['sales']['1']['own'])
 
     def test_only_mature_sales_estimate_breakage(self):
-        self.hub['seller_cash']={'sales':{'old':sale('G00000001',NOW-7*3600,order='old'),
-                                          'new':sale('G00000001',NOW-60,order='new')},
-                                 'breaks':{'new':{'ts':NOW}}}
-        self.assertAlmostEqual(cash.refund_probability(self.hub,'G00000001','A',self.catalog,NOW),.6/21)
+        rows=[{'round':3,'kind':'settle','seq':i,'ts':ts,
+               'data':{'sku':'G00000001','amount':80000,'grade':'A','order':str(i),'shop':'other'}}
+              for i,ts in [(1,NOW-7*3600),(2,NOW-60)]]
+        cash.observe(self.hub,rows,self.catalog,NOW,set(),'mjforge')
+        self.assertAlmostEqual(cash.refund_probability(self.hub,'G00000001','A',self.catalog,NOW),.6/20.5)
 
     def test_huge_market_is_not_assigned_to_our_shop(self):
         self.hub['seller_cash']={'sales':{str(i):sale('G00000001',NOW-i) for i in range(800)}}

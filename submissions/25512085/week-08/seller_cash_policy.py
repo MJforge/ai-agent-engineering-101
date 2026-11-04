@@ -15,6 +15,88 @@ from adaptive_strategy import note_ledger_coverage
 
 CONFIG_PATH = Path(__file__).with_name('seller_cash_policy.json')
 PRIOR_BREAK = {'A': .03, 'B': .15, 'C': .35}
+MAX_BREAK_SKUS = 5000
+MAX_BREAK_PENDING = 20000
+BREAK_MATURITY_S = 6*3600
+# Pre-deployment own-shop observations, only sales aged at least six hours.
+# G07ec17d5 C and G8ec51935 C were not measured; do not invent samples.
+seed_break_stats = {
+    'G1515d951': {'A': (110,9), 'B': (32,8), 'C': (21,5)},
+    'G8ec51935': {'A': (40,4), 'B': (8,3)},
+    'G07ec17d5': {'A': (96,2), 'B': (27,2)},
+}
+
+
+def observe_break_stats(hub, rows, catalog, now, own_urls, own_name):
+    """Persistent disjoint own/other-shop counts, with a separate replay cursor.
+
+    Keep order identities for seven days (late/out-of-order breaks), bounded even
+    if the ledger is hostile. The cursor prevents replay after order eviction.
+    """
+    own = hub.setdefault('break_stats', {})
+    market = hub.setdefault('market_break_stats', {})
+    state = hub.setdefault('break_observer', {})
+    if not state.get('seeded'):
+        for sku, grades in seed_break_stats.items():
+            if sku not in own:
+                own[sku] = {g: {'sold':s, 'broken':b, 'last_ts':now}
+                            for g,(s,b) in grades.items()}
+        state['seeded'] = True
+    orders = state.setdefault('orders', {})
+    unmatched = state.setdefault('unmatched', {})
+    cursor = state.get('seq', -1)
+    lookup = {s.lower():s for s in catalog}
+    urls = {str(u).rstrip('/') for u in own_urls}
+
+    def counter(row):
+        stats = own if row['own'] else market
+        return stats.setdefault(row['sku'], {}).setdefault(
+            row['grade'], {'sold':0, 'broken':0, 'last_ts':row['ts']})
+
+    for e in sorted((r for r in rows if number(r.get('seq'))), key=lambda r:r['seq']):
+        seq, ts, d = e['seq'], e.get('ts'), e.get('data') or {}
+        if seq <= cursor or not number(ts) or ts > now:
+            continue
+        cursor = seq
+        if e.get('round') != 3 or not d.get('order'):
+            continue
+        order = str(d['order'])
+        if e.get('kind') == 'settle':
+            sku = lookup.get(str(d.get('sku') or d.get('item') or '').lower())
+            if (order in orders or sku is None or d.get('grade') not in PRIOR_BREAK
+                    or d.get('buyer') == own_name or not number(d.get('amount')) or d['amount'] <= 0):
+                continue
+            row = {'sku':sku, 'grade':d['grade'], 'ts':ts, 'sold':False,
+                   'broken':False, 'own':str(d.get('shop') or d.get('seller') or '').rstrip('/') in urls}
+            orders[order] = row
+            if order in unmatched:
+                row['broken'] = True
+                counter(row)['broken'] += 1
+                unmatched.pop(order)
+        elif e.get('kind') == 'broken':
+            row = orders.get(order)
+            if row is None:
+                unmatched[order] = ts
+            elif not row['broken']:
+                row['broken'] = True
+                stat = counter(row)
+                stat['broken'] += 1
+                stat['last_ts'] = max(stat['last_ts'], ts)
+    state['seq'] = cursor
+    for row in orders.values():
+        if not row['sold'] and now-row['ts'] >= BREAK_MATURITY_S:
+            stat = counter(row)
+            stat['sold'] += 1
+            stat['last_ts'] = max(stat['last_ts'], row['ts'])
+            row['sold'] = True
+    state['orders'] = dict(sorted(((k,r) for k,r in orders.items() if now-r['ts'] <= 7*86400),
+                                 key=lambda p:p[1]['ts'])[-MAX_BREAK_PENDING:])
+    state['unmatched'] = dict(sorted(((k,t) for k,t in unmatched.items() if now-t <= 7*86400),
+                                    key=lambda p:p[1])[-MAX_BREAK_PENDING:])
+    for stats in (own, market):
+        keep = sorted(stats, key=lambda s:max((v['last_ts'] for v in stats[s].values()), default=0))[-MAX_BREAK_SKUS:]
+        for sku in set(stats)-set(keep):
+            del stats[sku]
 
 
 def config():
@@ -31,6 +113,7 @@ def number(x):
 
 def observe(hub, rows, catalog, now, own_urls, own_name):
     """Idempotent eight-hour sale/break observations shared under the existing lock."""
+    observe_break_stats(hub, rows, catalog, now, own_urls, own_name)
     state = hub.setdefault('seller_cash', {})
     # An older shared cursor does not prove that this new observer saw the same history.
     note_ledger_coverage({'adaptive_ledger_coverage':state.setdefault('coverage',{})},rows,now)
@@ -73,16 +156,13 @@ def sale_rows(hub):
 
 
 def refund_probability(hub, sku, grade, catalog, now):
+    if not warranty_hours(grade, catalog.get(sku, {}).get('kind','goods')):
+        return 0
     prior = PRIOR_BREAK.get(grade, .35)
-    old = [r for r in sale_rows(hub) if now-8*3600 <= r['ts'] <= now-6*3600 and r.get('grade') == grade]
-    own_sku = [r for r in old if r['sku'] == sku]
-    if len(own_sku) >= 30:
-        old = own_sku
-    else:
-        cat = catalog.get(sku, {}).get('category')
-        old = [r for r in old if catalog.get(r['sku'], {}).get('category') == cat]
-    broken = hub.get('seller_cash', {}).get('breaks', {})
-    return (sum(r.get('order') in broken for r in old) + 20*prior)/(len(old)+20)
+    own = hub.get('break_stats', {}).get(sku, {}).get(grade, {})
+    market = hub.get('market_break_stats', {}).get(sku, {}).get(grade, {})
+    q = (own.get('broken',0)+.5*market.get('broken',0)+20*prior)/(own.get('sold',0)+.5*market.get('sold',0)+20)
+    return min(1, max(prior if grade == 'B' else 0, q))
 
 
 def warranty_hours(grade, kind='goods'):
@@ -193,6 +273,7 @@ def procurement(hub, sku, info, inv, qty, catalog, now):
         return None
     weights = {'A':.7,'B':.2,'C':.1} if info.get('kind') == 'goods' else {'A':.25,'B':.5,'C':.25}
     expected = 0
+    contributions, rates = {}, {}
     for grade,weight in weights.items():
         price = reference_price(hub,sku,grade,now,info.get('kind','goods'))
         if price is None:
@@ -202,8 +283,13 @@ def procurement(hub, sku, info, inv, qty, catalog, now):
         if grade=='B' and q:
             q=max(PRIOR_BREAK['B'],q)
         cost = lp*{'A':.65,'B':.5,'C':.35}[grade]*factor
-        expected += weight*(price*(1-q)-cost)
+        contributions[grade] = price*(1-q)-cost
+        rates[grade] = q
+        expected += weight*contributions[grade]
     return {'expected_unit_contribution':expected,'projected_surge':factor,
+            'grade_contributions':contributions, 'break_rates':rates,
+            'negative_grades':[g for g,v in contributions.items() if v < 0],
+            'break_penalty':rates['A'] >= .08 and contributions['B'] < 0,
             # Other shops can buy between planning and supply. Reserve the published global maximum.
             'reservation_unit_cost':math.ceil(lp*.75*1.5)}
 
@@ -221,9 +307,11 @@ def allocate(groups, models, held, budget, cap, grade_spent, previous):
     """Restore proven stockouts first, then fund the highest total-cash forecasts."""
     funded = collections.Counter()
     spent = 0
-    priority = sorted(groups,key=lambda row:(-models.get(row[1][0],{}).get('score20',0),row[1][0]))
+    priority = sorted(groups,key=lambda row:(models.get(row[1][0],{}).get('break_penalty',False),
+                                            -models.get(row[1][0],{}).get('score20',0),row[1][0]))
     restoration = [(g,(s,min(3,n),c,m)) for g,(s,n,c,m) in priority
-                   if not held[s] and models.get(s,{}).get('own60',0)>0]
+                   if not held[s] and models.get(s,{}).get('own60',0)>0
+                   and not models.get(s,{}).get('break_penalty',False)]
     for grade,(sku,need,cost,margin) in restoration+priority:
         if sku in previous or cost <= 0:
             continue
