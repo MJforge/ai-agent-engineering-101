@@ -80,11 +80,11 @@ class AssortmentTests(unittest.TestCase):
         before = copy.deepcopy(self.inv)
         plan = self.plan()
         buys = {b["sku"]: b["qty"] for b in plan["buy"]}
-        self.assertEqual(buys["Ge62449c9"], 1)
+        self.assertEqual(buys["Ge62449c9"], 4)  # Explicit live depth overrides the equity default of 3.
         self.assertEqual(buys["G07ec17d5"], 1)
         self.assertTrue(any(s.startswith("new") for s in buys))
         self.assertFalse(set(buys) & {"water", "rice", "kimchi", "held"})
-        self.assertLessEqual(self.cost(plan), 450_000)
+        self.assertLessEqual(self.cost(plan), self.state()["window_cap"])
         self.assertEqual(self.inv, before)
 
     def test_423810_allowance_leaves_breadth_budget(self):
@@ -116,7 +116,7 @@ class AssortmentTests(unittest.TestCase):
             self.item(s, s, kind=kind)
             self.stock(s)
             self.own(s, 1 if s == "equal" else 30)
-        self.assertEqual(self.buys(), {"food": 3, "goods": 2})
+        self.assertEqual(self.buys(), {"food": 2, "goods": 2, "equal": 2})
 
     def test_whitelist_no_signal_does_not_buy(self):
         for s in restock.HIGH_VALUE_CAPS:
@@ -126,10 +126,10 @@ class AssortmentTests(unittest.TestCase):
     def test_historical_own_core_survives_tail_pruning(self):
         self.item("Ge62449c9", "comforter", 87_900)
         self.own("Ge62449c9", age=10_000)
-        self.assertEqual(self.buys(), {"Ge62449c9": 1})
+        self.assertEqual(self.buys(), {"Ge62449c9": 4})
         self.assertIn("Ge62449c9", self.hub["restock_proven_skus"])
         self.inv["restock"] = {"opens_at": NOW-10, "closes_at": NOW+170}
-        self.assertEqual(self.buys(), {"Ge62449c9": 1})
+        self.assertEqual(self.buys(), {"Ge62449c9": 4})
 
     def test_recent_market_two_required_for_core(self):
         self.item("G07ec17d5", "mattress", 279_000)
@@ -161,6 +161,9 @@ class AssortmentTests(unittest.TestCase):
     def test_unit_soft_cap_applies_during_plan(self):
         self.item("held", "held", kind="food")
         self.stock("held", 79)
+        # No equity deficit: the original 80-unit soft cap must still stop breadth.
+        for unit in self.inv["units"]:
+            unit["cost"] = 70_000
         for i in range(6):
             self.item(str(i), str(i))
         self.assertEqual(len(self.plan()["buy"]), 1)
@@ -222,6 +225,9 @@ class AssortmentTests(unittest.TestCase):
                 for i in range(35 if mode == "sku" else 1):
                     self.item(str(i), str(i))
                     self.stock(str(i), 1 if mode == "sku" else 80)
+                # Isolate base-cap behavior, rather than equity-funded expansion.
+                for unit in self.inv["units"]:
+                    unit["cost"] = 150_000 if mode == "sku" else 65_000
                 self.item("Ge62449c9", "core", 87_900)
                 self.own("Ge62449c9", age=3600)
                 self.item("new", "new")
@@ -275,14 +281,14 @@ class AssortmentTests(unittest.TestCase):
         for i in range(35):
             price = 180_000 if i < 10 else 30_000
             self.item(f"G{i:08d}", f"goodscat{i}", price=price, kind="goods")
-        self.own("G00000000", n=4, age=300)  # sold-out proven goods -> qty=1 only
+        self.own("G00000000", n=4, age=300)  # Equity deficit restores proven goods to depth 3.
         self.hub["demand_radar"]["missed_ts"] = {"g00000001": [NOW - 600]}  # 1h missed SKU
         plan = self.plan()
         buys = {b["sku"]: b["qty"] for b in plan["buy"]}
-        self.assertEqual(buys.get("G00000000"), 1)
+        self.assertEqual(buys.get("G00000000"), 3)
         self.assertEqual(buys.get("G00000001"), 1)
         self.assertNotIn("food1", buys)
-        self.assertTrue(all(q == 1 for q in buys.values()))
+        self.assertTrue(all(q == 1 for s, q in buys.items() if s != "G00000000"))
         self.assertTrue(all(self.catalog[s]["kind"] == "goods" for s in buys))
         expanded_Auto = [s for s in buys if s not in ("G00000000", "G00000001")]
         self.assertTrue(all(self.catalog[s]["list_price"] >= 100_000 for s in expanded_Auto))

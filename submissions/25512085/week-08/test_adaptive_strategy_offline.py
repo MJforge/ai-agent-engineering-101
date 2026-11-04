@@ -95,7 +95,8 @@ class AdaptiveRestockTests(unittest.TestCase):
         catalog = self.catalog()
         for info in catalog.values():
             info["list_price"] = 100_000  # Existing full-catalog filter requires demand or high goods.
-        self.inv["units"] = [{"sku": f"sku{i}", "grade": "A", "cost": 10_000,
+        # Fully funded stock keeps deficit=0, isolating the adaptive base cap of 60.
+        self.inv["units"] = [{"sku": f"sku{i}", "grade": "A", "cost": 120_000,
                                "supplied_at": NOW-100} for i in range(55)]
         plan = self.plan(catalog)
         self.assertEqual(len(plan["buy"]), 5)
@@ -113,14 +114,14 @@ class AdaptiveRestockTests(unittest.TestCase):
         baseline_hub = copy.deepcopy(self.hub)
         plan = self.plan(catalog)
         self.assertEqual(self.hub["adaptive_strategy"]["mode"], "recover")
-        self.assertIn({"sku": "core", "qty": 1}, plan["buy"])
+        self.assertIn({"sku": "core", "qty": 3}, plan["buy"])
         window = next(iter(self.hub["restock_windows"].values()))
         self.assertLessEqual(window["exploration_reserved"], 600_000)
         recover_buys = len(plan["buy"])
         self.hub = baseline_hub
         self.inv["units"][0]["supplied_at"] = NOW-100
         normal = self.plan(catalog)
-        self.assertIn({"sku": "core", "qty": 1}, normal["buy"])
+        self.assertIn({"sku": "core", "qty": 3}, normal["buy"])
         self.assertGreater(len(normal["buy"]), recover_buys)
 
     def test_cash_floor_and_absolute_window_cap(self):
