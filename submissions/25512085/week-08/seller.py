@@ -1111,10 +1111,11 @@ def build_app(port: int):
         name=SHOP_NAME,
         description=(
             "mjforge Certified Fulfillment Shop: Every unit ships with the market-signed certificate (cert=true), "
-            "100% honest grade claims (A/B/C), up to 6h full-refund warranty on goods, and instant 1-turn discount "
-            "below list price. Ed25519-signed receipts. Ask for a SKU or category: 'I want to buy <name> (<sku>)'."
+            "honest current grades (A/B/C), and a stated warranty on goods. First quotes reflect certified grade, "
+            "actual unit cost and comparable trades; prices can exceed catalog list when costs require it. "
+            "Ed25519-signed receipts. Ask for a SKU or category: 'I want to buy <name> (<sku>)'."
         ),
-        version="3.0.0",
+        version="3.1.0",
         default_input_modes=["text/plain"],
         default_output_modes=["application/json", "text/plain"],
         capabilities=AgentCapabilities(streaming=False),
@@ -1128,7 +1129,7 @@ def build_app(port: int):
                 description=(
                     "Ask for a SKU, product name, or category, then send an offer price as a number. "
                     "Replies quote sku, unit, honest grade, certificate (cert=true), shelf life, warranty_hours, "
-                    "list price, and discounted ask; closes fast in 1-2 turns with an Ed25519-signed receipt."
+                    "catalog list price, and the actual ask. Send the quoted price for an immediate Ed25519-signed receipt."
                 ),
                 tags=["shopping", "negotiation", "certified", "warranty"],
                 examples=["I want to buy <name> (<sku>)", "15000"],
