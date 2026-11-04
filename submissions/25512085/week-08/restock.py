@@ -63,7 +63,7 @@ WINDOW_BUDGET = 200_000
 PROFITABLE_WINDOW_BUDGET = 450_000  # Base cash-rich window cap; scales up to 900k-1.2M on full live catalog
 HIGH_CASH_WINDOW_BUDGET = 900_000
 SUPER_CASH_WINDOW_BUDGET = 1_200_000
-MEGA_CASH_WINDOW_BUDGET = 3_500_000
+MEGA_CASH_WINDOW_BUDGET = 6_000_000
 MISSED_RECENT_S = 3600              # 1-hour window for out-of-stock missed inquiries
 MAX_ACTIVE_FOOD_UNITS = 20          # Tight food inventory cap: stop buying food when >= 20 food units are held
 HIGH_GOODS_MIN_PRICE = 100_000      # Prioritize >= 100,000 KRW non-food categories for new assortment expansion
@@ -317,10 +317,12 @@ def plan_with_hub(
     balance_now = int(inv.get("balance") or 0)
     stock_cost = int(cs.get("stock_cost_value", 0))
     equity = balance_now + stock_cost
-    target = STOCK_TARGET_RATIO * equity
-    deficit = max(0, target - stock_cost)
     is_cash_rich = balance_now >= 5_500_000
     is_full_catalog = len(catalog) >= 50
+    is_live_catalog = len(catalog) >= 500
+    target_ratio = 0.75 if (is_live_catalog and balance_now >= 10_000_000) else STOCK_TARGET_RATIO
+    target = target_ratio * equity
+    deficit = max(0, target - stock_cost)
     if is_cash_rich and is_full_catalog:
         if balance_now >= 10_000_000:
             eff_window_budget = MEGA_CASH_WINDOW_BUDGET
@@ -339,9 +341,10 @@ def plan_with_hub(
     if deficit > 0:
         exp_skus_cap = min(120, exp_skus_cap + math.ceil(deficit / 150_000))
         exp_units_cap = min(250, exp_units_cap + math.ceil(deficit / 100_000))
-    eff_window_budget = min(MAX_WINDOW_BUDGET, max(eff_window_budget, int(deficit * 35 / 100)))
+    effective_max_window = 6_500_000 if (is_live_catalog and balance_now >= 10_000_000) else MAX_WINDOW_BUDGET
+    eff_window_budget = min(effective_max_window, max(eff_window_budget, int(deficit * 35 / 100)))
     # A policy/cash change never raises an already-started window's cap.
-    eff_window_budget = min(eff_window_budget, MAX_WINDOW_BUDGET,
+    eff_window_budget = min(eff_window_budget, effective_max_window,
                             budget_state.setdefault("window_cap", eff_window_budget))
     print(f"[restock] equity={equity} target={target:.0f} stock_cost={stock_cost} "
           f"deficit={deficit:.0f} sku_cap={exp_skus_cap} units_cap={exp_units_cap} "
@@ -497,7 +500,8 @@ def plan_with_hub(
             held_count[s] > 0 and not (is_live_catalog and s in bestseller_caps and held_count[s] < bestseller_caps.get(s, 2) and (s in proven or sku_market_recent.get(s, 0) >= 2)),
             catalog.get(s, {}).get("kind", "goods") == "food",
             not (s in proven or s in missed_skus_1h or (s in active_caps and sku_market_recent.get(s, 0) >= 2)),
-            -(1 if (is_live_catalog and s in bestseller_caps and sku_market_recent.get(s, 0) >= 2) else 0),
+            -(2 if (is_live_catalog and balance_now >= 10_000_000 and s in ("G8ec51935", "G00327e80", "G03d0199f") and held_count[s] < bestseller_caps.get(s, 2))
+              else (1 if (is_live_catalog and s in bestseller_caps and sku_market_recent.get(s, 0) >= 2) else 0)),
             -missed_skus_1h.get(s, 0),
             -sku_recent.get(s, 0),
             -sku_market_recent.get(s, 0) * int(catalog.get(s, {}).get("list_price", 0)),
@@ -536,7 +540,8 @@ def plan_with_hub(
             cap = min(active_caps.get(sku, 3 if kind == "goods" else 4), 4)
         is_live_bestseller = (
             is_live_catalog and is_cash_rich and sku in bestseller_caps
-            and (sku in proven or sku in missed_skus_1h or count > 0 or sku_market_recent.get(sku, 0) >= 2)
+            and (sku in proven or sku in missed_skus_1h or count > 0 or sku_market_recent.get(sku, 0) >= 2
+                 or (balance_now >= 10_000_000 and sku in ("G8ec51935", "G00327e80", "G03d0199f")))
         )
         if (deficit > 0 and sku in proven
                 and (kind == "goods" or (info.get("shelf_hours") or 0) >= 96)):
