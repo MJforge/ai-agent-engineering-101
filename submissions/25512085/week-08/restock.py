@@ -81,6 +81,8 @@ HIGH_VALUE_CAPS = {
 LIVE_BESTSELLER_CAPS = {
     "G1515d951": 3,  # 423,810 Queen hybrid mattress
     "G07ec17d5": 4,  # 279,000 SS hybrid spring mattress
+    "G8ec51935": 1,  # 2,320,000 Jakomo 4-person sofa
+    "G03d0199f": 1,  # 1,380,000 La Cloud hotel bed frame+mattress set
     "G2cb8041b": 3,  # 296,000 Office mesh chair
     "G5cd4ffbc": 3,  # 199,000 Microfiber comforter set
     "Ge62449c9": 4,  # 87,900 Hotel comforter
