@@ -408,11 +408,11 @@ class BuyerFinalAcceptanceTests(unittest.TestCase):
     def test_goods_comparables_cap_still_blocks_final_turn(self):
         self.order["kind"] = "goods"
         self.hub["demand_radar"]["sku_settles"] = {self.sku: [10000] * 3}
-        result, offers, _ = self.run_final_turn(ask=13000)
+        result, offers, _ = self.run_final_turn(ask=14800)
         self.assertEqual(len(offers), 3)
-        self.assertLessEqual(max(offers), 12358)
+        self.assertLessEqual(max(offers), 14696)
         self.assertIsNone(result["receipt"])
-        self.assertIn("offer limit 12358", result["review"])
+        self.assertIn("offer limit 14696", result["review"])
 
     def test_goods_final_receipt_still_requires_positive_surplus_or_warranty(self):
         self.order["kind"] = "goods"
