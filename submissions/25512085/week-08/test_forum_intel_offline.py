@@ -48,7 +48,7 @@ class ForumIntelTests(unittest.TestCase):
         hub, catalog, shops = fixture()
         posts = {c['kind']: c for c in writer.analysis_candidates(hub, catalog, shops, NOW)}
         price = posts['price']['fallback']
-        for expected in ('정산 20건', '중앙값 195', '25% 147.5', '75% 242.5',
+        for expected in ('정산 20건', '중앙값 195', '25% 148', '75% 242',
                          '중앙값 97.5%', '25% 73.8%', '75% 121.2%',
                          '이불(P1) 15건·중앙 170', '베개(P2) 5건·중앙 270'):
             self.assertIn(expected, price)

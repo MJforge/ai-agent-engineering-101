@@ -24,6 +24,12 @@ BASE_DIR = Path(__file__).resolve().parent
 LOG_FILE = BASE_DIR / "logs" / "model-calls.log"
 TIMEOUT_S = 90
 MAX_CHARS = 600
+MIN_REFS = 3
+
+
+def won(value: float) -> str:
+    """Readable credits: 376403 -> 376,403."""
+    return f"{int(round(value)):,}"
 FORUM_USE_MODEL = False  # Rewriting can introduce instructions or unsupported claims.
 
 
@@ -47,6 +53,10 @@ def analysis_candidates(hub: dict, catalog: dict, shops: list | None, now: float
 
     def add(kind, category, text, refs):
         refs = list(dict.fromkeys(r for r in refs if isinstance(r, int)))[-10:]
+        # 11/05 forum audit: a post without ledger refs drew 0 likes (vs 6 with refs) and
+        # pulled the averaged forum score down, so unverifiable posts are skipped.
+        if len(refs) < MIN_REFS:
+            return
         if check_post(text) is None:
             candidates.append({'kind': kind, 'category': category, 'key': kind + ':' + category,
                                'fallback': text, 'refs': refs, 'facts': {'text': text}})
@@ -66,10 +76,10 @@ def analysis_candidates(hub: dict, catalog: dict, shops: list | None, now: float
             top = []
             for sku, n in sorted(counts.items(), key=lambda p: (-p[1], p[0]))[:2]:
                 median = statistics.median(r['amount'] for r in rows if r['sku'] == sku)
-                top.append(f"{short(catalog[sku].get('name', sku), 12)}({short(sku, 20)}) {n}건·중앙 {median:g}")
+                top.append(f"{short(catalog[sku].get('name', sku), 12)}({short(sku, 20)}) {n}건·중앙 {won(median)}")
             text = (f"[카테고리 시세] {short(category, 55)} 최근 3h 관측 시장 정산 {len(rows)}건. "
-                    f"체결가 중앙값 {statistics.median(prices):g}, 25% {percentile(prices, .25):g}, "
-                    f"75% {percentile(prices, .75):g}. 체결가/정가 중앙값 {statistics.median(ratios):.1f}%, "
+                    f"체결가 중앙값 {won(statistics.median(prices))}, 25% {won(percentile(prices, .25))}, "
+                    f"75% {won(percentile(prices, .75))}. 체결가/정가 중앙값 {statistics.median(ratios):.1f}%, "
                     f"25% {percentile(ratios, .25):.1f}%, 75% {percentile(ratios, .75):.1f}%. "
                     f"최다 판매: {'; '.join(top)}. 수집 원장 범위의 관측치이며 전체 시장과 다를 수 있음.")
             add('price', category, text, [r['seq'] for r in rows])
