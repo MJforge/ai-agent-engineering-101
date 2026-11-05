@@ -204,7 +204,7 @@ def validate_launcher(path, repo, home):
         invocation = commands[index]
         expected = ["join", "--dir", "submissions/25512085/week-08", "--market", "https://market.ourolabs.ai", "--name", "mjforge", "--tunnel"]
         if (len(invocation) < 2 or invocation[0] != "python"
-                or invocation[1] not in ("scripts/market_kit.py", str(repo / "scripts/market_kit.py"))
+                or invocation[1] not in ("scripts/market_kit.py", (repo / "scripts/market_kit.py").as_posix())
                 or invocation[2:] != expected):
             return False
         tail = commands[index+1:]

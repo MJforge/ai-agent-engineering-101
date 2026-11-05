@@ -43,7 +43,8 @@ def paused(state, now=None):
 
 def own_sale(hub, sku, now):
     # store.apply_ledger_rows admits only our real settled shop sales here.
-    last = hub.get("own_last_sale_ts", {}).get(sku)
+    last_sales = hub.get("own_last_sale_ts", {})
+    last = last_sales.get(sku) if isinstance(last_sales, dict) else None
     if isinstance(last, (int, float)) and not isinstance(last, bool) and 0 <= now - last <= 3600:
         return True
     sales = hub.get("own_sale_events", {})
@@ -96,6 +97,13 @@ class VisibilityGuard:
         names = [r["name"] for r in rows]
         if len(names) != len(set(names)):
             raise ValueError("duplicate")
+        for row in rows:
+            if path == "/api/board":
+                if (type(row.get("alive")) is not bool or not isinstance(row.get("card"), dict)
+                        or not safe_url(row["card"].get("url"))):
+                    raise ValueError("board_schema")
+            elif not safe_url(row.get("url")) or not isinstance(row.get("stock"), dict):
+                raise ValueError("shops_schema")
         return next((r for r in rows if r["name"] == self.name), None)
 
     def tick(self):

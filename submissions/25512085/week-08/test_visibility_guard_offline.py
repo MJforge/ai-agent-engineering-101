@@ -217,6 +217,14 @@ class VisibilityTests(GuardFixture):
                 self.assertEqual(self.state()["status"], code)
         self.assertFalse(any(r.url.host == "redirect.invalid" for r in self.requests))
 
+    def test_malformed_other_rows_are_not_evidence_of_our_absence(self):
+        market, guard = self.standalone()
+        self.board, self.shops = {"shops": [{"name": "other"}]}, {"shops": []}
+        guard.tick()
+        guard.tick()
+        self.assertEqual(len(market.joins), 1)
+        self.assertEqual(self.state()["state"], "unknown")
+
     def test_url_rotation_during_observation_does_not_join_old_url(self):
         market, guard = self.standalone()
         self.absent()
