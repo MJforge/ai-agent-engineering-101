@@ -24,6 +24,7 @@ def fixture():
         'settles': [{'seq': i+1, 'ts': NOW-i, 'sku': 'P1' if i < 15 else 'P2',
                      'amount': 100+i*10} for i in range(20)],
         'quality_refs': {'Q1:A': [21, 22, 23]},
+        'quality_break_refs': {'Q1:A': [31, 32]},
     }
     hub['break_stats'] = {'Q1': {'A': {'sold': 20, 'broken': 3, 'last_ts': NOW}}}
     hub['market_break_stats'] = {'Q1': {'A': {'sold': 10, 'broken': 1, 'last_ts': NOW}}}
@@ -53,7 +54,25 @@ class ForumIntelTests(unittest.TestCase):
                          '이불(P1) 15건·중앙 170', '베개(P2) 5건·중앙 270'):
             self.assertIn(expected, price)
         self.assertIn('판매 30건 중 고장 3건(10.0%)', posts['quality']['fallback'])
-        self.assertIn('6h 내 고장 관측 기반', posts['quality']['fallback'])
+        self.assertIn('공개 원장 관측 기준', posts['quality']['fallback'])
+        self.assertNotIn('초기 관측', posts['quality']['fallback'])
+        # Break entries are cited first, then sales, at most 10 in total.
+        self.assertEqual(posts['quality']['refs'][:2], [31, 32])
+        self.assertLessEqual(len(posts['quality']['refs']), 10)
+
+    def test_break_claim_without_break_refs_is_skipped(self):
+        hub, catalog, shops = fixture()
+        hub['forum_intel']['quality_break_refs'] = {}
+        kinds = [c['kind'] for c in writer.analysis_candidates(hub, catalog, shops, NOW)]
+        self.assertNotIn('quality', kinds)
+
+    def test_seed_is_not_published(self):
+        hub, catalog, shops = fixture()
+        hub['break_observer']['seeded'] = True
+        with patch.dict(writer.seed_break_stats, {'Q1': {'A': (5, 1)}}, clear=True):
+            posts = {c['kind']: c for c in writer.analysis_candidates(hub, catalog, shops, NOW)}
+        # 30 sold / 3 broken observed minus the seed (5, 1) -> 25 < 30, so nothing is published.
+        self.assertNotIn('quality', posts)
         demand = posts['demand']['fallback']
         for expected in ('품절 문의 2건', '실패 주문 2건', '합계 4건', '상점 1곳'):
             self.assertIn(expected, demand)

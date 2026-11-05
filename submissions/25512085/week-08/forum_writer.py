@@ -19,6 +19,7 @@ import statistics
 from pathlib import Path
 
 from store import load_json_safe, queue_forum_action
+from seller_cash_policy import seed_break_stats
 
 BASE_DIR = Path(__file__).resolve().parent
 LOG_FILE = BASE_DIR / "logs" / "model-calls.log"
@@ -95,19 +96,30 @@ def analysis_candidates(hub: dict, catalog: dict, shops: list | None, now: float
         if not r[3] & 1 and r[3] & 2:
             immature[(r[0], r[1])] += 1
     own, market = hub.get('break_stats', {}), hub.get('market_break_stats', {})
+    seeded = bool(observer.get('seeded'))
     for sku in sorted(set(own) | set(market)):
         for grade in 'ABC':
             stats = [source.get(sku, {}).get(grade, {}) for source in (own, market)]
             n = sum(s.get('sold', 0) for s in stats)
             k = sum(s.get('broken', 0) for s in stats) - immature[(sku, grade)]
+            # Publish only what the public ledger can reproduce: drop the one-time
+            # log-derived seed that pricing uses (seller_cash_policy.seed_break_stats).
+            seed = seed_break_stats.get(sku, {}).get(grade) if seeded else None
+            if seed:
+                n, k = n - seed[0], k - seed[1]
             if n < 30 or not 0 <= k <= n:
                 continue
+            key = sku + ':' + grade
+            break_refs = intel.get('quality_break_refs', {}).get(key, [])[-5:]
+            if k > 0 and not break_refs:
+                continue  # a break claim without a cited break entry is unverifiable
+            sale_refs = intel.get('quality_refs', {}).get(key, [])[-(10 - len(break_refs)):]
             category = catalog.get(sku, {}).get('category', sku)
             text = (f"[SKU 고장 관측] {short(catalog.get(sku, {}).get('name', sku), 20)} "
-                    f"({short(sku, 24)}), 등급 {grade}. 판매 후 6h 경과 표본: "
-                    f"판매 {n}건 중 고장 {k}건({100*k/n:.1f}%). 판매 후 6h 내 고장 관측 기반 "
-                    "집계(자체·타 상점, 초기 관측 포함). 미래 고장률이나 품질을 보장하지 않음.")
-            add('quality', category, text, intel.get('quality_refs', {}).get(sku + ':' + grade, []))
+                    f"({short(sku, 24)}), 등급 {grade}. 공개 원장 관측 기준, 판매 후 6h 경과 표본: "
+                    f"판매 {n}건 중 고장 {k}건({100*k/n:.1f}%). 고장·판매 원장 항목을 refs로 첨부. "
+                    "관측 범위의 집계이며 미래 고장률이나 품질을 보장하지 않음.")
+            add('quality', category, text, break_refs + sale_refs)
 
     radar = hub.get('demand_radar', {})
     misses = collections.Counter()

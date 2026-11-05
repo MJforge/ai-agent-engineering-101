@@ -442,6 +442,24 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
             key = sku + ':' + d['grade']
             refs[key] = list(dict.fromkeys(refs.get(key, []) + [e['seq']]))[-10:]
     intel['quality_refs'] = dict(list(refs.items())[-5000:])
+    # Break ledger entries for the same SKU:grade, so a "k broke" claim cites the breaks
+    # themselves (11/05: sale-only refs drew extra dislikes). Resolved via the break observer.
+    brefs = intel.setdefault('quality_break_refs', {})
+    observer = hub.get('break_observer', {})
+    own_orders, market_orders = observer.get('orders', {}), observer.get('market_orders', {})
+    for e in rows:
+        d = e.get('data') or {}
+        if e.get('kind') != 'broken' or not isinstance(e.get('seq'), int) or not d.get('order'):
+            continue
+        order = str(d['order'])
+        if isinstance(own_orders.get(order), dict):
+            key = f"{own_orders[order].get('sku')}:{own_orders[order].get('grade')}"
+        elif isinstance(market_orders.get(order), list) and len(market_orders[order]) >= 2:
+            key = f"{market_orders[order][0]}:{market_orders[order][1]}"
+        else:
+            continue
+        brefs[key] = list(dict.fromkeys(brefs.get(key, []) + [e['seq']]))[-5:]
+    intel['quality_break_refs'] = dict(list(brefs.items())[-5000:])
 
     # Fast case-insensitive catalog lookup for canonical SKU & category
     cat_lookup: dict[str, tuple[str, str]] = {}
