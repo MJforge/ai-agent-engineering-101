@@ -1009,6 +1009,14 @@ class Seller(AgentExecutor):
             elif wants_w:
                 deal["no_care"] = False
             no_care = bool(is_goods and deal.get("no_care"))
+            # Keep explicit zero/custom stored terms; only older deals missing the key use grade policy.
+            stored_warranty = int(deal.get('warranty_hours', cash_policy.warranty_hours(live_grade))) if is_goods else 0
+            warranty = stored_warranty if not no_care else 0
+            disclosed_care = care_terms(u.get("kind", ""), warranty)
+            terms = ""
+            if is_goods:
+                terms = (f" with {disclosed_care['care_plan']}: {disclosed_care['refund_policy']}" if warranty > 0 else
+                         f" without Safe-Care (warranty_hours=0, no warranty; {disclosed_care['refund_policy']})")
             b = float(deal.get("break_rate") or 0.0)
             in_mode = (lambda p: no_care_price(p, cost, b)) if no_care else (lambda p: p)
             hard_floor, r1_target, r2_target = in_mode(hard_floor), in_mode(r1_target), in_mode(r2_target)
@@ -1027,7 +1035,7 @@ class Seller(AgentExecutor):
                 final_target = max(hard_floor,math.ceil(in_mode(deal['initial_ask'])*.99))
                 should_accept = offer >= final_target
                 if not should_accept and deal['rounds'] >= 2:
-                    await up.reject(say(f"Our final price is {final_target}, including the stated certificate and warranty. No deal at {offer}."))
+                    await up.reject(say(f"Our final price is {final_target}, cert=true{terms}. No deal at {offer}."))
                     del self.open[task.id]
                     return
 
@@ -1047,9 +1055,6 @@ class Seller(AgentExecutor):
                     await up.reject(say("The previously quoted price no longer clears the actual-cost profit floor. No receipt issued."))
                     del self.open[task.id]
                     return
-                # Goods carry Safe-Care unless the buyer explicitly took the cheaper no-care price; food has none
-                warranty = int(deal.get('warranty_hours',cash_policy.warranty_hours(live_grade))) if is_goods and not no_care else 0
-
                 receipt = {
                     "shop": SHOP_NAME,
                     "item": u["sku"],
@@ -1099,14 +1104,10 @@ class Seller(AgentExecutor):
             deal["ask"] = max(care_targets[2], step)
             new_ask = in_mode(deal["ask"])
 
-            if not is_goods:
-                terms = ""
-            elif no_care:
-                terms = f" without Safe-Care (no refund if it breaks); with Safe-Care it is {deal['ask']}"
-            else:
-                terms = f" with Safe-Care ({CARE_HOURS} h full refund if it breaks)"
-                if deal.get("grade") in NO_CARE_GRADES:
-                    terms += f"; without Safe-Care {no_care_price(deal['ask'], cost, b)}"
+            if is_goods and no_care and stored_warranty > 0:
+                terms += f"; optional Safe-Care {stored_warranty}h at {deal['ask']}"
+            elif is_goods and warranty > 0 and deal.get("grade") in NO_CARE_GRADES:
+                terms += f"; without Safe-Care {no_care_price(deal['ask'], cost, b)}"
             await up.requires_input(say(
                 f"Special concession — {u['name']} ({u['sku']}, grade={live_grade}, cert=true): "
                 f"asking price {new_ask}{terms}. Reply with an offer or accept {new_ask} to close now."
