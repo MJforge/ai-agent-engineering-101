@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import os
+import re
+import shlex
 import sys
 import threading
 import time
@@ -154,7 +157,71 @@ def run_join(kit, original, a):
         return original(a)
 
 
+def validate_launcher(path, repo, home):
+    """Strict known launcher grammar; export right-hand sides stay opaque.
+
+    No source text or parser errors are returned/logged. This is a trusted local
+    launcher compatibility check, not a sandbox for arbitrary shell programs.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+        lines = text.replace("\\\n", " ").splitlines()
+        commands = []
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if re.match(r"^export [A-Za-z_][A-Za-z0-9_]*=", line):
+                # Never tokenize, log, or copy an auth assignment's value.
+                commands.append(["export"])
+            else:
+                commands.append(shlex.split(line, comments=True))
+        commands = [c for c in commands if c]
+
+        def expand(path):
+            return path.replace("${HOME}", str(home)).replace("$HOME", str(home)).replace("~/", str(home) + "/")
+
+        if not commands or len(commands[0]) != 2 or commands[0][0] != "cd" or Path(expand(commands[0][1])).resolve() != repo.resolve():
+            return False
+        if len(commands) < 7 or len(commands[1]) != 2 or commands[1][0] not in ("source", "."):
+            return False
+        activation = Path(expand(commands[1][1]))
+        if not activation.is_absolute():
+            activation = repo / activation
+        if activation.resolve() not in ((home / "venv/bin/activate").resolve(), (repo / "venv/bin/activate").resolve()):
+            return False
+        index = 2
+        while index < len(commands) and commands[index] == ["export"]:
+            index += 1
+        if index == 2:
+            return False
+        if commands[index] == ["while", "true"] and commands[index+1] == ["do"]:
+            index += 2
+        elif commands[index] in (["while", "true;", "do"], ["while", "true;do"]):
+            index += 1
+        else:
+            return False
+        invocation = commands[index]
+        expected = ["join", "--dir", "submissions/25512085/week-08", "--market", "https://market.ourolabs.ai", "--name", "mjforge", "--tunnel"]
+        if (len(invocation) < 2 or invocation[0] != "python"
+                or invocation[1] not in ("scripts/market_kit.py", str(repo / "scripts/market_kit.py"))
+                or invocation[2:] != expected):
+            return False
+        tail = commands[index+1:]
+        if tail and tail[0] and tail[0][0] == "echo":
+            tail = tail[1:]
+        return tail == [["sleep", "10"], ["done"]]
+    except (OSError, ValueError, IndexError):
+        return False
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--validate-launcher":
+        repo = Path(__file__).resolve().parents[3]
+        if not validate_launcher(sys.argv[2], repo, Path(os.environ["HOME"])):
+            raise SystemExit("guard_launcher_structure_rejected")
+        print("[visibility-launcher] original_structure_validated", flush=True)
+        return
     path = Path(__file__).resolve().parents[3] / "scripts" / "market_kit.py"
     spec = importlib.util.spec_from_file_location("_shared_market_kit", path)
     kit = importlib.util.module_from_spec(spec)

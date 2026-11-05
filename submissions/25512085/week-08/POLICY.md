@@ -587,3 +587,11 @@ production restock 명령의 `--visibility-guard`는 상태 없음/오류/미래
 매입 정책, 판매/FIFO/가격/보증/파산/포럼/종료 정책은 유지한다.
 호환되지 않는 kit 또는 중복 wrapper는 명확히 시작 실패한다. 기존 키가 없으면
 생성하지 않는다. 배포 및 기존 소유정보 보존 확인은 별도 검토 사항이다.
+
+현재 실행의 인증환경 보존: own launcher는 원본 `~/run_kit.sh`의 알려진 구조를
+검사한 뒤, bash `python()` 함수로 해당 repo의 market_kit 호출만 wrapper로 바꾸고
+원본을 같은 프로세스에서 source한다. 기존 venv 활성화/export/10초 재시작 루프를
+유지하고 원본·cron은 쓰지 않는다. 인증 export 값은 출력·재저장하지 않는다.
+구조가 다르면 vanilla로 대체하지 않고 시작을 거부한다. 고정 intercept marker와
+실제 `guarded_market_kit.py` cmdline 확인은 배포 시 필수이며 marker만으로 가드의
+시장 정상화를 선언하지 않는다.

@@ -6,6 +6,9 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import types
@@ -584,6 +587,86 @@ class RestockGuardTests(BuyingFixture, unittest.TestCase):
              patch.object(restock, "mutate_hub", side_effect=mutation):
             self.assertEqual(restock.build_restock_plan(self.path, visibility_guard=True)["buy"], [])
             self.assertTrue(restock.build_restock_plan(self.path)["buy"])
+
+
+class LauncherTests(GuardFixture):
+    def setUp(self):
+        super().setUp()
+        self.repo = Path(adapter.__file__).resolve().parents[3]
+        self.launcher = Path(adapter.__file__).with_name("run_guarded_market.sh")
+        self.original = self.path / "run_kit.sh"
+        self.invocation = "python scripts/market_kit.py join --dir submissions/25512085/week-08 --market https://market.ourolabs.ai --name mjforge --tunnel"
+        self.script = (f'#!/bin/bash\ncd "{self.repo.as_posix()}"\nsource "$HOME/venv/bin/activate"\n'
+                       'export MARKET_OWNER=offline-owner\nwhile true; do\n'
+                       + self.invocation + '\necho "retry"\nsleep 10\ndone\n')
+        self.original.write_text(self.script, encoding="utf-8")
+
+    def test_expected_structure_and_absolute_same_repo_path(self):
+        self.assertTrue(adapter.validate_launcher(self.original, self.repo, self.path))
+        absolute = (self.repo / "scripts/market_kit.py").as_posix()
+        self.original.write_text(self.script.replace("scripts/market_kit.py", f'"{absolute}"'), encoding="utf-8")
+        self.assertTrue(adapter.validate_launcher(self.original, self.repo, self.path))
+
+    def test_uninterceptable_or_extra_invocation_is_rejected_without_output(self):
+        for changed in (self.script.replace("python scripts/", "python3 scripts/"),
+                        self.script.replace("scripts/market_kit.py", "/other/market_kit.py"),
+                        self.script.replace("sleep 10", "python scripts/market_kit.py\nsleep 10"),
+                        self.script.replace("--name mjforge", "--name another")):
+            self.original.write_text(changed, encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                self.assertFalse(adapter.validate_launcher(self.original, self.repo, self.path))
+            self.assertEqual(output.getvalue(), "")
+
+    def bash(self):
+        candidates = [shutil.which("bash"), "C:/Program Files/Git/bin/bash.exe"]
+        bash = next((c for c in candidates if c and Path(c).is_file()), None)
+        if not bash:
+            self.skipTest("bash unavailable: launcher execution not verified")
+        return bash
+
+    def run_stub(self):
+        # Only isolated fake activation/original/interpreter files are executed.
+        # The loop's sleep is stubbed to exit; no kit, tunnel or market is run.
+        venv = self.path / "venv/bin"
+        venv.mkdir(parents=True)
+        (venv / "activate").write_text('python -c "offline_other_python"\n', encoding="utf-8")
+        interpreter = venv / "python"
+        interpreter.write_text(
+            '#!/usr/bin/env bash\n'
+            'if [[ "$2" == --validate-launcher ]]; then exec "$REAL_PYTHON" "$@"; fi\n'
+            'if [[ "$1" == -c ]]; then printf "%s\\n" other_python_forwarded; exit 0; fi\n'
+            'if [[ "$1" != */guarded_market_kit.py ]]; then exit 81; fi\n'
+            'if [[ "${MARKET_OWNER-}" != offline-owner ]]; then exit 82; fi\n'
+            'printf "%s\\n" guarded_stub_auth_preserved\n'
+            'printf "%s\\n" "${@:2}"\n'
+            'exit 17\n', encoding="utf-8")
+        interpreter.chmod(0o700)
+        environment = dict(os.environ, HOME=self.path.as_posix(), REAL_PYTHON=sys.executable,
+                           MARKET_PYTHON=interpreter.as_posix())
+        return subprocess.run([self.bash(), "--noprofile", "--norc", "-c",
+                               'sleep() { exit 0; }; source "$1"', "offline-launcher", self.launcher.as_posix()],
+                              env=environment, text=True, capture_output=True, timeout=20)
+
+    def test_bash_stub_preserves_auth_loop_and_other_python_forwarding(self):
+        before = self.original.read_bytes()
+        result = self.run_stub()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("guarded_market_kit_intercept", result.stderr)
+        self.assertIn("guarded_stub_auth_preserved", result.stdout)
+        self.assertIn("other_python_forwarded", result.stdout)
+        self.assertIn("retry", result.stdout)  # nonzero wrapper still reaches the original loop
+        self.assertIn("--tunnel", result.stdout)
+        self.assertNotIn("offline-owner", result.stdout + result.stderr)
+        self.assertEqual(self.original.read_bytes(), before)
+
+    def test_bash_stub_structure_failure_cannot_fall_back_to_vanilla(self):
+        self.original.write_text(self.script.replace("python scripts/", "python3 scripts/"), encoding="utf-8")
+        result = self.run_stub()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("original_structure_rejected", result.stderr)
+        self.assertNotIn("guarded_stub_auth_preserved", result.stdout)
+        self.assertNotIn("offline-owner", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
