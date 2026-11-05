@@ -43,7 +43,8 @@ def install(kit, directory, *, guard_factory=VisibilityGuard):
                 # A watchdog can have rotated the proxy before its join failed.
                 # Never use joined['shop']'s stale URL for subsequent recovery.
                 if self.current_url is not None:
-                    url = self.current_url()
+                    if url != self.current_url():
+                        raise SystemExit("guard_url_changed")
                 try:
                     result = super().join(role, name, key, url, tries=tries)
                 except (Exception, SystemExit):
@@ -84,6 +85,9 @@ def install(kit, directory, *, guard_factory=VisibilityGuard):
                 # conservative one-unit restoration in the same actual window.
                 path = md / "visibility_supply_reservations.json"
                 reserved = read_json(path)
+                if path.exists() and (not isinstance(reserved.get("window"), list)
+                                      or not isinstance(reserved.get("skus"), list)):
+                    return False
                 if reserved.get("window") != window_id:
                     reserved = {"window": window_id, "skus": []}
                 if not isinstance(reserved.get("skus"), list) or sku in reserved["skus"] or len(reserved["skus"]) >= 500:
@@ -108,12 +112,46 @@ def install(kit, directory, *, guard_factory=VisibilityGuard):
                 return response
 
     def watchdog(a, agent, d, market, keys, procs, proxy, sport, pport, state, every=60):
+        class LockedProxy:
+            # The original watchdog's rotation must share the shop auth lock,
+            # too, or it could change the URL during an in-flight guard join.
+            def __getattr__(self, name):
+                return getattr(proxy, name)
+
+            @property
+            def public(self):
+                return proxy.public
+
+            @public.setter
+            def public(self, url):
+                with market.guard_lock:
+                    proxy.public = url
+                    if market.visibility_guard:
+                        market.visibility_guard.good = market.visibility_guard.bad = 0
+                        market.visibility_guard.publish("unknown", "url_changed", url)
+
         with market.guard_lock:
             market.current_url = lambda: proxy.public
-        return original_watchdog(a, agent, d, market, keys, procs, proxy, sport, pport, state, every)
+        return original_watchdog(a, agent, d, market, keys, procs, LockedProxy(), sport, pport, state, every)
 
     kit.Market, kit.watchdog = GuardedMarket, watchdog
     return GuardedMarket
+
+
+def run_join(kit, original, a):
+    directory = Path(a.dir).resolve()
+    # Existence only: the shared kit alone reads existing private keys.
+    if any(not (directory / name).is_file() for name in ("shop_key.pem", "buyer_key.pem")):
+        raise SystemExit("guard_existing_keys_required")
+    if a.buyer_only:
+        return original(a)
+    with RuntimeLock(directory / ".market"):
+        if not compatible(kit):
+            atomic_json(directory / ".market" / "visibility_guard.json",
+                        {"version": 1, "checked_at": time.time(), "state": "unknown", "reason": "incompatible_kit"})
+            raise SystemExit("guard_incompatible_kit")
+        install(kit, directory)
+        return original(a)
 
 
 def main():
@@ -126,20 +164,7 @@ def main():
     original = kit.cmd_join
 
     def cmd_join(a):
-        directory = Path(a.dir).resolve()
-        # Existence only: the shared kit alone reads existing private keys.
-        if any(not (directory / name).is_file() for name in ("shop_key.pem", "buyer_key.pem")):
-            raise SystemExit("guard_existing_keys_required")
-        if a.buyer_only:
-            return original(a)
-        with RuntimeLock(directory / ".market"):
-            if not a.buyer_only:
-                if not compatible(kit):
-                    atomic_json(directory / ".market" / "visibility_guard.json",
-                                {"version": 1, "checked_at": time.time(), "state": "unknown", "reason": "incompatible_kit"})
-                    raise SystemExit("guard_incompatible_kit")
-                install(kit, directory)
-            return original(a)
+        return run_join(kit, original, a)
 
     kit.cmd_join = cmd_join
     # Compatibility checks require the original function's exact signature.

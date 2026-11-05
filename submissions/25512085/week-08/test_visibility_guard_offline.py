@@ -52,7 +52,7 @@ class FakeMarket:
 
 def fake_kit():
     def watchdog(a, agent, d, market, keys, procs, proxy, sport, pport, state, every=60):
-        return proxy.public
+        return proxy
 
     def cmd_join(a):
         return None
@@ -226,8 +226,8 @@ class VisibilityTests(GuardFixture):
     def test_watchdog_failed_join_recovers_current_proxy_not_joined_url(self):
         kit, market, guard = self.guarded()
         proxy = types.SimpleNamespace(public=URL)
-        kit.watchdog(None, None, None, market, None, None, proxy, None, None, None)
-        proxy.public = NEW_URL
+        locked_proxy = kit.watchdog(None, None, None, market, None, None, proxy, None, None, None)
+        locked_proxy.public = NEW_URL
         market.join_error = SystemExit("SECRET body")
         with self.assertRaisesRegex(SystemExit, "^guard_shop_join_failed$"):
             market.join("shop", "mjforge", market.joined["shop"][1], NEW_URL)
@@ -237,6 +237,16 @@ class VisibilityTests(GuardFixture):
         guard.tick()
         guard.tick()
         self.assertEqual(market.joins[-1][3], NEW_URL)
+
+    def test_stale_join_url_is_refused_instead_of_re_registering_old_url(self):
+        kit, market, _ = self.guarded()
+        proxy = types.SimpleNamespace(public=URL)
+        locked_proxy = kit.watchdog(None, None, None, market, None, None, proxy, None, None, None)
+        locked_proxy.public = NEW_URL
+        with self.assertRaisesRegex(SystemExit, "guard_url_changed"):
+            market.join("shop", *market.joined["shop"])
+        self.assertEqual(len(market.joins), 1)
+        self.assertEqual(self.state()["reason"], "url_changed")
 
     def test_backoff_300_600_1200_and_cap_without_healthy_reset(self):
         market, guard = self.standalone()
@@ -331,6 +341,38 @@ class VisibilityTests(GuardFixture):
         guard.stop.is_set.side_effect = [False, True]
         guard.run()
         guard.stop.wait.assert_called_once_with(60)
+
+    def test_startup_missing_keys_never_calls_kit_or_creates_keys(self):
+        original = Mock()
+        args = types.SimpleNamespace(dir=str(self.path), buyer_only=False)
+        with self.assertRaisesRegex(SystemExit, "existing_keys_required"):
+            adapter.run_join(fake_kit(), original, args)
+        original.assert_not_called()
+        self.assertFalse(list(self.path.glob("*.pem")))
+
+    def test_startup_uses_key_existence_only_and_buyer_only_is_vanilla(self):
+        for name in ("shop_key.pem", "buyer_key.pem"):
+            (self.path / name).touch()  # Empty, isolated fake files; never real keys.
+        args = types.SimpleNamespace(dir=str(self.path), buyer_only=True)
+        original = Mock(return_value="vanilla")
+        kit = fake_kit()
+        with patch.object(Path, "read_text", side_effect=AssertionError("no key reads")):
+            self.assertEqual(adapter.run_join(kit, original, args), "vanilla")
+        self.assertIs(kit.Market, FakeMarket)
+        self.assertFalse((self.md / "visibility_guard.json").exists())
+
+    def test_startup_incompatible_is_unknown_and_aborts_before_vanilla(self):
+        for name in ("shop_key.pem", "buyer_key.pem"):
+            (self.path / name).touch()
+        kit = fake_kit()
+        kit.KIT_VERSION = "future"
+        original = Mock()
+        args = types.SimpleNamespace(dir=str(self.path), buyer_only=False)
+        with self.assertRaisesRegex(SystemExit, "incompatible"):
+            adapter.run_join(kit, original, args)
+        original.assert_not_called()
+        self.assertTrue(vg.paused(self.state()))
+        self.assertEqual(self.state()["reason"], "incompatible_kit")
 
 
 class SerializationTests(GuardFixture):
@@ -443,6 +485,11 @@ class SupplyGateTests(GuardFixture):
             vg.atomic_json(self.md / "visibility_guard.json", state)
             self.assertEqual(self.supply(qty=2).status_code, 409)
 
+    def test_corrupt_restoration_reservations_do_not_allow_duplicate(self):
+        (self.md / "visibility_supply_reservations.json").write_text("broken", encoding="utf-8")
+        self.assertEqual(self.supply().status_code, 409)
+        self.assertFalse(self.market.calls)
+
 
 class RestockGuardTests(BuyingFixture, unittest.TestCase):
     def plan_guarded(self, state):
@@ -492,7 +539,7 @@ class RestockGuardTests(BuyingFixture, unittest.TestCase):
         sku = self.item()
         self.inquiry(sku, 8)
         self.hub["own_last_sale_ts"] = {sku: NOW}
-        self.hub["no_rebuy"][sku] = NOW
+        self.hub.setdefault("no_rebuy", {})[sku] = NOW
         self.assertEqual(self.plan_guarded({})["buy"], [])
 
     def test_pause_inventory_not_fresh_no_restore(self):
@@ -522,7 +569,7 @@ class RestockGuardTests(BuyingFixture, unittest.TestCase):
         self.inquiry(sku, 8)
         (self.path / "inventory.json").write_text("{}", encoding="utf-8")
         os.utime(self.path / "inventory.json", (NOW, NOW))
-        self.hub["restock_windows"][str(restock.supply_window(self.inv))] = {"baseline_actual": 0, "reserved": 0}
+        self.hub.setdefault("restock_windows", {})[str(restock.supply_window(self.inv))] = {"baseline_actual": 0, "reserved": 0}
 
         @contextlib.contextmanager
         def mutation():
