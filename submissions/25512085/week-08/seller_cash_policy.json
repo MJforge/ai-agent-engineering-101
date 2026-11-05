@@ -1,6 +1,10 @@
 {
   "version": 1,
   "enabled": true,
+  "cohort_selection_enabled": true,
+  "holding_cost_rate_per_day": 0.01,
+  "holding_tie_horizon_hours": 24,
+  "holding_tie_max_fraction": 0.02,
   "analysis_seconds": 1200,
   "quote_lookback_seconds": 3600,
   "forecast_minutes": 30,

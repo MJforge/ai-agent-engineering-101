@@ -75,7 +75,7 @@ class FoodSafetyTests(unittest.TestCase):
             "load_catalog": lambda *args: self.catalog,
             "load_hub": lambda: {},
             "record_inbound_inquiry": lambda *args, **kwargs: None,
-            "clearance_factor": lambda: 1.0,
+            "clearance_factor": lambda now=None: 1.0,
             "get_sku_market_anchor": lambda hub, sku, price: price,
         }
         for name, value in replacements.items():

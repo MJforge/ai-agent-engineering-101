@@ -191,7 +191,71 @@ def food_use_question(hours_left: float | None) -> str:
     )
 
 
-def select_best_unit(units: list[dict[str, Any]], buyer_text: str) -> dict[str, Any] | None:
+def _goods_timestamp(unit: dict[str, Any], now: float) -> float:
+    """Selection tie key only: unknown/future timestamps have no age preference."""
+    try:
+        ts = float(unit.get("supplied_at") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return now
+    return ts if math.isfinite(ts) and 0 < ts <= now else now
+
+
+def select_best_unit(units: list[dict[str, Any]], buyer_text: str, *, pricing_context=None) -> dict[str, Any] | None:
+    """Preserve intent/SKU choice, then compare actual quotes only within its cohort.
+
+    Omitting the context retains the historical callable's FIFO/FEFO behavior.
+    """
+    chosen = _select_preferred_unit(units, buyer_text)
+    if chosen is None or chosen.get('kind', 'goods') != 'goods' or chosen.get('expires_at') or pricing_context is None:
+        return chosen
+    policy = cash_policy.config()
+    if policy.get('cohort_selection_enabled', True) is not True:
+        return chosen
+    values = []
+    for name, default in (('holding_cost_rate_per_day', .01),
+                          ('holding_tie_horizon_hours', 24), ('holding_tie_max_fraction', .02)):
+        value = policy.get(name, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return chosen  # Malformed policy fails closed to the existing FIFO.
+        try:
+            if not math.isfinite(value) or value < 0:
+                return chosen
+        except OverflowError:
+            return chosen
+        values.append(value)
+    rate, horizon, fraction = values
+    grade = str(chosen.get('live_grade') or chosen.get('grade') or 'A')
+    warranty = cash_policy.warranty_hours(grade)
+    cohort = [u for u in units if u.get('kind', 'goods') == 'goods' and not u.get('expires_at')
+              and u.get('sku') == chosen.get('sku')
+              and str(u.get('live_grade') or u.get('grade') or 'A') == grade
+              and cash_policy.warranty_hours(str(u.get('live_grade') or u.get('grade') or 'A')) == warranty]
+    now = pricing_context['now']
+    try:
+        quotes = [(u, compute_unit_pricing_and_terms(u, **pricing_context)) for u in cohort]
+    except (OverflowError, ValueError, TypeError):
+        # Comparing extra stock must not introduce a pricing failure for a legacy
+        # selectable unit. Do not repair raw inputs or change their sale prices.
+        return chosen
+    _, quote = min(quotes, key=lambda pair: (
+        pair[1]['open_ask'], pair[1]['hard_floor'], pair[1]['cost'],
+        _goods_timestamp(pair[0], now), str(pair[0].get('unit') or '')))
+    try:
+        holding = quote['cost'] * rate * (horizon / 24)
+        cap = quote['open_ask'] * fraction
+        if not math.isfinite(holding) or not math.isfinite(cap):
+            return chosen
+        band = min(math.ceil(holding), math.ceil(cap))
+        maximum_ask = quote['open_ask'] + band
+    except (OverflowError, ValueError, TypeError):
+        return chosen
+    eligible = [(u, q) for u, q in quotes if q['open_ask'] <= maximum_ask]
+    return min(eligible, key=lambda pair: (
+        _goods_timestamp(pair[0], now), pair[1]['open_ask'], pair[1]['hard_floor'],
+        str(pair[0].get('unit') or '')))[0]
+
+
+def _select_preferred_unit(units: list[dict[str, Any]], buyer_text: str) -> dict[str, Any] | None:
     """Select the best matching unit considering Food vs Non-Food and buyer intent:
     - Food (perishable): filter explicit use requirements plus checkout headroom
       before applying existing grade/FEFO preferences. Unknown requirements must
@@ -280,7 +344,7 @@ def select_best_unit(units: list[dict[str, Any]], buyer_text: str) -> dict[str, 
             )
 
 
-def find_stock_unit(text: str, taken_units: set[str], inv: dict[str, Any], catalog: dict[str, dict[str, Any]]) -> tuple[dict[str, Any] | None, str]:
+def find_stock_unit(text: str, taken_units: set[str], inv: dict[str, Any], catalog: dict[str, dict[str, Any]], *, pricing_context=None) -> tuple[dict[str, Any] | None, str]:
     """Find an in-stock unit matching the buyer's request (SKU, product name, or category).
     Returns (matched_unit_or_None, extracted_demand_query)."""
     want = text.strip()
@@ -306,7 +370,7 @@ def find_stock_unit(text: str, taken_units: set[str], inv: dict[str, Any], catal
     if wanted_sku:
         exact = [u for u in valid_units if str(u.get("sku", "")).lower() == wanted_sku]
         if exact:
-            chosen = select_best_unit(exact, want)
+            chosen = select_best_unit(exact, want, pricing_context=pricing_context)
             return chosen, (chosen or {}).get("category") or wanted_sku
         # If we do not have this exact SKU, resolve its category for demand radar,
         # but NEVER substitute a different SKU from the same category!
@@ -330,7 +394,7 @@ def find_stock_unit(text: str, taken_units: set[str], inv: dict[str, Any], catal
             fit.append(u)
 
     if fit:
-        chosen = select_best_unit(fit, want)
+        chosen = select_best_unit(fit, want, pricing_context=pricing_context)
         return chosen, (chosen or fit[0]).get("category") or (chosen or fit[0]).get("name", "")
 
     # 3. Determine what category the buyer was asking for (for missed demand radar)
@@ -387,7 +451,7 @@ def required_warranty_hours(text):
     return max(values,default=0)
 
 
-def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) -> dict[str, Any]:
+def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any], *, now=None, catalog=None, clearance=None) -> dict[str, Any]:
     """Compute High-Anchor opening ask, Fast-Close r1_target, hard reserve floor, and warranty_hours
     for a Round 3 stock unit, with differentiated clearance logic for expiring food vs aged goods."""
     cost = int(unit.get("cost") or 100)
@@ -398,14 +462,16 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
     hours_left = unit.get("hours_left")
     sku = str(unit.get("sku") or "")
 
-    now = time.time()
+    now = time.time() if now is None else now
+    catalog = load_catalog(MARKET_DIR) if catalog is None else catalog
+    clearance = clearance_factor(now) if clearance is None else clearance
     supp_ts = float(unit.get("supplied_at") or 0)
     age_h = max(0.0, (now - supp_ts) / 3600.0) if supp_ts > 1_700_000_000 else 0.0
 
     market_anchor = get_sku_market_anchor(hub, sku, list_price)
 
     if kind == "goods":
-        # Non-food ("goods"): Grade is permanent (A/B/C), no expiration, negligible storage fee (~10-50 KRW/day).
+        # Non-food ("goods"): permanent grade, no expiry; storage fee is cost * 1%/day.
         # Normal goods: Prices include Safe-Care with target margins (A >= cost x 1.082, B >= cost x 1.19, C >= cost x 1.62).
         break_rate = BREAK_RATE.get(grade, BREAK_RATE["C"])
         hard_floor = max(cost + 50, int(cost * 1.08), int(cost / (1.0 - break_rate) * 1.05))
@@ -498,8 +564,8 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
         default_warranty = 0
 
     first_quote = None
-    if clearance_factor() == 1.0:
-        first_quote = cash_policy.quote(unit,hub,load_catalog(MARKET_DIR),now)
+    if clearance == 1.0:
+        first_quote = cash_policy.quote(unit,hub,catalog,now)
     if first_quote:
         open_ask,r1_target,r2_target,hard_floor = (first_quote[k] for k in ('open_ask','r1_target','r2_target','hard_floor'))
         break_rate = first_quote['break_rate']
@@ -507,9 +573,9 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
         # No paid breakage refund. Do not discount an already unbundled quote twice.
         break_rate=0.0
         if not first_quote:
-            open_ask=max(cash_policy.profit_floor(unit,hub,load_catalog(MARKET_DIR),now),
+            open_ask=max(cash_policy.profit_floor(unit,hub,catalog,now),
                          int(list_price*cash_policy.config().get('c_fallback_list_fraction',.64)))
-            hard_floor=cash_policy.profit_floor(unit,hub,load_catalog(MARKET_DIR),now)
+            hard_floor=cash_policy.profit_floor(unit,hub,catalog,now)
             r1_target=max(hard_floor,math.ceil(open_ask*.99))
             r2_target=r1_target
     open_ask = max(open_ask, hard_floor)
@@ -518,14 +584,14 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any]) ->
 
     # End-of-round clearance: stock left when the round ends is worth 0, so in the last day every price slides
     # linearly toward a salvage price of a quarter of cost; selling below cost still beats keeping the unit.
-    f = clearance_factor()
+    f = clearance
     if f < 1.0:
         salvage = max(1, int(cost * 0.25))
         open_ask, r1_target, r2_target, hard_floor = (
             int(salvage + (p - salvage) * f) for p in (open_ask, r1_target, r2_target, hard_floor))
     if kind=='goods' and grade=='B':
         # B's actual-cost/risk floor survives old-stock and final-day liquidation paths.
-        hard_floor=max(hard_floor,cash_policy.profit_floor(unit,hub,load_catalog(MARKET_DIR),now))
+        hard_floor=max(hard_floor,cash_policy.profit_floor(unit,hub,catalog,now))
         open_ask=max(open_ask,hard_floor)
         r1_target=min(open_ask,max(r1_target,hard_floor))
         r2_target=min(r1_target,max(r2_target,hard_floor))
@@ -773,7 +839,11 @@ class Seller(AgentExecutor):
                     if isinstance(d.get("unit"), dict) and d["unit"].get("unit")
                 }
                 taken_units = negotiating_units | set(self.committed_units.keys())
-                unit, demand_query = find_stock_unit(text, taken_units, inv, catalog)
+                hub = load_hub()
+                quote_now = time.time()
+                pricing_context = dict(hub=hub, now=quote_now, catalog=catalog,
+                                       clearance=clearance_factor(quote_now))
+                unit, demand_query = find_stock_unit(text, taken_units, inv, catalog, pricing_context=pricing_context)
 
                 if unit is None:
                     queue_inbound_inquiry(demand_query, matched=False, raw_text=text)
@@ -781,8 +851,7 @@ class Seller(AgentExecutor):
                     await up.reject(say("Sorry, no matching stock meets your request (including any required shelf life plus checkout buffer). No receipt issued."))
                     return
 
-                hub = load_hub()
-                pricing = compute_unit_pricing_and_terms(unit, hub)
+                pricing = compute_unit_pricing_and_terms(unit, **pricing_context)
                 ask = pricing["open_ask"]
                 r1_target = pricing["r1_target"]
                 hard_floor = pricing["hard_floor"]
