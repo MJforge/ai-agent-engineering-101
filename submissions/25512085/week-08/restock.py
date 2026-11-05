@@ -13,6 +13,7 @@ from typing import Any
 
 from adaptive_strategy import decide_restock
 import seller_cash_policy as cash_policy
+from visibility_guard import own_sale, paused, read_json
 from store import (
     ROUND_END_TS, STOP_BUYING_BEFORE_END_S, apply_ledger_rows,
     fetch_ledger_rows, fetch_own_shop_urls, fetch_public_buying_data, load_catalog, load_hub,
@@ -131,7 +132,7 @@ def estimated_cost(hub, sku, info):
     return max(1, math.ceil(actual if actual > 0 else int(info.get("list_price", 0)) * .75))
 
 
-def build_restock_plan(market_dir: Path) -> dict[str, Any]:
+def build_restock_plan(market_dir: Path, *, visibility_guard=False) -> dict[str, Any]:
     catalog, inv = load_catalog(market_dir), load_inventory(market_dir)
 
     def stopped(reason, *, bankrupt=False):
@@ -175,10 +176,12 @@ def build_restock_plan(market_dir: Path) -> dict[str, Any]:
             hub.setdefault("restock_windows", {})[str(window)] = {
                 "baseline_actual": 0, "reserved": 0, "blocked": True}
         return plan_with_hub(hub, market_dir, catalog, inv, rows, inventory_fresh=fresh,
-                             ratio_observation=observation)
+                             ratio_observation=observation,
+                             visibility_state=read_json(market_dir / "visibility_guard.json") if visibility_guard else None)
 
 
-def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False, ratio_observation=None):
+def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False, ratio_observation=None,
+                  visibility_state=None):
     """Locked caller persists reservations, inquiries and no-rebuy history atomically."""
     now = time.time()
     migrate_no_rebuy(hub)
@@ -247,6 +250,9 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
                 grade = 'observe'
             depth = model['depth'] if grade != 'none' else 0
             cash_models[sku] = model
+        if visibility_state is not None and paused(visibility_state, now):
+            # Apply before procurement, allocation and monetary reservations.
+            depth = min(depth, 1) if inventory_fresh and not held[sku] and own_sale(hub, sku, now) else 0
         lp, cost = int(info.get("list_price", 0)), estimated_cost(hub, sku, info)
         prices = radar.get("sku_settles", {}).get(sku, [])
         expected_price = statistics.median(prices) if prices else .95 * lp
@@ -389,8 +395,9 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--state", default=".market", help="Path to .market directory")
+    ap.add_argument("--visibility-guard", action="store_true", help="Hold stock depth unless visibility is confirmed")
     args = ap.parse_args()
-    print(json.dumps(build_restock_plan(Path(args.state)), ensure_ascii=False), flush=True)
+    print(json.dumps(build_restock_plan(Path(args.state), visibility_guard=args.visibility_guard), ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":

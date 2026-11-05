@@ -10,7 +10,7 @@
     "cmd": "python market_buyer.py --shops {shops} --item {item} --budget {budget} --order {order}"
   },
   "restock": {
-    "cmd": "python restock.py --state {state}"
+    "cmd": "python restock.py --state {state} --visibility-guard"
   },
   "review": {
     "cmd": "python review.py --deal {deal}"
