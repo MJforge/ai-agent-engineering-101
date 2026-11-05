@@ -1,0 +1,75 @@
+"""Run reviewed regressions with repository data and external I/O guarded.
+
+Usage: python -B verify_cash_refactor_offline.py baseline|after
+Only a new, exclusive log and unique temporary fixtures may be written.
+"""
+import contextlib
+import inspect
+import json
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from datetime import datetime
+
+
+BASE = Path(__file__).resolve().parent
+TEMP = Path('C:/Users/clair/AppData/Local/Temp/opencode')
+MODULES = (
+    'test_seller_cash_offline', 'test_sku_break_rates_offline',
+    'test_grade_warranty_offline', 'test_goods_floor_offline',
+    'test_goods_selection_offline', 'test_warranty_disclosure_offline',
+    'test_hub_compaction_offline', 'test_unified_buying_offline',
+)
+
+
+def main():
+    phase = sys.argv[1]
+    if phase not in ('baseline', 'after'):
+        raise ValueError('expected baseline or after')
+    stamp = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+    log = BASE / 'logs' / f'cash-refactor-{phase}-{stamp}.log'
+    with log.open('x', encoding='utf-8') as output, tempfile.TemporaryDirectory(
+            prefix='cash-refactor-', dir=TEMP) as tmp:
+        root = Path(tmp).resolve()
+        tempfile.tempdir = str(root)
+
+        def guard(event, args):
+            if event in ('socket.connect', 'socket.getaddrinfo', 'subprocess.Popen'):
+                raise AssertionError(f'external I/O forbidden: {event}')
+            if event == 'open' and isinstance(args[0], (str, bytes)):
+                path = Path(args[0]).resolve()
+                mode, flags = args[1:3]
+                writing = (mode is not None and any(c in mode for c in 'wax+')) or flags & 0x703
+                if path.is_relative_to(BASE):
+                    if writing:
+                        raise AssertionError(f'repository write forbidden: {path}')
+                    if ('.market' in path.parts or path.suffix == '.pem'
+                            or path.name in ('state_hub.json', 'seller_history.json')
+                            or 'logs' in path.parts or 'history' in path.parts):
+                        raise AssertionError(f'original data read forbidden: {path}')
+                if writing and not path.is_relative_to(root):
+                    # Existing seller fixtures explicitly choose this approved temp parent.
+                    if not path.is_relative_to(TEMP):
+                        raise AssertionError(f'non-temporary write forbidden: {path}')
+
+        sys.addaudithook(guard)
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            print(f'Command: python -B verify_cash_refactor_offline.py {phase}')
+            print(f'Interpreter: {sys.executable}')
+            print('Guards: no external I/O, no repository writes, no original market/state/key/log reads')
+            import seller_cash_policy as cash
+            api = {name: str(inspect.signature(value)) for name, value in vars(cash).items()
+                   if inspect.isfunction(value) and value.__module__ == cash.__name__}
+            print('Public API: ' + json.dumps(api, sort_keys=True))
+            modules = list(MODULES)
+            if (BASE / 'test_cash_policy_modules_offline.py').exists():
+                modules.append('test_cash_policy_modules_offline')
+            suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
+            result = unittest.TextTestRunner(verbosity=2).run(suite)
+        print(log)
+        return 0 if result.wasSuccessful() else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
