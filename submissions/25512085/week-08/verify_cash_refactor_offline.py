@@ -2,10 +2,13 @@
 
 Usage: python -B verify_cash_refactor_offline.py baseline|after
 Only a new, exclusive log and unique temporary fixtures may be written.
+OPENCODE_TEMP_DIR overrides the temporary parent (must already exist). Otherwise
+prefer the approved per-user opencode folder, then the platform temp directory.
 """
 import contextlib
 import inspect
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -14,13 +17,24 @@ from datetime import datetime
 
 
 BASE = Path(__file__).resolve().parent
-TEMP = Path('C:/Users/clair/AppData/Local/Temp/opencode')
+PREFERRED_TEMP = Path.home() / 'AppData/Local/Temp/opencode'
 MODULES = (
     'test_seller_cash_offline', 'test_sku_break_rates_offline',
     'test_grade_warranty_offline', 'test_goods_floor_offline',
     'test_goods_selection_offline', 'test_warranty_disclosure_offline',
     'test_hub_compaction_offline', 'test_unified_buying_offline',
+    'test_verify_cash_refactor_offline',
 )
+
+
+def select_temp_parent():
+    override = os.environ.get('OPENCODE_TEMP_DIR')
+    parent = (Path(override).expanduser() if override else
+              PREFERRED_TEMP if PREFERRED_TEMP.is_dir() else Path(tempfile.gettempdir()))
+    parent = parent.resolve()
+    if not parent.is_dir() or parent.is_relative_to(BASE.parents[2]):
+        raise ValueError('temporary parent must exist outside the repository')
+    return parent
 
 
 def main():
@@ -29,8 +43,9 @@ def main():
         raise ValueError('expected baseline or after')
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
     log = BASE / 'logs' / f'cash-refactor-{phase}-{stamp}.log'
+    temp_parent = select_temp_parent()
     with log.open('x', encoding='utf-8') as output, tempfile.TemporaryDirectory(
-            prefix='cash-refactor-', dir=TEMP) as tmp:
+            prefix='cash-refactor-', dir=temp_parent) as tmp:
         root = Path(tmp).resolve()
         tempfile.tempdir = str(root)
 
@@ -50,13 +65,15 @@ def main():
                         raise AssertionError(f'original data read forbidden: {path}')
                 if writing and not path.is_relative_to(root):
                     # Existing seller fixtures explicitly choose this approved temp parent.
-                    if not path.is_relative_to(TEMP):
+                    if not (path.is_relative_to(temp_parent) or
+                            PREFERRED_TEMP.is_dir() and path.is_relative_to(PREFERRED_TEMP.resolve())):
                         raise AssertionError(f'non-temporary write forbidden: {path}')
 
         sys.addaudithook(guard)
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             print(f'Command: python -B verify_cash_refactor_offline.py {phase}')
             print(f'Interpreter: {sys.executable}')
+            print(f'Temporary parent: {temp_parent}')
             print('Guards: no external I/O, no repository writes, no original market/state/key/log reads')
             import seller_cash_policy as cash
             api = {name: str(inspect.signature(value)) for name, value in vars(cash).items()
