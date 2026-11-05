@@ -493,17 +493,12 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any], *,
             r1_target = max(hard_floor, int(list_price * 0.68))
             r2_target = max(hard_floor, int(list_price * 0.60))
 
-        # Clearance for aged non-food inventory:
-        # Non-food doesn't spoil, so NO panic dumping. But long-held units lock up cash capital:
-        # - age >= 12h: soften reserve floor down to cost * 0.95 and lower targets so bargain hunters close
-        # - 8h <= age < 12h: soften floor to cost * 1.02 (near cost/breakeven)
+        # Aged goods may soften targets, never the normal reserve: goods do not expire.
         if age_h >= 12.0:
-            hard_floor = max(10, int(cost * 0.95))
             open_ask = max(hard_floor, min(open_ask, int(list_price * 0.82)))
             r1_target = max(hard_floor, int(round(cost * 1.02)))
             r2_target = hard_floor
         elif age_h >= 8.0:
-            hard_floor = max(cost + 10, int(cost * 1.02))
             open_ask = max(hard_floor, min(open_ask, int(list_price * 0.88)))
             r1_target = max(hard_floor, int(round(cost * 1.06)))
             r2_target = hard_floor
@@ -582,16 +577,17 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any], *,
     r1_target = min(open_ask, max(hard_floor, r1_target))
     r2_target = min(r1_target, max(hard_floor, r2_target))
 
-    # End-of-round clearance: stock left when the round ends is worth 0, so in the last day every price slides
-    # linearly toward a salvage price of a quarter of cost; selling below cost still beats keeping the unit.
+    # Final-day targets slide toward salvage. Unsold goods retain inventory value;
+    # their normal/expected-profit reserve survives. Food clearance is unchanged.
+    normal_hard_floor = hard_floor
     f = clearance
     if f < 1.0:
         salvage = max(1, int(cost * 0.25))
         open_ask, r1_target, r2_target, hard_floor = (
             int(salvage + (p - salvage) * f) for p in (open_ask, r1_target, r2_target, hard_floor))
-    if kind=='goods' and grade=='B':
-        # B's actual-cost/risk floor survives old-stock and final-day liquidation paths.
-        hard_floor=max(hard_floor,cash_policy.profit_floor(unit,hub,catalog,now))
+    if kind=='goods':
+        # C's normal floor above already excludes unpaid warranty risk.
+        hard_floor=max(normal_hard_floor,cash_policy.profit_floor(unit,hub,catalog,now))
         open_ask=max(open_ask,hard_floor)
         r1_target=min(open_ask,max(r1_target,hard_floor))
         r2_target=min(r1_target,max(r2_target,hard_floor))
@@ -1065,11 +1061,6 @@ class Seller(AgentExecutor):
                 await up.reject(say("Requested warranty exceeds the disclosed terms. No receipt issued."))
                 del self.open[task.id]
                 return
-            if u.get('kind')=='goods' and live_grade=='B':
-                hard_floor=max(hard_floor,cash_policy.profit_floor(u,load_hub(),catalog,now_ts))
-                r1_target=max(r1_target,hard_floor)
-                r2_target=max(r2_target,hard_floor)
-
             # Safe-Care choice: the buyer drops it by saying so (grades A/B only) and asking for it brings it back.
             # The stored targets include Safe-Care; without it every target is lower by the expected refund.
             is_goods = u.get("kind") == "goods"
@@ -1089,6 +1080,17 @@ class Seller(AgentExecutor):
             b = float(deal.get("break_rate") or 0.0)
             in_mode = (lambda p: no_care_price(p, cost, b)) if no_care else (lambda p: p)
             hard_floor, r1_target, r2_target = in_mode(hard_floor), in_mode(r1_target), in_mode(r2_target)
+            if is_goods:
+                # Convert the declared reserve once, then price current storage/refund
+                # risk using actual stored terms. Never discount this new floor again.
+                hard_floor=max(hard_floor,cash_policy.profit_floor(
+                    u,load_hub(),catalog,now_ts,warranty=warranty))
+                r1_target=max(r1_target,hard_floor)
+                r2_target=max(r2_target,hard_floor)
+                if in_mode(int(deal['ask'])) < hard_floor:
+                    await up.reject(say("The previously quoted price no longer clears the actual-cost profit floor. Transaction cancelled. No receipt issued."))
+                    del self.open[task.id]
+                    return
 
             # Balanced 3-Turn Concession Policy:
             # Closes fast (max 2~3 turns) before buyer walkaway/speed-penalty while preserving healthy margin & warranty hedging:
@@ -1108,7 +1110,7 @@ class Seller(AgentExecutor):
                     del self.open[task.id]
                     return
 
-            # Never below cost, except in the end-of-round clearance, where the floor itself goes below cost
+            # Goods keep their protected floor; food clearance may still allow below-cost sales.
             if should_accept and offer >= min(cost, hard_floor):
                 # Recheck immediately before signing, even if the requirement was known earlier.
                 if u.get("kind") == "food":
@@ -1120,7 +1122,7 @@ class Seller(AgentExecutor):
                         return
                 current_ask = in_mode(int(deal["ask"]))
                 final_price = min(current_ask, int(offer))
-                if is_goods and live_grade=='B' and final_price<hard_floor:
+                if is_goods and final_price<hard_floor:
                     await up.reject(say("The previously quoted price no longer clears the actual-cost profit floor. No receipt issued."))
                     del self.open[task.id]
                     return
@@ -1170,7 +1172,15 @@ class Seller(AgentExecutor):
             step = care_targets[0] if deal["rounds"] == 1 else (care_targets[1] if deal["rounds"] == 2 else care_targets[2])
             if deal.get('cash_first_quote'):
                 step = max(care_targets[2],math.ceil(deal['initial_ask']*.99))
-            deal["ask"] = max(care_targets[2], step)
+            next_ask = max(care_targets[2], step)
+            if is_goods:
+                # Never raise the exposed quote or counter below today's effective floor.
+                next_ask = min(int(deal['ask']), next_ask)
+                if in_mode(next_ask) < hard_floor:
+                    # Legacy no-care asks remain stored in care terms: keep the
+                    # valid current quote rather than discounting the live floor again.
+                    next_ask = int(deal['ask']) if no_care else hard_floor
+            deal["ask"] = next_ask
             new_ask = in_mode(deal["ask"])
 
             if is_goods and no_care and stored_warranty > 0:

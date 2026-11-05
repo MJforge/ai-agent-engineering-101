@@ -283,7 +283,7 @@ class GoodsSelectionTests(unittest.TestCase):
                     self.assertEqual((result['unit'], result['price'], result['warranty_hours']),
                                      (expected, chosen_q['open_ask'], {'A': 72, 'B': 6, 'C': 0}[grade]))
 
-    def test_abc_eight_hour_branch_fixed_legacy_prices_execute(self):
+    def test_abc_eight_hour_branch_protected_floors_execute(self):
         for grade, expected_ask in (('A', 2200000), ('B', 2150000), ('C', 1600000)):
             with self.subTest(grade=grade):
                 hub = self.comparable_hub(grade)
@@ -292,8 +292,12 @@ class GoodsSelectionTests(unittest.TestCase):
                 q = seller.compute_unit_pricing_and_terms(old, **self.context(hub))
                 self.assertFalse(q['cash_first_quote'])
                 self.assertEqual(q['open_ask'], expected_ask)
-                floor = (max(100010, int(100000*1.02)) if grade == 'A' else
-                         seller.cash_policy.profit_floor(old, hub, self.catalog, self.now))
+                # Intentional Nov 6 policy correction: age no longer resets A's
+                # normal floor to 1.02*cost. Selection/holding band is unchanged.
+                floor = seller.cash_policy.profit_floor(old, hub, self.catalog, self.now)
+                if grade != 'C':
+                    floor = max(floor, 100050, int(100000*1.08),
+                                int(100000/(1-seller.BREAK_RATE[grade])*1.05))
                 self.assertEqual(q['hard_floor'], floor)
                 self.inventory['units'] = [fresh, old]
                 self.agent = seller.Seller(0)

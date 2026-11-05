@@ -18,6 +18,7 @@ class DisposalPricingTests(unittest.TestCase):
         patch.object(seller.time, "time", return_value=NOW).start()
         patch.object(seller, "clearance_factor", return_value=1.0).start()
         patch.object(seller, "get_sku_market_anchor", return_value=19_000).start()
+        patch.object(seller, "load_catalog", return_value={}).start()
 
     def price(self, hours=72, grade="A", kind="food", age=0, hub=None):
         unit = {"sku": "food", "cost": 10_000, "list_price": 20_000, "kind": kind,
@@ -49,11 +50,13 @@ class DisposalPricingTests(unittest.TestCase):
                     self.assertPrices(self.price(hours, grade), (16_000, 14_800, 10_000, 10_000))
             self.assertPrices(self.price(47.9, grade), (14_400, 12_800, 8_000, 8_000))
 
-    def test_goods_eight_and_twelve_hour_rules_unchanged(self):
-        for age, expected in [(7.9, (19_000, 14_500, 11_620, 10_824)),
-                              (8, (17_600, 10_600, 10_200, 10_200)),
-                              (11.9, (17_600, 10_600, 10_200, 10_200)),
-                              (12, (16_400, 10_200, 9_500, 9_500))]:
+    def test_goods_age_targets_keep_protected_floor(self):
+        # Nov 6 intentional correction: age markdowns no longer reset the reserve;
+        # accrued storage/current expected contribution also protect fresh goods.
+        for age, expected in [(7.9, (19_000, 14_500, 11_620, 10_859)),
+                              (8, (17_600, 10_860, 10_860, 10_860)),
+                              (11.9, (17_600, 10_876, 10_876, 10_876)),
+                              (12, (16_400, 10_877, 10_877, 10_877))]:
             with self.subTest(age=age):
                 self.assertPrices(self.price(kind="goods", age=age), expected)
 

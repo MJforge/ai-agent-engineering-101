@@ -318,10 +318,13 @@ class FoodSafetyTests(unittest.TestCase):
         fresh_gp = seller.compute_unit_pricing_and_terms(fresh_goods, hub)
         self.assertGreaterEqual(fresh_gp["hard_floor"], 1080)
 
-        # Aged Goods (>=12h): Floor softened to cost * 0.95 to clear idle capital without panic dumping
+        # Nov 6 correction: aged goods keep the normal reserve plus current profit floor.
+        # Food salvage assertions above remain unchanged.
         aged_goods = dict(cost=1000, list_price=2000, kind="goods", grade="A", live_grade="A", supplied_at=self.now - 14 * 3600, sku="g2")
         aged_gp = seller.compute_unit_pricing_and_terms(aged_goods, hub)
-        self.assertEqual(aged_gp["hard_floor"], 950)  # cost * 0.95
+        self.assertEqual(aged_gp["hard_floor"], seller.cash_policy.profit_floor(
+            aged_goods, hub, self.catalog, self.now))
+        self.assertGreaterEqual(aged_gp["hard_floor"], fresh_gp["hard_floor"])
 
     def test_memory_compile(self):
         for name in ("seller.py", Path(__file__).name):
