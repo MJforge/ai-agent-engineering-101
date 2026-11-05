@@ -79,7 +79,9 @@ class CashModuleCompatibilityTests(unittest.TestCase):
                 patch.object(cash, 'PRIOR_BREAK', {'B':.3}):
             result = cash.procurement({}, SKU, self.catalog[SKU], {}, 1, self.catalog, NOW)
         self.assertEqual(result['break_rates'], {'A':.2, 'B':.3, 'C':.2})
-        self.assertEqual(result['grade_contributions'], {'A':15000., 'B':20000., 'C':45000.})
+        # Unknown surge units retain the existing current + qty*.002 estimate.
+        self.assertEqual(result['projected_surge'], 1.002)
+        self.assertEqual(result['grade_contributions'], {'A':14870., 'B':19900., 'C':44930.})
         self.assertEqual(reference.call_count, 3)
         self.assertEqual(risk.call_count, 3)
 
