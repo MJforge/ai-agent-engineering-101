@@ -98,6 +98,9 @@ def analysis_candidates(hub: dict, catalog: dict, shops: list | None, now: float
     own, market = hub.get('break_stats', {}), hub.get('market_break_stats', {})
     seeded = bool(observer.get('seeded'))
     for sku in sorted(set(own) | set(market)):
+        # Only goods can break (market rules); a food "0% broken" post carries no information.
+        if catalog.get(sku, {}).get('kind') != 'goods':
+            continue
         for grade in 'ABC':
             stats = [source.get(sku, {}).get(grade, {}) for source in (own, market)]
             n = sum(s.get('sold', 0) for s in stats)

@@ -17,7 +17,7 @@ def fixture():
     catalog = {
         'P1': {'category': '생활>침구', 'name': '이불', 'list_price': 200},
         'P2': {'category': '생활>침구', 'name': '베개', 'list_price': 200},
-        'Q1': {'category': '전자>조명', 'name': '조명', 'list_price': 300},
+        'Q1': {'category': '전자>조명', 'name': '조명', 'list_price': 300, 'kind': 'goods'},
         'D1': {'category': '가구>책상', 'name': '책상', 'list_price': 400},
     }
     hub['forum_intel'] = {
@@ -59,6 +59,46 @@ class ForumIntelTests(unittest.TestCase):
         # Break entries are cited first, then sales, at most 10 in total.
         self.assertEqual(posts['quality']['refs'][:2], [31, 32])
         self.assertLessEqual(len(posts['quality']['refs']), 10)
+
+    def test_food_quality_is_skipped_but_food_prices_remain(self):
+        for broken in (0, 3):
+            with self.subTest(broken=broken):
+                hub, catalog, shops = fixture()
+                baseline_price = next(c for c in writer.analysis_candidates(
+                    hub, catalog, shops, NOW) if c['kind'] == 'price')
+                for info in catalog.values():
+                    info['kind'] = 'food'
+                hub['break_stats']['Q1']['A']['broken'] = broken
+                hub['market_break_stats']['Q1']['A']['broken'] = 0
+                hub['break_observer']['orders'] = {}
+                posts = {c['kind']: c for c in writer.analysis_candidates(hub, catalog, shops, NOW)}
+                self.assertNotIn('quality', posts)
+                self.assertEqual(posts['price'], baseline_price)
+
+    def test_unknown_kind_quality_is_skipped(self):
+        for kind in ('missing', None, 'unknown', 'absent_sku'):
+            with self.subTest(kind=kind):
+                hub, catalog, shops = fixture()
+                if kind == 'absent_sku':
+                    del catalog['Q1']
+                elif kind == 'missing':
+                    catalog['Q1'].pop('kind')
+                else:
+                    catalog['Q1']['kind'] = kind
+                posts = writer.analysis_candidates(hub, catalog, shops, NOW)
+                self.assertNotIn('quality', [c['kind'] for c in posts])
+                self.assertIn('price', [c['kind'] for c in posts])
+
+    def test_goods_zero_break_quality_remains_eligible(self):
+        hub, catalog, shops = fixture()
+        hub['break_stats']['Q1']['A']['broken'] = 0
+        hub['market_break_stats']['Q1']['A']['broken'] = 0
+        hub['break_observer']['orders'] = {}
+        hub['forum_intel']['quality_break_refs'] = {}
+        quality = next(c for c in writer.analysis_candidates(
+            hub, catalog, shops, NOW) if c['kind'] == 'quality')
+        self.assertIn('판매 30건 중 고장 0건(0.0%)', quality['fallback'])
+        self.assertEqual(quality['refs'], [21, 22, 23])
 
     def test_break_claim_without_break_refs_is_skipped(self):
         hub, catalog, shops = fixture()
