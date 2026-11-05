@@ -615,6 +615,18 @@ class LauncherTests(GuardFixture):
         self.original.write_text(self.script.replace("scripts/market_kit.py", f'"{absolute}"'), encoding="utf-8")
         self.assertTrue(adapter.validate_launcher(self.original, self.repo, self.path))
 
+    def test_live_vm_launcher_shape_is_accepted(self):
+        # 11/05 VM ~/run_kit.sh: venv activated before cd; echo and sleep share a line.
+        live = (f'#!/bin/bash\nsource "$HOME/venv/bin/activate"\ncd "{self.repo.as_posix()}"\n'
+                'export MARKET_OWNER=offline-owner\nwhile true; do\n  ' + self.invocation +
+                '\n  echo "kit exited, restarting in 10s"; sleep 10\ndone\n')
+        self.original.write_text(live, encoding="utf-8")
+        self.assertTrue(adapter.validate_launcher(self.original, self.repo, self.path))
+        for hidden in (live.replace('; sleep 10', '; python scripts/market_kit.py; sleep 10'),
+                       live.replace('; sleep 10', '; sleep 10; sleep 10')):
+            self.original.write_text(hidden, encoding="utf-8")
+            self.assertFalse(adapter.validate_launcher(self.original, self.repo, self.path))
+
     def test_uninterceptable_or_extra_invocation_is_rejected_without_output(self):
         for changed in (self.script.replace("python scripts/", "python3 scripts/"),
                         self.script.replace("scripts/market_kit.py", "/other/market_kit.py"),

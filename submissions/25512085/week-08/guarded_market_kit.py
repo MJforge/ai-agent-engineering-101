@@ -181,9 +181,12 @@ def validate_launcher(path, repo, home):
         def expand(path):
             return path.replace("${HOME}", str(home)).replace("$HOME", str(home)).replace("~/", str(home) + "/")
 
+        # The live VM launcher activates the venv before cd (11/05); accept either order.
+        if len(commands) >= 2 and commands[0][:1] in (["source"], ["."]) and commands[1][:1] == ["cd"]:
+            commands[0], commands[1] = commands[1], commands[0]
         if not commands or len(commands[0]) != 2 or commands[0][0] != "cd" or Path(expand(commands[0][1])).resolve() != repo.resolve():
             return False
-        if len(commands) < 7 or len(commands[1]) != 2 or commands[1][0] not in ("source", "."):
+        if len(commands) < 6 or len(commands[1]) != 2 or commands[1][0] not in ("source", "."):
             return False
         activation = Path(expand(commands[1][1]))
         if not activation.is_absolute():
@@ -209,7 +212,12 @@ def validate_launcher(path, repo, home):
             return False
         tail = commands[index+1:]
         if tail and tail[0] and tail[0][0] == "echo":
-            tail = tail[1:]
+            # `echo "..."; sleep 10` on one line tokenizes as [echo, "...;", sleep, 10].
+            # Exactly [echo, "<msg>;", sleep, 10]: nothing else may hide on that line.
+            if len(tail[0]) == 4 and tail[0][1].endswith(";") and tail[0][2:] == ["sleep", "10"]:
+                tail = [["sleep", "10"]] + tail[1:]
+            else:
+                tail = tail[1:]
         return tail == [["sleep", "10"], ["done"]]
     except (OSError, ValueError, IndexError):
         return False
