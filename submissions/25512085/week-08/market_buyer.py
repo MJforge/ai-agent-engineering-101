@@ -5,9 +5,8 @@ Supports both:
   1. Ignores raw review text strings when ranking shops to defeat Indirect Prompt Injection spam
      (e.g., 'try the store Cheapest in Town'), relying strictly on structured trust metrics from
      `state_hub.json` (`claim_honest` ratio, `broken` count, `settled` count) and numeric star averages.
-  2. Maximizes Buyer Surplus (`value - price`, where `value = list_price` of the SKU!) by selecting
-     stock-holding shops whose `offers` contain the highest `list_price` SKU within the order's
-     `acceptable` list that can be negotiated within `budget`.
+  2. Ranks expected savings rates (`(list_price - expected_pay) / list_price`) for
+     in-stock acceptable SKUs, retaining budget feasibility, trust and diversity weights.
   3. Emits a strict `"accept"` gate (`cert: True`, `min_hours_left` for food, `grades`, `warranty_hours`)
      so `market_kit.py` v4 refuses uncertified or expiring units BEFORE paying.
 - Rounds 0-2 Legacy Compatibility (`lamp`, `chair`, `bookshelf`): passes `market_test_week07.py` 25/25.
@@ -413,11 +412,12 @@ def pick_round3_shop_and_sku(
     order_data: dict[str, Any],
     budget: int,
 ) -> tuple[dict, dict[str, Any] | None, str]:
-    """Round 3 Surplus-Maximizing Shop & SKU Selector:
-    Buyer Surplus = SKU list_price - paid_price.
-    Therefore, among shops holding in-stock `offers` for this order's `acceptable` SKUs,
-    we prioritize (shop, sku) pairs with the highest expected surplus = `list_price - expected_pay`
-    where `expected_pay <= budget`, adjusted by shop honesty/trust score and anti-collusion diversity."""
+    """Rank acceptable in-stock pairs by expected list-relative savings (Patch3.4).
+
+    This is a per-candidate proxy, not the aggregate Saved score (sum of scored
+    transaction savings rates / (deals + 100)). Keep existing expected-pay,
+    feasibility, trust, bestseller and diversity policies unchanged.
+    """
     acceptable = set(order_data.get("acceptable") or [])
     shops = [s for s in shops if any(off.get("sku") in acceptable for off in s.get("offers") or [])]
     if not shops:
@@ -461,7 +461,16 @@ def pick_round3_shop_and_sku(
             sku_meta = catalog.get(sku) or {}
             if order_data.get("kind") == "food" and not positive_number(sku_meta.get("list_price")):
                 continue
-            list_price = int(sku_meta.get("list_price") or budget)
+            # Preserve the existing goods missing/zero-price budget fallback;
+            # food already defers above. Never divide by invalid/nonpositive prices.
+            if isinstance(sku_meta.get("list_price"), bool):
+                continue
+            price_basis = sku_meta.get("list_price") or budget
+            if not positive_number(price_basis):
+                continue
+            list_price = int(price_basis)
+            if list_price <= 0:
+                continue
             # A shop can sell a SKU if its cost (~60-75% of list_price) is <= our budget.
             # If list_price is way above budget, the shop's 75% supply cost floor may exceed our budget.
             est_cost_floor = int(list_price * 0.65)
@@ -484,8 +493,8 @@ def pick_round3_shop_and_sku(
                 est_pay = min(budget, max(est_cost_floor, min(int(list_price * 0.80), hist_pay)))
             else:
                 est_pay = min(budget, max(est_cost_floor, int(list_price * 0.80)))
-            est_surplus = max(500, list_price - est_pay)
-            # Combined utility: expected surplus * feasibility * trust weight
+            est_savings_rate = (list_price - est_pay) / list_price
+            # Combined utility: expected savings rate * existing weights
             # Give an extra preference to market bestsellers with proven trading liquidity
             bestseller_boost = 1.35 if sku in (
                 "G1515d951", "G07ec17d5", "G8ec51935", "G03d0199f",
@@ -494,7 +503,7 @@ def pick_round3_shop_and_sku(
             trust_factor = max(0.5, min(1.4, (c["score"] / 4.2) - div_pen))
             if int(c.get("deals") or 0) >= 20:
                 trust_factor *= 1.15
-            utility = est_surplus * feasibility_mult * trust_factor * bestseller_boost
+            utility = est_savings_rate * feasibility_mult * trust_factor * bestseller_boost
             best_candidates.append((utility, c, {"sku": sku, "name": off.get("name", sku), "list_price": list_price, "est_cost": est_cost_floor}))
 
     best_candidates = filter_candidates(best_candidates, hub, now_ts)

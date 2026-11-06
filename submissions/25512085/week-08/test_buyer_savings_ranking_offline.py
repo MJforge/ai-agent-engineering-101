@@ -88,7 +88,7 @@ class BuyerSavingsRankingTests(unittest.TestCase):
                 result, scores, _ = self.select({'sku': price}, kind='food')
                 self.assertIsNone(result[0])
                 self.assertEqual(scores, {})
-        for price in (-1, 'bad', float('inf'), float('nan'), True, .5):
+        for price in (-1, 'bad', float('inf'), float('nan'), True, False, .5):
             with self.subTest(price=price):
                 result, scores, probes = self.select({'sku': price})
                 self.assertIsNone(result[0])
