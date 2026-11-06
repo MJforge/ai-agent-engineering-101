@@ -27,12 +27,21 @@ CUE_PATTERNS = {
 NEGATION = re.compile(r"\b(no|not|never|without|unobserved|isn't|wasn't|didn't)\b", re.I)
 
 
+def finite_number(value):
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def timestamp(value):
     """Accept finite epoch seconds or timezone-aware ISO timestamps only."""
     if isinstance(value, bool):
         return None
     try:
-        if isinstance(value, (int, float)) and math.isfinite(value):
+        if finite_number(value):
             return datetime.fromtimestamp(value, timezone.utc).timestamp()
         if isinstance(value, str):
             parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
@@ -96,8 +105,7 @@ def analyze_snapshot(reviews, *, shop, round_number, fetched_at, now, cues=False
             quality['invalid_review_text'] += 1
             text = ''
         stars = row.get('stars')
-        if (type(stars) not in (int, float) or not math.isfinite(stars)
-                or not 1 <= stars <= 5):
+        if not finite_number(stars) or not 1 <= stars <= 5:
             quality['invalid_stars'] += 1
             continue
         ratings.append(stars)

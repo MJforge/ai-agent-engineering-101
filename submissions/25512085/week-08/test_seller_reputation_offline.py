@@ -119,6 +119,20 @@ class ReputationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             reputation.analyze_snapshot([], shop='', round_number=3, fetched_at=NOW, now=NOW)
 
+    def test_extreme_numbers_count_as_invalid_without_overflow(self):
+        row = review(10**400)
+        row['ts'] = 10**400
+        quality = self.analyze([row])['data_quality']
+        self.assertEqual(quality['invalid_stars'], 1)
+        self.assertEqual(quality['invalid_time'], 1)
+
+    def test_each_optional_text_cue_remains_unverified(self):
+        for tag, text in (('price', 'too expensive'), ('quality', 'broken'),
+                          ('warranty', 'warranty denied'), ('delay', 'delivery delayed')):
+            row = review(2)
+            row['review'] = text
+            self.assertEqual(self.analyze([row], cues=True)['low_rating_diagnostics']['tags'][tag]['count'], 1)
+
     def fetch(self, payload=b'[]', url=None):
         response = Mock()
         response.geturl.return_value = url or reputation.ENDPOINT + '?shop=synthetic&round=3'
@@ -186,6 +200,19 @@ class ReputationTests(unittest.TestCase):
                         reputation.main(args)
                 with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     reputation.main(['--shop', 'synthetic', '--round', '3'])
+
+    def test_cli_explicit_fetch_mock_and_exclusive_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'synthetic-output.json'
+            args = ['--fetch', '--shop', 'synthetic', '--round', '3', '--output', str(path)]
+            with patch.object(reputation, 'fetch_reviews', return_value=[review()]) as fetch:
+                self.assertEqual(reputation.main(args), 0)
+                fetch.assert_called_once_with('synthetic', 3)
+                original = path.read_bytes()
+                self.assertEqual(json.loads(original)['source']['mode'], 'explicit manual GET')
+                with self.assertRaises(FileExistsError):
+                    reputation.main(args)
+                self.assertEqual(path.read_bytes(), original)
 
 
 if __name__ == '__main__':
