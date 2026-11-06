@@ -1,4 +1,5 @@
 """Three-SKU terms pilot: synthetic inventory, temporary signing key, no market I/O."""
+import copy
 import unittest
 from unittest.mock import patch
 
@@ -242,6 +243,79 @@ class GoodsTermsPilotTests(unittest.TestCase):
                 sku = self.stock()
                 deal, _ = self.open_deal(sku+' '+text)
                 self.assertEqual((deal['grade'], deal['warranty_hours']), ('C', 0))
+
+    def test_review_grade_rejection_never_issues_initial_receipt(self):
+        for text in ('grade C is not acceptable', 'C급 말고', 'C급은 안 돼요',
+                     'grade C is unacceptable', 'I do not want grade C'):
+            with self.subTest(text=text):
+                sku = self.stock()
+                events = self.turn(sku+' '+text+' offer 999999')
+                self.assertEqual([k for k, _ in events], ['reject'])
+                self.assertFalse(self.agent.open)
+                self.assertFalse(self.agent.committed_units)
+
+    def test_review_grade_rejection_never_issues_later_receipt(self):
+        for text in ('grade C is not acceptable', 'C급 말고', 'C급은 안 돼요'):
+            with self.subTest(text=text):
+                sku = self.stock()
+                self.open_deal(sku)
+                events = self.turn(text+' offer 999999')
+                self.assertEqual([k for k, _ in events], ['reject'])
+                self.assertFalse(self.agent.committed_units)
+
+    def test_review_minimum_warranty_cannot_close_B6_or_C0_initially(self):
+        for text in ('보증 최소 72시간', 'warranty of at least 72h'):
+            with self.subTest(text=text):
+                sku = self.stock(grades=('B', 'C'))
+                events = self.turn(sku+' '+text+' offer 999999')
+                self.assertEqual([k for k, _ in events], ['reject'])
+                self.assertFalse(self.agent.committed_units)
+
+    def test_review_minimum_warranty_checked_after_B6_quote_without_price_too(self):
+        for text in ('보증 최소 72시간', 'warranty of at least 72h'):
+            for offer in ('', ' offer 999999'):
+                with self.subTest(text=text, offer=offer):
+                    sku = self.stock(grades=('B', 'C'))
+                    deal, _ = self.open_deal(sku+' grade=B warranty_hours=6')
+                    events = self.turn(text+offer)
+                    self.assertEqual([k for k, _ in events], ['reject'])
+                    self.assertEqual(deal['warranty_hours'], 6)
+                    self.assertFalse(self.agent.open)
+                    self.assertFalse(self.agent.committed_units)
+
+    def test_review_minimum_warranty_fulfilled_by_actual_A72(self):
+        for text in ('보증 최소 72시간', 'warranty of at least 72h'):
+            with self.subTest(text=text):
+                sku = self.stock()
+                receipt = self.receipt(self.turn(sku+' '+text+' offer 999999'))
+                self.assertEqual((receipt['claim'], receipt['warranty_hours']), ('A', 72))
+
+    def test_review_negated_and_unclear_options_preserve_entire_A0_quote(self):
+        for text in ('72h 보증 선택 안 함', '72h 보증 선택 안해요', '72h 보증 선택하지 않습니다',
+                     '72h 보증 미선택', '72h 보증 선택 여부 미정', '72h 보증 선택할까요?',
+                     'do not choose 72h warranty', 'I refuse to select 72h warranty',
+                     'should I choose 72h warranty?', 'I might choose 72h warranty',
+                     'choose 72h warranty?'):
+            with self.subTest(text=text):
+                sku = self.stock()
+                deal, _ = self.open_deal(sku+' grade A')
+                before = copy.deepcopy(deal)
+                events = self.turn(text)
+                self.assertEqual([k for k, _ in events], ['input'])
+                self.assertIn('task-1', self.agent.open)
+                self.assertEqual(self.agent.open['task-1'], before)
+                self.assertFalse(self.agent.committed_units)
+
+    def test_review_explicit_positive_options_requote_without_signing(self):
+        for text in ('choose 72h warranty', 'select 72h warranty', 'I choose 72h warranty',
+                     '72h 보증 선택', '72h 보증 선택합니다'):
+            with self.subTest(text=text):
+                sku = self.stock()
+                self.open_deal(sku+' grade A')
+                events = self.turn(text)
+                self.assertEqual([k for k, _ in events], ['input'])
+                self.assertEqual(self.agent.open['task-1']['warranty_hours'], 72)
+                self.assertFalse(self.agent.committed_units)
 
 
 if __name__ == '__main__':
