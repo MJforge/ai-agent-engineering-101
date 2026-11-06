@@ -8,6 +8,7 @@
 - `test_buyer_turn_telemetry_offline.py`: 신규 합성 10개. 모든 제안/RPC 오류/timeout/parse/deadline, stderr 실패 시 결과·RPC·hub 동일, 개인정보 배제·행수/크기·legacy·단일 stdout·parser 추가 호출 없음.
 - `POLICY.md`, `TURN_TELEMETRY.md`: 미배포 상태, schema 및 합성 예시/용량 한계.
 - 구현 커밋 `85b39b5`, 호환성·시한 경계/runner 보강 `3f92323`. 실패 시도 로그를 보존했다. 추가 문서·자원 증거는 별도 후속 커밋.
+- 자원 증거 커밋 `2c32bbd`, 최종 schema/검증/보고 `35deeb6`.
 
 ## 실제 명령 및 결과
 
@@ -21,6 +22,11 @@
 | `audit.py` | 기존 snapshot 파일 중 buyer만 변경, 신규 테스트 1개, **54개 불변** |
 | `resources.py` (읽기 전용 SSH, 최종 v3) | exit **0**, 시각/자원/stat/rotation 소스 한정 |
 | `git diff --check` | exit **0** |
+
+최종 evidence stage의 `git diff --cached --check`는 원본 unittest 출력
+`after-final.log:1395`의 trailing whitespace 한 곳을 보고했다(exit 2).
+**로그는 정리하지 않고 그대로 보존**했다. 이는 실행 테스트 실패가 아니며,
+코드/문서만 대상으로 한 별도 whitespace 검사는 후속 확인했다.
 
 `check.py`는 root의 **직접 속한 tracked Python source만** 복사하며 source 설정
 `seller_cash_policy.json`, launcher, `scripts/market_kit.py`만 추가한다. 원본 데이터는 복사하지 않는다.
