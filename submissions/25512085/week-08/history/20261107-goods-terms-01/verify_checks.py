@@ -2,16 +2,18 @@
 from pathlib import Path
 import py_compile
 import subprocess
+import sys
 
 OUT = Path(__file__).resolve().parent
 BASE = OUT.parents[1]
 REPO = BASE.parents[2]
 
 if __name__ == '__main__':
-    compiled = OUT/'syntax'
+    label = sys.argv[1] if len(sys.argv) > 1 else 'final05'
+    compiled = OUT/('syntax-'+label)
     compiled.mkdir(exist_ok=False)
-    tree = OUT/'evidence'/'final05'/'submissions/25512085/week-08'
-    with (OUT/'syntax-diff.log').open('x', encoding='utf-8') as log:
+    tree = OUT/'evidence'/label/'submissions/25512085/week-08'
+    with (OUT/(label+'-syntax-diff.log')).open('x', encoding='utf-8') as log:
         def report(text):
             print(text)
             log.write(text+'\n')

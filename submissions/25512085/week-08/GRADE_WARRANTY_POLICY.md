@@ -33,6 +33,8 @@ Silence is NOT evidence that hidden checkout acceptance permits C0 or A0. These
 are public quotes, not a claim of guaranteed payment. No hidden acceptance rules
 are bypassed. C remains refurbished and A remains A, with actual certificate and
 disclosed duration; A0 must never be described as C refurbished.
+Natural warranty durations include hours/days (시간/일); zero is an explicit
+no-warranty condition, and negative/nonfinite/over-72h requirements are rejected.
 
 A0 has zero paid-refund probability (`break_rate=0`). Its opening and concession
 targets use the existing A fallback calculations, NOT A72 settled comparables.

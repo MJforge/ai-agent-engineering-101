@@ -225,6 +225,19 @@ def goods_request_terms(text: str) -> dict[str, Any]:
             invalid = True
         exact_hours = hours
     required = required_warranty_hours(low)
+    duration = r'([+-]?(?:\d+(?:\.\d+)?|nan|inf))\s*(hours?|hrs?|h|days?|시간|일)(?![a-zA-Z])'
+    for pattern in (r'(?:warranty|guarantee|보증)\s*(?:hours?|기간)?[=: ]*'+duration,
+                    duration+r'\s*(?:warranty|guarantee|보증)'):
+        for value, unit in re.findall(pattern, low):
+            hours = float(value) * (24 if unit in ('day', 'days', '일') else 1)
+            if not math.isfinite(hours) or hours < 0 or hours > 72:
+                invalid = True
+                continue
+            required = max(required, hours)
+            if hours == 0:
+                if exact_hours not in (None, 0):
+                    invalid = True
+                exact_hours = 0
     if any(word in low for word in NO_CARE_WORDS):
         if exact_hours not in (None, 0):
             invalid = True
