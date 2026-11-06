@@ -53,6 +53,22 @@ acceptance keeps the refreshed terms. Bare warranty requirements that exceed the
 stored duration are rejected, even without a price. Existing A72/B6/C0/custom
 stored commitments are never downgraded by a numeric response or a new default.
 
+Independent-review hardening: a recognized grade token in rejection language
+(e.g. `grade C is not acceptable`, `C급 말고`) is not a positive grade request.
+Unsupported negated grade conditions reject without a receipt on initial and
+later turns; the buyer must clarify rather than have the seller infer a complement.
+`보증 최소 72시간` and `warranty of at least 72h` retain their minimum duration.
+Other duration-bearing warranty syntax that is not parsed is rejected, never
+reduced to "some warranty" or satisfied with B6 instead of the requested minimum.
+
+The A72 choice is a full positive-command allowlist (`choose/select 72h warranty`,
+optional `I`, or `72h/72시간 보증 선택`, optionally `합니다/할게요`; an optional
+trailing `offer NUMBER` still only requests a fresh quote). A question mark,
+negation, uncertainty or additional unsupported prose is not selection consent.
+For a 72h option-related reply that fails this allowlist, including `72h 보증 선택
+안 함`, retain the entire A0 session unchanged and ask for the explicit command.
+Do not reprice, reset rounds, consume a numeric offer, sign, or release its unit.
+
 Selection, opening, concession, final receipt and completion text use the same
 stored unit/grade/warranty; the existing live actual-cost floor remains binding.
 Receipt issuance is not payment confirmation. No VM access/deployment, market
