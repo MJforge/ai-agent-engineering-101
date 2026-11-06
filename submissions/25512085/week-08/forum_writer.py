@@ -82,7 +82,8 @@ def analysis_candidates(hub: dict, catalog: dict, shops: list | None, now: float
                     f"체결가 중앙값 {won(statistics.median(prices))}, 25% {won(percentile(prices, .25))}, "
                     f"75% {won(percentile(prices, .75))}. 체결가/정가 중앙값 {statistics.median(ratios):.1f}%, "
                     f"25% {percentile(ratios, .25):.1f}%, 75% {percentile(ratios, .75):.1f}%. "
-                    f"최다 판매: {'; '.join(top)}. 수집 원장 범위의 관측치이며 전체 시장과 다를 수 있음.")
+                    f"최다 판매: {'; '.join(top)}. 등급·보증·식품 잔여수명 미통제 혼합통계로, "
+                    "동일 조건의 현재 구매 가능 가격이 아님. 수집 원장 범위이며 전체 시장과 다를 수 있음.")
             add('price', category, text, [r['seq'] for r in rows])
 
     # Counters count matured sales, but also include breaks of immature sales.
@@ -97,6 +98,12 @@ def analysis_candidates(hub: dict, catalog: dict, shops: list | None, now: float
             immature[(r[0], r[1])] += 1
     own, market = hub.get('break_stats', {}), hub.get('market_break_stats', {})
     seeded = bool(observer.get('seeded'))
+    proven = collections.defaultdict(list)
+    for row in observer.get('forum_evidence', {}).values():
+        # Age alone is insufficient: require the observer's counter-increment proof.
+        if (row.get('mature') is True and row.get('ts', now) <= now-21600
+                and type(row.get('sale_seq')) is int):
+            proven[(row['sku'], row['grade'])].append(row)
     for sku in sorted(set(own) | set(market)):
         # Only goods can break (market rules); a food "0% broken" post carries no information.
         if catalog.get(sku, {}).get('kind') != 'goods':
@@ -112,15 +119,25 @@ def analysis_candidates(hub: dict, catalog: dict, shops: list | None, now: float
                 n, k = n - seed[0], k - seed[1]
             if n < 30 or not 0 <= k <= n:
                 continue
-            key = sku + ':' + grade
-            break_refs = intel.get('quality_break_refs', {}).get(key, [])[-5:]
+            # Only ledger sales admitted by the counter observer and explicitly
+            # matured at its increment can support this cumulative cohort.
+            evidence = proven[(sku, grade)]
+            evidence.sort(key=lambda r: (r['ts'], r['sale_seq']))
+            broken_evidence = [r for r in evidence if type(r.get('break_seq')) is int][-5:]
+            break_refs = [r['break_seq'] for r in broken_evidence]
             if k > 0 and not break_refs:
                 continue  # a break claim without a cited break entry is unverifiable
-            sale_refs = intel.get('quality_refs', {}).get(key, [])[-(10 - len(break_refs)):]
+            # Include the matching mature sale for every cited break, then fill
+            # remaining slots with recent cohort sales (never exceed ten refs).
+            sale_refs = [r['sale_seq'] for r in broken_evidence]
+            remaining = 10 - len(break_refs) - len(sale_refs)
+            if remaining:
+                sale_refs += [r['sale_seq'] for r in evidence
+                              if r['sale_seq'] not in sale_refs][-remaining:]
             category = catalog.get(sku, {}).get('category', sku)
             text = (f"[SKU 고장 관측] {short(catalog.get(sku, {}).get('name', sku), 20)} "
                     f"({short(sku, 24)}), 등급 {grade}. 공개 원장 관측 기준, 판매 후 6h 경과 표본: "
-                    f"판매 {n}건 중 고장 {k}건({100*k/n:.1f}%). 고장·판매 원장 항목을 refs로 첨부. "
+                    f"판매 {n}건 중 고장 {k}건({100*k/n:.1f}%). 전체 표본 중 대표 근거를 refs로 첨부(전체 원장 아님). "
                     "관측 범위의 집계이며 미래 고장률이나 품질을 보장하지 않음.")
             add('quality', category, text, break_refs + sale_refs)
 

@@ -92,6 +92,8 @@ def main():
                 modules.append('test_cash_policy_modules_offline')
             if (BASE / 'test_buyer_savings_ranking_offline.py').exists():
                 modules.append('test_buyer_savings_ranking_offline')
+            if (BASE / 'test_forum_quality_evidence_offline.py').exists():
+                modules.extend(('test_forum_intel_offline', 'test_forum_quality_evidence_offline'))
             suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
             result = unittest.TextTestRunner(verbosity=2).run(suite)
         print(log)

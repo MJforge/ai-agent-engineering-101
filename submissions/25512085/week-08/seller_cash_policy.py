@@ -68,7 +68,8 @@ def compact_break_orders(hub, now, *, mature=False):
         else:
             market[order] = [row['sku'], row['grade'], row['ts'],
                              int(row['sold']) | (int(row['broken']) << 1)]
-    for row in (list(own.values()) + list(market.values()) if mature else ()):
+    evidence = state.get('forum_evidence', {})
+    for order, row in (list(own.items()) + list(market.items()) if mature else ()):
         is_own = isinstance(row, dict)
         sku, grade, ts, sold = ((row['sku'], row['grade'], row['ts'], row['sold'])
                                 if is_own else (row[0], row[1], row[2], row[3] & 1))
@@ -77,6 +78,10 @@ def compact_break_orders(hub, now, *, mature=False):
             stat = stats.setdefault(sku, {}).setdefault(grade, {'sold':0, 'broken':0, 'last_ts':ts})
             stat['sold'] += 1
             stat['last_ts'] = max(stat['last_ts'], ts)
+            # Proof is created only for a newly accepted ledger sale, and marked
+            # here at the actual counter increment (not inferred from age).
+            if order in evidence:
+                evidence[order]['mature'] = True
             if is_own:
                 row['sold'] = True
             else:
@@ -91,6 +96,8 @@ def compact_break_orders(hub, now, *, mature=False):
                                       if not r[3] & 1 or now-r[2] <= BREAK_RETENTION_S}, lambda r:r[2])
     state['unmatched'] = bounded({k:t for k,t in state.get('unmatched', {}).items()
                                   if now-t <= BREAK_RETENTION_S}, lambda t:t)
+    if 'forum_evidence' in state:
+        state['forum_evidence'] = bounded(evidence, lambda r:r['ts'])
 
 
 # Pre-deployment own-shop observations, only sales aged at least six hours.
@@ -122,6 +129,8 @@ def observe_break_stats(hub, rows, catalog, now, own_urls, own_name):
     orders = state.setdefault('orders', {})
     market_orders = state.setdefault('market_orders', {})
     unmatched = state.setdefault('unmatched', {})
+    # Never backfill proof from old counters/orders or unvalidated forum refs.
+    evidence = state.setdefault('forum_evidence', {})
     cursor = state.get('seq', -1)
     lookup = {s.lower():s for s in catalog}
     urls = {str(u).rstrip('/') for u in own_urls}
@@ -146,6 +155,9 @@ def observe_break_stats(hub, rows, catalog, now, own_urls, own_name):
                 continue
             row = {'sku':sku, 'grade':d['grade'], 'ts':ts, 'sold':False,
                    'broken':False, 'own':str(d.get('shop') or d.get('seller') or '').rstrip('/') in urls}
+            evidence[order] = {'sku':sku, 'grade':d['grade'], 'ts':ts,
+                               'sale_seq':seq, 'mature':False, 'break_seq':None,
+                               'own':row['own']}
             if row['own']:
                 orders[order] = row
             if order in unmatched:
@@ -160,6 +172,8 @@ def observe_break_stats(hub, rows, catalog, now, own_urls, own_name):
             if market_row is not None:
                 if not market_row[3] & 2:
                     market_row[3] |= 2
+                    if order in evidence:
+                        evidence[order]['break_seq'] = seq
                     stat = market.setdefault(market_row[0], {}).setdefault(
                         market_row[1], {'sold':0, 'broken':0, 'last_ts':market_row[2]})
                     stat['broken'] += 1
@@ -168,6 +182,8 @@ def observe_break_stats(hub, rows, catalog, now, own_urls, own_name):
                 unmatched[order] = ts
             elif not row['broken']:
                 row['broken'] = True
+                if order in evidence:
+                    evidence[order]['break_seq'] = seq
                 stat = counter(row)
                 stat['broken'] += 1
                 stat['last_ts'] = max(stat['last_ts'], ts)
@@ -177,6 +193,9 @@ def observe_break_stats(hub, rows, catalog, now, own_urls, own_name):
         keep = sorted(stats, key=lambda s:max((v['last_ts'] for v in stats[s].values()), default=0))[-MAX_BREAK_SKUS:]
         for sku in set(stats)-set(keep):
             del stats[sku]
+            # Counter eviction starts a new cohort if this SKU returns later.
+            state['forum_evidence'] = {order:r for order,r in state['forum_evidence'].items()
+                                       if not (r['sku'] == sku and r['own'] == (stats is own))}
 
 
 def config():

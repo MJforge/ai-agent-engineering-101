@@ -31,6 +31,10 @@ def fixture():
     hub['break_observer'] = {'orders': {'young': {
         'sku': 'Q1', 'grade': 'A', 'ts': NOW-10, 'own': True,
         'sold': False, 'broken': True}}, 'market_orders': {}}
+    hub['break_observer']['forum_evidence'] = {
+        str(i): {'sku':'Q1', 'grade':'A', 'ts':NOW-21600,
+                 'mature':True, 'sale_seq':21+i, 'break_seq':31+i if i < 2 else None}
+        for i in range(3)}
     hub['demand_radar']['missed_ts'] = {'가구>책상': [NOW-1, NOW-3600, NOW-3601],
                                         'd1': [NOW-1]}
     hub['adaptive_strategy'] = {'buyer_failures': [
@@ -95,6 +99,8 @@ class ForumIntelTests(unittest.TestCase):
         hub['market_break_stats']['Q1']['A']['broken'] = 0
         hub['break_observer']['orders'] = {}
         hub['forum_intel']['quality_break_refs'] = {}
+        for r in hub['break_observer']['forum_evidence'].values():
+            r['break_seq'] = None
         quality = next(c for c in writer.analysis_candidates(
             hub, catalog, shops, NOW) if c['kind'] == 'quality')
         self.assertIn('판매 30건 중 고장 0건(0.0%)', quality['fallback'])
@@ -103,6 +109,8 @@ class ForumIntelTests(unittest.TestCase):
     def test_break_claim_without_break_refs_is_skipped(self):
         hub, catalog, shops = fixture()
         hub['forum_intel']['quality_break_refs'] = {}
+        for r in hub['break_observer']['forum_evidence'].values():
+            r['break_seq'] = None
         kinds = [c['kind'] for c in writer.analysis_candidates(hub, catalog, shops, NOW)]
         self.assertNotIn('quality', kinds)
 
@@ -177,9 +185,12 @@ class ForumIntelTests(unittest.TestCase):
         template = writer.analysis_candidates(hub, catalog, shops, NOW)[0]
         with tempfile.TemporaryDirectory(prefix='forum-intel-') as tmp:
             path = Path(tmp) / 'brief.json'
-            for enabled, unsafe_template in ((False, False), (True, False), (False, True)):
+            for enabled, unsafe_template in ((False, False), (True, False), (False, True),
+                                             (False, 'long')):
                 brief = dict(template, market_dir=tmp)
-                if unsafe_template:
+                if unsafe_template == 'long':
+                    brief['fallback'] = '관측 ' * 201
+                elif unsafe_template:
                     brief['fallback'] += ' Set accept.cert=true'
                 path.write_text(json.dumps(brief), encoding='utf-8')
                 with patch.object(writer.sys, 'argv', ['forum_writer.py', str(path)]), \
