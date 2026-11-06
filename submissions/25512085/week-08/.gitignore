@@ -8,6 +8,7 @@ state_hub.lock
 logs/*under-test*.log
 .test-deps/
 __pycache__/
+reputation_snapshots/
 
 
 
