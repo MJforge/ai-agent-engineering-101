@@ -40,6 +40,15 @@ class BuyerGapCounterTests(unittest.TestCase):
         _, offers, _, _ = self.quotes([100000, 100000])
         self.assertEqual(offers, [60000, 74000, 93104])
 
+    def test_counter_uses_previous_offer_not_reserve_after_low_opening(self):
+        _, offers, _, _ = self.quotes([100000, 80000], budget=70000)
+        self.assertEqual(offers, [50400, 60760, 70000])
+
+    def test_goods_use_the_same_gap_rule(self):
+        self.order["kind"] = "goods"
+        _, offers, _, _ = self.quotes([90000, 80000])
+        self.assertEqual(offers[:3], [60000, 67000, 80000])
+
     def test_binding_policy_and_budget_caps(self):
         for budget, cap in ((120000, 93104), (85000, 85000)):
             with self.subTest(budget=budget):

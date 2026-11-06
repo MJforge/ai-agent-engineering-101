@@ -367,7 +367,7 @@ class BuyerFinalAcceptanceTests(unittest.TestCase):
 
     def test_third_counter_new_affordable_ask_gets_final_receipt(self):
         result, offers, active = self.run_final_turn()
-        self.assertEqual(offers, [9686, 12091, 15030, 15000])
+        self.assertEqual(offers, [9686, 13310, 15030, 15000])
         self.assertEqual(result["receipt"]["price"], 15000)
         self.assertEqual(active["state"], "TASK_STATE_COMPLETED")
         self.assertEqual(self.hub["pending_deals"]["order-1"]["price"], 15000)
