@@ -944,7 +944,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
 
     last_offer = 0
     rounds = 0
-    step_inc = max(5, int(budget * 0.02)) if is_round3 else 5
+    step_inc = 5  # Legacy only; Round 3 counters do not depend on budget steps.
 
     offer_limit = price_limit
     if is_round3_goods:
@@ -971,7 +971,13 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
 
         # Budget-Decoupled Negotiation:
         # Anchors offers to `reserve` (estimated supply cost) and `seller_ask`, NEVER leaking `budget * ratio`.
-        if seller_ask is not None and seller_ask <= offer_limit:
+        if is_round3 and rounds == 2:
+            # Use the actual current ask, even above the cap; clamp below.
+            # Integer half-up rounding, with at least one unit for a positive gap.
+            gap = seller_ask - last_offer
+            offer = (last_offer + max(1, (gap * 35 + 50) // 100)
+                     if gap > 0 else seller_ask)
+        elif seller_ask is not None and seller_ask <= offer_limit:
             if seller_ask <= math.ceil(reserve * 1.05) or rounds >= 3:
                 offer = seller_ask
             elif rounds == 1:
