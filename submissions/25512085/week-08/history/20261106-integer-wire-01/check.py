@@ -17,6 +17,8 @@ if __name__ == '__main__':
     tree.mkdir(parents=True, exist_ok=False)
     names = subprocess.check_output(['git', 'ls-files', '--', str(BASE/'*.py')], cwd=REPO, text=True).splitlines()
     sources = {REPO/name for name in names if (REPO/name).parent == BASE}
+    if label == 'baseline':
+        sources.discard(BASE/'test_buyer_integer_wire_offline.py')
     # Include newly authored tests, not arbitrary untracked operational scripts.
     if label != 'baseline':
         sources.add(BASE/'test_buyer_integer_wire_offline.py')

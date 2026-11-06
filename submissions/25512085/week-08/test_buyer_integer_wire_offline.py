@@ -61,7 +61,7 @@ class BuyerIntegerWireTests(unittest.TestCase):
              redirect_stderr(errors):
             result = buyer.run_attempt(dict(name='shop', url='https://offline.invalid'),
                 dict(sku=self.sku, name='synthetic', list_price=103449), 'lamp' if legacy else 'food',
-                {}, self.hub, self.catalog, {} if legacy else self.order, 'food', 120000)
+                {}, self.hub, self.catalog, {} if legacy else self.order, 'lamp' if legacy else 'food', 120000)
         events = [json.loads(json.loads(line)[8:]) for line in errors.getvalue().splitlines()
                   if json.loads(line).startswith('[buyer] {"event":"buyer_turn"')]
         self.assertEqual(invalid, [], 'strict seller rejects sentence-form offers')
