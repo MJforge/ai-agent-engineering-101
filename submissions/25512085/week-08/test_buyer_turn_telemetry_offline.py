@@ -19,7 +19,7 @@ class BuyerTurnTelemetryTests(unittest.TestCase):
 
     def simulate(self, asks=(100000, 100000, 100000, 80000, 80000), done=4,
                  fail_at=None, failure=None, card_failure=None, reject_at=None,
-                 bad_parse=False, sink=None, legacy=False):
+                 bad_parse=False, sink=None, legacy=False, timeout_at=None):
         self.catalog[self.sku]['list_price'] = 103449
         calls, offers = [], []
         order = {} if legacy else self.order
@@ -50,9 +50,16 @@ class BuyerTurnTelemetryTests(unittest.TestCase):
                 task['artifacts'] = [{'parts': [{'data': dict(self.receipt(ask), task='SECRET_TASK')}]}]
             return task
         output, errors = io.StringIO(), sink or io.StringIO()
+        timeout_calls = [0]
+        def timeout(default):
+            timeout_calls[0] += 1
+            if timeout_calls[0] == timeout_at:
+                raise TimeoutError('SECRET_DEADLINE')
+            return default
         with ExitStack() as stack:
             for name, value in {'rpc_call': rpc, 'update_memory': lambda *a: None,
-                                'mutate_hub': hub, 'call_harness': lambda *a: 'OFFER 100'}.items():
+                                'mutate_hub': hub, 'call_harness': lambda *a: 'OFFER 100',
+                                'request_timeout': timeout}.items():
                 stack.enter_context(patch.object(buyer, name, value))
             stack.enter_context(patch.object(buyer.httpx, 'get', side_effect=card_failure,
                 return_value=SimpleNamespace(json=lambda: {'description': 'SECRET_CARD'})))
@@ -91,7 +98,13 @@ class BuyerTurnTelemetryTests(unittest.TestCase):
         self.assertTrue(all(e['schema_version']==1 and e['timestamp_utc'].endswith('+00:00') for e in events))
         self.assertNotIn('SECRET_', '\n'.join(json.dumps(e) for e in events))
         self.assertNotIn('offline-signature-placeholder', '\n'.join(json.dumps(e) for e in events))
+        self.assertNotIn('120000', json.dumps(events))
         self.assertTrue(all(len(json.dumps(e,separators=(',',':')).encode())+1<=buyer.TURN_EVENT_BYTES for e in events))
+        wire_lines = [line for line in raw.splitlines() if 'buyer_turn' in line]
+        lengths = [len(line.encode('utf-8'))+1 for line in wire_lines]
+        self.assertLessEqual(max(lengths), buyer.TURN_EVENT_BYTES)
+        print('SYNTHETIC_TELEMETRY_MEASURE='+json.dumps(dict(
+            events=len(events), max_line_bytes=max(lengths), total_bytes=sum(lengths))))
 
     def test_card_opening_all_counter_and_final_network_failures(self):
         for index in range(5):
@@ -110,6 +123,19 @@ class BuyerTurnTelemetryTests(unittest.TestCase):
         self.assertEqual(events[1]['error_type'], 'HTTPError')
         self.assertEqual(events[-1]['outcome'], 'error')
 
+    def test_deadlines_between_turns_and_before_receipt_return(self):
+        for boundary in (3, 6, 7):
+            with self.subTest(boundary=boundary):
+                result, _, _, events, _ = self.simulate(timeout_at=boundary)
+                self.assertIsNone(result['receipt'])
+                self.assertEqual(events[-1]['outcome'], 'timeout')
+                self.assertEqual(events[-1]['error_type'], 'TimeoutError')
+
+    def test_existing_price_parser_is_not_called_again_for_telemetry(self):
+        with patch.object(buyer, 'extract_last_number', wraps=buyer.extract_last_number) as parser:
+            _, _, calls, _, _ = self.simulate()
+        self.assertEqual(parser.call_count, calls.count('SendMessage'))
+
     def test_rpc_errors_rejections_and_parser_error(self):
         for index in range(5):
             with self.subTest(index=index):
@@ -126,7 +152,7 @@ class BuyerTurnTelemetryTests(unittest.TestCase):
     def test_immediate_receipt_and_third_no_final(self):
         for done in (0,1,2,3):
             with self.subTest(done=done):
-                _, offers, _, events, _ = self.simulate(asks=(80000,)*5, done=done)
+                _, offers, _, events, _ = self.simulate(asks=(60000,)*5, done=done)
                 self.assertEqual(len(offers), done)
                 self.assertTrue(events[-1]['receipt_selected'])
                 self.assertEqual(events[-2]['response_state'], 'completed')

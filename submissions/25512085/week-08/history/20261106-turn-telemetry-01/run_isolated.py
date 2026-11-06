@@ -37,7 +37,9 @@ def audit(event,args):
 sys.addaudithook(audit)
 os.chdir(cwd)
 sys.path.insert(0,str(cwd))
-if mode == 'focused':
+if mode == 'telemetry':
+    suite = unittest.defaultTestLoader.loadTestsFromNames(['test_buyer_turn_telemetry_offline'])
+elif mode == 'focused':
     names = ['test_forum_intel_offline','test_forum_quality_evidence_offline','test_seller_cash_offline','test_sku_break_rates_offline','test_hub_compaction_offline','test_buyer_gap_counter_offline','test_buyer_savings_ranking_offline','test_buyer_price_offline','test_buyer_retry_offline','test_buyer_failure_reason_offline','test_buyer_stockout_cooldown_offline','test_goods_selection_offline','test_procurement_guard_offline']
     suite = unittest.defaultTestLoader.loadTestsFromNames(names)
 else:

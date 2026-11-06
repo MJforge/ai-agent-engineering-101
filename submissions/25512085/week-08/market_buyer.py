@@ -99,15 +99,19 @@ def turn_event(active, phase, boundary, turn=0, branch="first", ask_before=None,
                 error_type = "Error"
         elif rpc_error:
             error_type = "RPCError"
+        if phase == "attempt" and not selected and error_type is None:
+            error_type = active.get("telemetry_error_type")
         outcome = ("request" if boundary == "request" else
                    "timeout" if error_type == "TimeoutError" else
                    "error" if error_type else response_state or "completed")
         if phase == "attempt":
             outcome = ("completed" if selected else
+                       "timeout" if error_type == "TimeoutError" else "error" if error_type else
                        active.get("telemetry_outcome") if active.get("telemetry_outcome") in ("error", "timeout")
                        else "rejected")
         elif boundary == "response":
             active["telemetry_outcome"] = outcome
+            active["telemetry_error_type"] = error_type
         def price(value):
             return value if type(value) is int and 0 <= value <= 10**12 else None
         sku = active.get("telemetry_sku")
@@ -875,6 +879,7 @@ def run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
               "telemetry_sku": (target_sku_info or {}).get("sku")}
     selected = False
     result = None
+    attempt_error = None
     try:
         result = _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
                               order_data, item, budget, active)
@@ -885,6 +890,7 @@ def run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
     except Exception as exc:
         if not order_data.get("acceptable"):
             raise
+        attempt_error = exc
         pending_event = active.get("telemetry_pending")
         if pending_event:
             phase, turn, branch, ask, offer = pending_event
@@ -896,7 +902,7 @@ def run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
                   "review": f"No deal: attempt failed ({type(exc).__name__}: {exc})."}
         return result
     finally:
-        turn_event(active, "attempt", "response", selected=selected, state=active.get("state"))
+        turn_event(active, "attempt", "response", selected=selected, state=active.get("state"), error=attempt_error)
         if order_data.get("acceptable") and not selected and result is not None:
             failure_diagnostic(result["review"], active.get("seller_text", ""))
         if not selected and active.get("pending") is not None:
