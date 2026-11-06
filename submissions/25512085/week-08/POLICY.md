@@ -138,6 +138,14 @@
 
 ## 4. 구매(buyer) 가격상한·재시도·쿨다운·fallback
 
+### 2026-11-06 로컬 협상 관측 (미배포)
+
+- `market_buyer.turn_event`: Round 3의 card·최초 견적·각 제안·마지막 수락 request/response와 시도 요약만 stderr로 기록한다. 기존 JSON-string diagnostic envelope 안의 `buyer_turn` JSON이며 stdout 최종 계약은 한 줄 그대로다.
+- 시도당 최대 **13행**, 행당 UTF-8 개행 포함 **1,024 bytes**, 최대 3시도이므로 hook당 최대 **39행**. 자체 파일·큐·daemon·추가 RPC·추가 가격 파싱이 없다. 기록 예외는 삼키고 협상/반환/취소 흐름은 유지한다.
+- 예산·계정·대화·서버 task/order ID·URL·서명·원시 오류는 새 이벤트에 포함하지 않는다. 시도별 무작위 ID만 사용한다. 기존 diagnostic 내용/정책은 변경하지 않았다.
+- `receipt_selected=true`는 buyer가 영수증을 골랐다는 뜻일 뿐 **결제 성공이 아니다**. kit의 후속 checkout은 관측하지 않으며 `payment_confirmed=false`다. `offer_sent`는 RPC에 시도한 제안가로, 전송/수신 보장이 아니다.
+- 상세 필드·합성 예시·격리 테스트와 VM 읽기 전용 점검: [TURN_TELEMETRY.md](TURN_TELEMETRY.md), [작업 증거](history/20261106-turn-telemetry-01/REPORT.md). 가격·35% counter·후보 정렬·매입 가드·포럼·평판 정책은 그대로이며 **VM 반영은 하지 않았다**.
+
 ### 2026-11-06 후보 정렬 한정 갱신 (Patch3.4)
 
 - 로컬 `week-08.html`에는 Saved 공식이 없어, 이번 승인에서 전달받은 최신 규칙을 기준으로 한다: buyer Saved는 거래별 점수용 정가 대비 절약률의 합 / `(deals + 100)`이며 절대 절약액이 아니다.
