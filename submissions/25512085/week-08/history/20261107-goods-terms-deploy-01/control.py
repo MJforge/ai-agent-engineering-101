@@ -161,6 +161,22 @@ if __name__ == '__main__':
         stage()
     elif mode == 'validate':
         print(ssh((OUT/'validate_remote.py').read_text(), 'validate').decode())
+    elif mode == 'observe-hold':
+        print(ssh((OUT/'observe_hold.py').read_text(), 'observe-hold').decode())
+    elif mode == 'export':
+        names = ['pre-validation.json', 'isolated-patch.log', 'remote-tests.json', 'hold-observation.json']
+        for label, test_mode in [('baseline', 'all'), ('baseline-pilot', 'focused'), ('sandbox', 'focused'), ('sandbox', 'all')]:
+            n = label+'-'+test_mode
+            names.extend([n+'.log', 'result-'+n+'.json'])
+        code = 'import base64,json\nfrom pathlib import Path\np=Path('+repr(REMOTE)+')\nprint(json.dumps({n:base64.b64encode((p/n).read_bytes()).decode() for n in '+repr(names)+' if (p/n).exists()}))'
+        data = json.loads(ssh(code, 'export'))
+        dest = OUT/'remote-evidence'
+        dest.mkdir(exist_ok=False)
+        for n, blob in data.items():
+            assert n in names
+            with (dest/n).open('xb') as f:
+                f.write(base64.b64decode(blob))
+        print('Exported '+str(len(data))+' synthetic/sanitized evidence files; no runtime logs/state copied.')
     elif mode == 'read-runtime':
         # Code only. No environment, runtime state, credentials, or raw logs.
         code = "from pathlib import Path\np=Path('/home/comalswjd/ai-agent-engineering-101')\n"
