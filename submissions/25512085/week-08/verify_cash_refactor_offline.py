@@ -30,6 +30,7 @@ MODULES = (
     'test_endgame_taper_offline', 'test_restock_equity_target_offline',
     'test_buyer_price_offline', 'test_buyer_retry_offline',
     'test_buyer_failure_reason_offline', 'test_buyer_stockout_cooldown_offline',
+    'test_buyer_gap_counter_offline',
 )
 
 
