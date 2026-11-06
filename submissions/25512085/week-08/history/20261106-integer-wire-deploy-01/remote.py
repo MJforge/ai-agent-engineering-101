@@ -171,7 +171,7 @@ def observe():
         size=f.seek(0,2); start=max(0,size-262144); f.seek(start); data=f.read(262144)
     lines=data.splitlines()[1:] if start else data.splitlines()
     events=[]; malformed=0; envelopes=0; contract_warnings=0
-    since=datetime.datetime.fromisoformat(applied['utc'])
+    since=datetime.datetime.fromisoformat(json.loads((OUT/'atomic-applied.json').read_text())['utc'])
     for line in lines:
         if b'market_buyer printed no result line' in line: contract_warnings+=1
         if b'buyer_turn' not in line: continue
@@ -187,6 +187,8 @@ def observe():
             envelopes+=1; events.append(event)
         except (ValueError,KeyError,AssertionError,TypeError): malformed+=1
     summary=dict(utc=utc(),head=applied['head'],runtime_sha256=hashes(M['paths']),health=health,restarts=0,signals_sent=0,tail_limit_bytes=262144,tail_bytes=len(data),event_count=len(events),string_envelopes=envelopes,malformed_marker_lines=malformed,contract_warning_lines_in_tail=contract_warnings,scope='single bounded tail; warnings not time-filtered; events after deployment only',keys=sorted({k for e in events for k in e}),counts=dict(collections.Counter(str((e.get('phase'),e.get('boundary'),e.get('turn_index'),e.get('policy_branch'),e.get('outcome'))) for e in events)),max_envelope_bytes=max((len(json.dumps('[buyer] '+json.dumps(e,separators=(',',':')),ensure_ascii=False).encode())+1 for e in events),default=0))
+    summary['receipt_selected_events']=sum(e.get('receipt_selected') is True for e in events)
+    summary['effect_verified']=False
     save('observation.json',summary)
     print(json.dumps(summary))
 

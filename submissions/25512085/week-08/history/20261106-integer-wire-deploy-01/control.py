@@ -99,12 +99,12 @@ def stage():
     ssh("import tarfile\nfrom pathlib import Path\np=Path("+repr(REMOTE)+")\nwith tarfile.open(p/'input.tar') as tf:\n assert all(m.isfile() and m.name in "+repr(names)+" for m in tf)\n tf.extractall(p)\nprint('staged_source_only')",'stage-unpack')
 
 def local():
-    home=OUT/'evidence/local-home'; home.mkdir(exist_ok=False)
+    home=OUT/'evidence/local-home-v2'; home.mkdir(exist_ok=False)
     env={k:v for k,v in os.environ.items() if k in ('SYSTEMROOT','WINDIR','COMSPEC','PATH','PATHEXT')}
     env.update(HOME=str(home),USERPROFILE=str(home),PYTHONDONTWRITEBYTECODE='1')
     reports={}
     for label,mode in [('sandbox','focused'),('baseline','all'),('sandbox','all')]:
-        name='local-'+label+'-'+mode
+        name='local-v2-'+label+'-'+mode
         with (OUT/(name+'.log')).open('xb') as log:
             p=subprocess.run([sys.executable,'-B',str(OUT/'run_isolated.py'),mode,label],env=env,stdout=log,stderr=subprocess.STDOUT,timeout=240)
         result=next((x.split('=',1)[1] for x in (OUT/(name+'.log')).read_text().splitlines() if x.startswith('BACKPORT_TEST_RESULT=')),None)

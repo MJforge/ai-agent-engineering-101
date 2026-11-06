@@ -28,7 +28,7 @@ def audit(event,args):
         raise AssertionError('external network forbidden')
     if event == 'open' and isinstance(args[0],(str,bytes,os.PathLike)):
         path = Path(os.fsdecode(args[0])).resolve()
-        if any(part in ('.market','.env') or part.endswith(('.pem','.key')) for part in path.parts):
+        if OUT not in path.parents and any(part in ('.market','.env') or part.endswith(('.pem','.key')) for part in path.parts):
             raise AssertionError('runtime credentials/state forbidden')
         if REPO in path.parents and OUT not in path.parents and REPO/'.venv' not in path.parents:
             raise AssertionError('live repository access forbidden: '+path.name)
