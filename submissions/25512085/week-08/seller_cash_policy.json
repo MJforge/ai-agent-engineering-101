@@ -1,6 +1,7 @@
 {
   "version": 1,
   "enabled": true,
+  "procurement_watchlist": ["G8095ddd6", "G24f5f979", "G2698c6f8", "Gbec2b68f", "Gf6b70da8"],
   "cohort_selection_enabled": true,
   "holding_cost_rate_per_day": 0.01,
   "holding_tie_horizon_hours": 24,

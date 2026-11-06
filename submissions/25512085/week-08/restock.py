@@ -230,6 +230,7 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
     break_models = {}
     break_penalized = 0
     negative_combinations = 0
+    procurement_guards = {}
     candidates = {g: [] for g in ("hot", "popular", "observe")}
     storage = float(inv.get("storage_per_day", .01))
     for sku, info in catalog.items():
@@ -260,6 +261,10 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
         margin = expected_price * .97 - cost  # net expected proceeds, including settlement fee
         estimate = cash_policy.procurement(hub,sku,info,inv,max(0,depth-held[sku]),catalog,now)
         if estimate is not None:
+            guard = estimate.get('procurement_guard')
+            if guard is not None:
+                procurement_guards[sku] = guard
+                depth = min(depth,held[sku]+guard['max_additional_qty'])
             break_models[sku] = estimate
             negative_combinations += len(estimate['negative_grades'])
             break_penalized += int(estimate['break_penalty'])
@@ -276,6 +281,8 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
         elif covered and not any(0 <= now - t <= NO_DEMAND_S for t in sales) and not any(
                 0 <= now - e["ts"] <= NO_DEMAND_S for e in events):
             reason = "no_demand_2h"
+        elif sku in procurement_guards and procurement_guards[sku]['max_additional_qty'] == 0:
+            reason = 'procurement_guard'
         elif depth == 0:
             reason = "no_popularity"
         elif grade not in phase["grades"]:
@@ -321,6 +328,7 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
                 for s,m in sorted(break_models.items(), key=lambda p:(-max(p[1]['break_rates'].values()),p[0]))[:5]],
         'excluded':excluded['break_expected_loss'], 'penalized':break_penalized,
         'negative_combinations':negative_combinations, 'grade_selectable':False}
+    diag['procurement_guards'] = procurement_guards
 
     def finish(orders, reason=None):
         if inventory_fresh:
@@ -347,6 +355,9 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
     budget = min(cs["available_budget"], calculated, max(0, cap - used))
     diag["usable_budget"] = budget
     planned = state.setdefault("planned_skus", {})
+    for sku, guard in procurement_guards.items():
+        guard['already_planned_qty'] = planned.get(sku,0)
+        guard['window_remaining_qty'] = 0 if sku in planned else guard['max_additional_qty']
     grade_spent = state.setdefault("grade_reserved", {g: 0 for g in candidates})
     spent, orders = 0, []
     groups = [(g,c) for g,group in candidates.items() for c in group]
@@ -361,6 +372,8 @@ def plan_with_hub(hub, market_dir, catalog, inv, rows, *, inventory_fresh=False,
         if grade == "observe":
             allowance = min(allowance, max(0, cap // 2 - grade_spent[grade]))
         qty = min(need, 20*(10-len(orders)) if growth else 20, max(0, allowance) // cost)
+        if sku in procurement_guards:
+            qty = min(qty,procurement_guards[sku]['max_additional_qty'])
         if not qty or len(orders) >= 10:
             continue
         remaining = qty

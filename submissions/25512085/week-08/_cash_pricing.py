@@ -7,6 +7,16 @@ def warranty_hours(policy, grade, kind='goods'):
     return max(0,min(72,int(policy.config().get('grade_warranty_hours',{}).get(grade,{'A':72,'B':6,'C':0}.get(grade,0)))))
 
 
+def minimum_contribution(policy, cost, grade):
+    """Same target for selling floors and watchlist procurement scenarios."""
+    p = policy.config()
+    contribution = min(p.get('absolute_goods_contribution',5000),
+                       max(p.get('minimum_goods_contribution',500),policy.math.ceil(cost*.05)))
+    if grade == 'B':
+        contribution = max(contribution,policy.math.ceil(cost*p.get('b_minimum_expected_margin_fraction',.05)))
+    return contribution
+
+
 def profit_floor(policy, unit, hub, catalog, now, warranty=None):
     """Expected-profit floor, never a guarantee against a realized full refund."""
     p=policy.config();cost=float(unit['cost']);grade=unit.get('live_grade') or unit.get('grade')
@@ -15,10 +25,7 @@ def profit_floor(policy, unit, hub, catalog, now, warranty=None):
     if grade == 'B' and hours:
         q=max(policy.PRIOR_BREAK['B'],q)
     # A flat5000 floor made low-list-price goods unnecessarily dearer than their catalog value.
-    contribution=min(p.get('absolute_goods_contribution',5000),
-                     max(p.get('minimum_goods_contribution',500),policy.math.ceil(cost*.05)))
-    if grade == 'B':
-        contribution=max(contribution,policy.math.ceil(cost*p.get('b_minimum_expected_margin_fraction',.05)))
+    contribution=minimum_contribution(policy,cost,grade)
     age=max(0,now-float(unit.get('supplied_at') or now))
     storage=cost*.01*age/86400
     return policy.math.ceil((cost+storage+contribution)/max(1-q,1e-9))
@@ -31,7 +38,7 @@ def reference_price(policy, hub, sku, grade, now, kind='goods', warranty=None):
     for lookback in ([3600,10800] if kind=='goods' and hours==0 else [3600]):
         valid = [r for r in observations if r.get('grade') == grade and policy.number(r.get('ts'))
                  and 0 <= now-r['ts'] <= lookback and policy.number(r.get('amount')) and r['amount'] > 0
-                 and (kind != 'goods' or ((r.get('warranty_hours') or 0)==0 if hours==0 else
+                 and (kind != 'goods' or (policy.number(r.get('warranty_hours')) and r['warranty_hours']==0 if hours==0 else
                       policy.number(r.get('warranty_hours')) and r['warranty_hours']>=6))]
         if len(valid)>=5:
             return int(round(policy.statistics.median(r['amount'] for r in valid)))
