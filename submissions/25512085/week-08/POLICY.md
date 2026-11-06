@@ -138,6 +138,8 @@
 
 ## 4. 구매(buyer) 가격상한·재시도·쿨다운·fallback
 
+- 2026-11-06 로컬 숫자-only interop: Round 3 일반 제안과 최종 수락은 계산된 정수의 문자열만 전송한다. 최초 SKU·인증·보증 문의와 legacy 문구, 가격·횟수·cooldown·계측은 불변이다. 실제 상대 파서는 미확인이고 VM 미배포다. 중복 재전송 방지/무진행 cooldown은 이번에 구현하지 않는다.
+
 ### 2026-11-06 로컬 협상 관측 (미배포)
 
 - `market_buyer.turn_event`: Round 3의 card·최초 견적·각 제안·마지막 수락 request/response와 시도 요약만 stderr로 기록한다. 기존 JSON-string diagnostic envelope 안의 `buyer_turn` JSON이며 stdout 최종 계약은 한 줄 그대로다.

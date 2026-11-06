@@ -62,9 +62,9 @@ class BuyerRetryTests(unittest.TestCase):
                 return SimpleNamespace(json=lambda: {"result": {}})
             sends.append(i)
             text = params["message"]["parts"][0]["text"]
-            counter = text.startswith("I offer ")
+            counter = text.isascii() and text.isdigit() or text.startswith("I offer ")
             if counter:
-                offers.append((i, int(text.split()[2])))
+                offers.append((i, int(text) if text.isdigit() else int(text.split()[2])))
             clock[0] += elapsed
             action = actions[i]
             if action == "rpc-error":
@@ -326,9 +326,9 @@ class BuyerFinalAcceptanceTests(unittest.TestCase):
         def rpc(url, method, params):
             self.assertEqual(method, "SendMessage")
             text = params["message"]["parts"][0]["text"]
-            if text.startswith("I offer "):
-                offers.append(int(text.split()[2]))
-                self.assertEqual(text, f"I offer {offers[-1]} for this certified item." if not legacy
+            if text.isascii() and text.isdigit() or text.startswith("I offer "):
+                offers.append(int(text) if text.isdigit() else int(text.split()[2]))
+                self.assertEqual(text, str(offers[-1]) if not legacy
                                  else f"I offer {offers[-1]} if you guarantee product quality and after-sales service support.")
             count = len(offers)
             if count == 3 and expired:

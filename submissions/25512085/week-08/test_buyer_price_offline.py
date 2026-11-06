@@ -63,7 +63,9 @@ class BuyerPriceTests(unittest.TestCase):
             if method == "CancelTask":
                 return {}
             text = params["message"]["parts"][0]["text"]
-            if text.startswith("I offer "):
+            if text.isascii() and text.isdigit():
+                offers.append(int(text))
+            elif text.startswith("I offer "):
                 offers.append(int(text.split()[2]))
             done = receipt is not None and len(offers) >= complete_after
             task = {"id": "task-1", "status": {

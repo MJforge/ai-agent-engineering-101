@@ -1125,7 +1125,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
 
         # Send clean numeric offer (avoid extra numbers in the text so simple regex sellers parse `offer` accurately!)
         follow_up_text = (
-            f"I offer {offer} for this certified item."
+            str(offer)
             if is_round3
             else f"I offer {offer} if you guarantee product quality and after-sales service support."
         )
@@ -1181,7 +1181,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
                 "role": "ROLE_USER",
                 "messageId": str(uuid.uuid4()),
                 "taskId": task_id,
-                "parts": [{"text": f"I offer {seller_ask} for this certified item."}],
+                "parts": [{"text": str(seller_ask)}],
             }})
             active["seller_text"] = seller_response_text(res)
             if "error" in res:

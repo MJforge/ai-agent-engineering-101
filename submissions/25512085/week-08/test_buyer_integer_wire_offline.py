@@ -48,7 +48,7 @@ class BuyerIntegerWireTests(unittest.TestCase):
                 state='TASK_STATE_COMPLETED' if done else 'TASK_STATE_INPUT_REQUIRED',
                 message=dict(parts=[{'text': f'Send your integer offer. ask {ask} cert warranty'}])))
             if done:
-                task['artifacts'] = [{'parts': [{'data': self.receipt(offers[-1], item='lamp') if legacy
+                task['artifacts'] = [{'parts': [{'data': dict(self.receipt(offers[-1]), item='lamp') if legacy
                                                else self.receipt(offers[-1])}]}]
             return task
 
@@ -94,6 +94,15 @@ class BuyerIntegerWireTests(unittest.TestCase):
         _, messages, _, _ = self.simulate(asks=(9000,))
         self.assertEqual(messages[0]['parts'][0]['text'],
             f'I want to buy synthetic ({self.sku}). Please quote your best price with market certificate (cert=true) and warranty.')
+
+    def test_legacy_sentence_and_opening_unchanged(self):
+        result, messages, offers, events = self.simulate(asks=(200,), legacy=True)
+        self.assertEqual(messages[0]['parts'][0]['text'],
+            'I want to buy a lamp. Quality and trouble-free use matter: '
+            'do you provide after-sales service, a quality warranty, or a flexible refund policy?')
+        self.assertEqual(offers, [100, 155, 200])
+        self.assertEqual(result['receipt']['price'], 200)
+        self.assertEqual(events, [])
 
 
 if __name__ == '__main__':

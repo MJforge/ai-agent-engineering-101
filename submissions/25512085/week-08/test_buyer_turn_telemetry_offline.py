@@ -34,7 +34,9 @@ class BuyerTurnTelemetryTests(unittest.TestCase):
             if method == 'CancelTask':
                 return {}
             text = params['message']['parts'][0]['text']
-            if text.startswith('I offer '):
+            if text.isascii() and text.isdigit():
+                offers.append(int(text))
+            elif text.startswith('I offer '):
                 offers.append(int(text.split()[2]))
             index = len(offers)
             if index == fail_at:
