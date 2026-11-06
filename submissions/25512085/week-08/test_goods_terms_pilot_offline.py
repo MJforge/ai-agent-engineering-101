@@ -266,7 +266,7 @@ class GoodsTermsPilotTests(unittest.TestCase):
                 self.assertFalse(self.agent.committed_units)
 
     def test_review_minimum_warranty_cannot_close_B6_or_C0_initially(self):
-        for text in ('보증 최소 72시간', 'warranty of at least 72h'):
+        for text in ('보증 최소 72시간', 'warranty of at least 72h', 'warranty covering at least 72h'):
             with self.subTest(text=text):
                 sku = self.stock(grades=('B', 'C'))
                 events = self.turn(sku+' '+text+' offer 999999')
@@ -274,7 +274,7 @@ class GoodsTermsPilotTests(unittest.TestCase):
                 self.assertFalse(self.agent.committed_units)
 
     def test_review_minimum_warranty_checked_after_B6_quote_without_price_too(self):
-        for text in ('보증 최소 72시간', 'warranty of at least 72h'):
+        for text in ('보증 최소 72시간', 'warranty of at least 72h', 'warranty covering at least 72h'):
             for offer in ('', ' offer 999999'):
                 with self.subTest(text=text, offer=offer):
                     sku = self.stock(grades=('B', 'C'))
