@@ -24,6 +24,7 @@ MODULES = (
     'test_goods_selection_offline', 'test_warranty_disclosure_offline',
     'test_hub_compaction_offline', 'test_unified_buying_offline',
     'test_verify_cash_refactor_offline',
+    'test_seller_forum_offline',
 )
 
 
