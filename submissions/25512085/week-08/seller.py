@@ -232,9 +232,13 @@ def goods_request_terms(text: str) -> dict[str, Any]:
         exact_hours = hours
     required = required_warranty_hours(low)
     duration = r'([+-]?(?:\d+(?:\.\d+)?|nan|inf))\s*(hours?|hrs?|h|days?|시간|일)(?![a-zA-Z])'
-    for pattern in (r'(?:warranty|guarantee|보증)\s*(?:hours?|기간)?[=: ]*'+duration,
+    parsed_durations = set()
+    qualifier = r'(?:(?:of\s+)?at\s+least\s+|minimum\s+|최소\s*)?'
+    for pattern in (r'(?:warranty|guarantee|보증)\s*(?:hours?|기간)?[=: ]*'+qualifier+duration,
                     duration+r'\s*(?:warranty|guarantee|보증)'):
-        for value, unit in re.findall(pattern, low):
+        for match in re.finditer(pattern, low):
+            value, unit = match.groups()
+            parsed_durations.add((match.start(1), match.end(2)))
             hours = float(value) * (24 if unit in ('day', 'days', '일') else 1)
             if not math.isfinite(hours) or hours < 0 or hours > 72:
                 invalid = True
@@ -244,6 +248,12 @@ def goods_request_terms(text: str) -> dict[str, Any]:
                 if exact_hours not in (None, 0):
                     invalid = True
                 exact_hours = 0
+    if re.search(r'warranty|guarantee|보증', low):
+        # Unparsed duration-bearing warranty language cannot be reduced to
+        # "some warranty". Ask for supported explicit conditions instead.
+        if any((match.start(1), match.end(2)) not in parsed_durations
+               for match in re.finditer(duration, low)):
+            invalid = True
     if any(word in low for word in NO_CARE_WORDS):
         if exact_hours not in (None, 0):
             invalid = True
