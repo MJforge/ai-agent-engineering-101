@@ -255,6 +255,8 @@ def goods_request_warranty(unit: dict[str, Any], request: dict[str, Any]) -> int
 
 
 def price_requested_unit(unit, buyer_text, pricing_context):
+    if unit.get('kind') != 'goods' or str(unit.get('sku', '')).lower() not in GOODS_TERMS_PILOT_SKUS:
+        return compute_unit_pricing_and_terms(unit, **pricing_context)
     request = goods_request_terms(buyer_text)
     override = (dict(warranty_override=0) if unit.get('kind') == 'goods'
                 and str(unit.get('sku', '')).lower() in GOODS_TERMS_PILOT_SKUS
@@ -969,7 +971,8 @@ class Seller(AgentExecutor):
                 initial_offer = extract_buyer_offer(text, current_ask=ask, list_price=list_price, sku=unit["sku"])
                 # A0 is a new default, not implied consent from a price sent
                 # before our first disclosure. Always expose it before closing.
-                pilot_A0 = unit.get('kind') == 'goods' and grade == 'A' and warranty == 0
+                pilot_A0 = (unit.get('kind') == 'goods' and grade == 'A' and warranty == 0
+                            and str(unit.get('sku', '')).lower() in GOODS_TERMS_PILOT_SKUS)
                 if initial_offer and initial_offer >= ask and not pilot_A0 and (not is_food or required_hours is not None):
                     # Recheck live expiry immediately before the opening receipt path.
                     grade, hours_left = compute_live_unit_grade(unit, catalog)
@@ -1129,7 +1132,8 @@ class Seller(AgentExecutor):
             # A bare duration/price is never consent to change existing promises.
             choose_72 = (deal.get('pilot_A0_option') and warranty == 0 and not request['invalid']
                          and grade_ok and (request['warranty'] == 72 or request['required'] == 72)
-                         and bool(re.search(r'choose|select|선택', text_low)))
+                         and bool(re.search(r'\bchoose\b|\bselect\b|선택', text_low))
+                         and not re.search(r"\bnot\b|\bdon't\b|말고|않|취소", text_low))
             if choose_72:
                 catalog = load_catalog(MARKET_DIR)
                 pricing = compute_unit_pricing_and_terms(deal['unit'], load_hub(), now=now_ts,

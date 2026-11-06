@@ -126,6 +126,7 @@ class GoodsTermsPilotTests(unittest.TestCase):
     def test_existing_A72_promise_numeric_reply_never_downgrades(self):
         sku = self.stock()
         deal, _ = self.open_deal(sku+' grade A warranty 72h')
+        deal.pop('pilot_A0_option', None)  # Simulate a pre-pilot in-memory promise.
         receipt = self.receipt(self.turn(str(deal['ask'])))
         self.assertEqual(receipt['warranty_hours'], 72)
 
@@ -215,6 +216,19 @@ class GoodsTermsPilotTests(unittest.TestCase):
         events = self.turn(sku+' grade=A offer 999999')
         self.assertIn('reject', [k for k, _ in events])
         self.assertNotIn('receipt', [k for k, _ in events])
+
+    def test_numeric_72_is_not_A72_option_consent(self):
+        sku = self.stock()
+        deal, _ = self.open_deal(sku+' grade A')
+        self.turn('72')
+        self.assertEqual(deal['warranty_hours'], 0)
+
+    def test_negated_option_choice_never_changes_terms(self):
+        sku = self.stock()
+        deal, _ = self.open_deal(sku+' grade A')
+        events = self.turn('do not choose 72h warranty')
+        self.assertIn('reject', [k for k, _ in events])
+        self.assertEqual(deal['warranty_hours'], 0)
 
 
 if __name__ == '__main__':
