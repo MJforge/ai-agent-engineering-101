@@ -48,7 +48,20 @@ for name in ('test_bash_stub_preserves_auth_loop_and_other_python_forwarding',
     method = getattr(visibility_tests.LauncherTests, name)
     setattr(visibility_tests.LauncherTests, name,
             unittest.skip('child processes disabled for local goods terms verification')(method))
-if mode == 'focused':
+if mode in ('review-grade', 'review-warranty', 'review-option'):
+    methods = {
+        'review-grade': ['test_review_grade_rejection_never_issues_initial_receipt',
+                         'test_review_grade_rejection_never_issues_later_receipt'],
+        'review-warranty': ['test_review_minimum_warranty_cannot_close_B6_or_C0_initially',
+                            'test_review_minimum_warranty_checked_after_B6_quote_without_price_too',
+                            'test_review_minimum_warranty_fulfilled_by_actual_A72'],
+        'review-option': ['test_review_negated_and_unclear_options_preserve_entire_A0_quote',
+                          'test_review_explicit_positive_options_requote_without_signing',
+                          'test_negated_option_choice_never_changes_terms'],
+    }
+    names = ['test_goods_terms_pilot_offline.GoodsTermsPilotTests.'+name for name in methods[mode]]
+    suite = unittest.defaultTestLoader.loadTestsFromNames(names)
+elif mode == 'focused':
     names = ['test_goods_terms_pilot_offline', 'test_grade_warranty_offline', 'test_warranty_disclosure_offline', 'test_goods_floor_offline', 'test_goods_selection_offline']
     suite = unittest.defaultTestLoader.loadTestsFromNames(names)
 else:

@@ -214,6 +214,12 @@ def goods_request_terms(text: str) -> dict[str, Any]:
     minimum = bool(re.search(r'min(?:imum)?\s+grade|grade\s*>=|[abc]\s*(?:급\s*)?이상|grade\s*[abc]\s*(?:or\s+above|이상)', low))
     exact = re.findall(r'\bwarranty_hours\s*[:=]\s*([^\s,;!?]+)', low)
     invalid = len(grades) > 1 or bool(re.search(r'\bgrade\s*[:=]\s*(?![abc]\b)\S+|\b(?:not|no)\s+(?:grade\s+)?[abc]\b|[abc]\s*급\s*제외', low))
+    # Recognizing a grade token is not positive consent to that grade. Reject
+    # unsupported rejection/negation language rather than invert it or guess.
+    if grades and re.search(
+            r"\b(?:not|never|unacceptable|unwanted|refuse|reject|exclude|cannot|can't|don't|won't|isn't)\b|"
+            r'말고|아니|제외|거절|불가|원하지|싫|안\s*(?:돼|되|해|함|하)', low):
+        invalid = True
     exact_hours = None
     for value in exact:
         try:
@@ -963,7 +969,11 @@ class Seller(AgentExecutor):
                 if unit is None:
                     queue_inbound_inquiry(demand_query, matched=False, raw_text=text)
                     print(f"[stock-miss] Out of stock for buyer request: {text[:80]} (recorded demand: {demand_query})", flush=True)
-                    await up.reject(say("Sorry, no matching stock meets your request (including any required shelf life plus checkout buffer). No receipt issued."))
+                    reason = "Sorry, no matching stock meets your request (including any required shelf life plus checkout buffer). No receipt issued."
+                    if (any(sku in text.lower() for sku in GOODS_TERMS_PILOT_SKUS)
+                            and goods_request_terms(text)['invalid']):
+                        reason = "Unsupported or conflicting explicit grade/warranty conditions. Please clarify your conditions in a new inquiry. No receipt issued."
+                    await up.reject(say(reason))
                     return
 
                 pricing = price_requested_unit(unit, text, pricing_context)

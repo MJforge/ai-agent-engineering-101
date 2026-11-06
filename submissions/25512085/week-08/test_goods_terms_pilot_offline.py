@@ -251,6 +251,8 @@ class GoodsTermsPilotTests(unittest.TestCase):
                 sku = self.stock()
                 events = self.turn(sku+' '+text+' offer 999999')
                 self.assertEqual([k for k, _ in events], ['reject'])
+                self.assertIn('clarify', str(events))
+                self.assertIn('No receipt issued', str(events))
                 self.assertFalse(self.agent.open)
                 self.assertFalse(self.agent.committed_units)
 
