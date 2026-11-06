@@ -13,6 +13,7 @@ Supports both:
 """
 import argparse
 from contextvars import ContextVar
+from datetime import datetime, timezone
 import json
 import math
 import os
@@ -53,11 +54,81 @@ GOODS_OFFER_CAP_PERCENT = 92
 COMPARABLE_WINDOW_S = 3 * 3600
 COMPARABLE_MIN_SAMPLES = 3
 REQUEST_DEADLINE = ContextVar("buyer_request_deadline", default=None)
+TURN_EVENT_MAX = 13  # card + inquiry + 3 counters + final accept, request/result + summary
+TURN_EVENT_BYTES = 1024
 
 
 def diagnostic(message: str) -> None:
     """Escape even seller-controlled newlines; never emit a forged JSON line."""
     print(json.dumps(f"[buyer] {message}", ensure_ascii=False), file=sys.stderr, flush=True)
+
+
+def turn_event(active, phase, boundary, turn=0, branch="first", ask_before=None,
+               offer=None, ask_after=None, state=None, error=None, rpc_error=False,
+               selected=False):
+    """Best-effort bounded Round 3 telemetry, never raw messages/IDs/receipts.
+
+    One opaque attempt ID suffices to join its turns; deliberately omit server
+    task/order IDs and account/URL metadata. Existing parsers supply prices.
+    """
+    try:
+        if not active.get("telemetry_enabled"):
+            return
+        count = active.get("telemetry_count", 0)
+        if count >= TURN_EVENT_MAX:
+            return
+        active["telemetry_count"] = count + 1
+        if boundary == "request":
+            active["telemetry_pending"] = (phase, turn, branch, ask_before, offer)
+        else:
+            active.pop("telemetry_pending", None)
+        if "telemetry_id" not in active:
+            active["telemetry_id"] = uuid.uuid4().hex
+        states = {"TASK_STATE_COMPLETED": "completed", "TASK_STATE_INPUT_REQUIRED": "inputrequired",
+                  "TASK_STATE_REJECTED": "rejected", "TASK_STATE_CANCELED": "canceled"}
+        response_state = states.get(state, "other" if state is not None else None)
+        error_type = None
+        if error is not None:
+            if isinstance(error, (TimeoutError, httpx.TimeoutException)):
+                error_type = "TimeoutError"
+            elif isinstance(error, httpx.HTTPError):
+                error_type = "HTTPError"
+            elif isinstance(error, (ValueError, TypeError, KeyError)):
+                error_type = "ParseError"
+            else:
+                error_type = "Error"
+        elif rpc_error:
+            error_type = "RPCError"
+        outcome = ("request" if boundary == "request" else
+                   "timeout" if error_type == "TimeoutError" else
+                   "error" if error_type else response_state or "completed")
+        if phase == "attempt":
+            outcome = ("completed" if selected else
+                       active.get("telemetry_outcome") if active.get("telemetry_outcome") in ("error", "timeout")
+                       else "rejected")
+        elif boundary == "response":
+            active["telemetry_outcome"] = outcome
+        def price(value):
+            return value if type(value) is int and 0 <= value <= 10**12 else None
+        sku = active.get("telemetry_sku")
+        sku = sku if isinstance(sku, str) and re.fullmatch(r"[gGfF][0-9a-fA-F]{7,10}", sku) else None
+        event = dict(event="buyer_turn", schema_version=1,
+                     timestamp_utc=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                     attempt_id=active["telemetry_id"], seq=count + 1, sku=sku,
+                     phase=phase, boundary=boundary, turn_index=turn, policy_branch=branch,
+                     ask_before=price(ask_before), offer_sent=price(offer), ask_after=price(ask_after),
+                     response_state=response_state, outcome=outcome, error_type=error_type)
+        if phase == "attempt":
+            event.update(receipt_selected=bool(selected), payment_confirmed=False)
+        payload = json.dumps(event, ensure_ascii=True, separators=(",", ":"))
+        # Retain diagnostic's JSON-string envelope: kit/legacy consumers must
+        # never mistake a telemetry object for the final stdout receipt.
+        line = json.dumps("[buyer] " + payload, ensure_ascii=True)
+        if len(line.encode("utf-8")) + 1 <= TURN_EVENT_BYTES:
+            print(line, file=sys.stderr, flush=True)
+    except Exception:
+        # A broken stderr/serializer/clock must never change checkout or cleanup.
+        pass
 
 
 def seller_response_text(response: dict) -> str:
@@ -800,7 +871,8 @@ def run_round3(shops, memory, hub, catalog, order_data, item, budget, deadline):
 
 def run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
                 order_data, item, budget, cleanup_deadline=None):
-    active = {}
+    active = {"telemetry_enabled": bool(order_data.get("acceptable")),
+              "telemetry_sku": (target_sku_info or {}).get("sku")}
     selected = False
     result = None
     try:
@@ -813,6 +885,10 @@ def run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
     except Exception as exc:
         if not order_data.get("acceptable"):
             raise
+        pending_event = active.get("telemetry_pending")
+        if pending_event:
+            phase, turn, branch, ask, offer = pending_event
+            turn_event(active, phase, "response", turn, branch, ask, offer, error=exc)
         if isinstance(exc, TimeoutError) and active.get("id") and not active.get("failure"):
             # Negotiation deadline is pair-local, not proof the whole shop's network failed.
             active["failure"] = "timeout"
@@ -820,6 +896,7 @@ def run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
                   "review": f"No deal: attempt failed ({type(exc).__name__}: {exc})."}
         return result
     finally:
+        turn_event(active, "attempt", "response", selected=selected, state=active.get("state"))
         if order_data.get("acceptable") and not selected and result is not None:
             failure_diagnostic(result["review"], active.get("seller_text", ""))
         if not selected and active.get("pending") is not None:
@@ -870,12 +947,15 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
 
     # 1. Fetch Agent Card
     card_url = f"{shop_url}/.well-known/agent-card.json"
+    turn_event(active, "card", "request")
     try:
         card_resp = httpx.get(card_url, timeout=request_timeout(12))
         card = card_resp.json()
         interfaces = card.get("supportedInterfaces") or []
         rpc_url = interfaces[0].get("url") if interfaces else f"{shop_url}/"
+        turn_event(active, "card", "response")
     except Exception as e:
+        turn_event(active, "card", "response", error=e)
         review = f"No deal in 0 rounds: shop card endpoint failed ({type(e).__name__})."
         if isinstance(e, (TimeoutError, httpx.TimeoutException)):
             active["failure"] = "network-timeout" if isinstance(e, httpx.TimeoutException) else "timeout"
@@ -908,12 +988,14 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         "messageId": str(uuid.uuid4()),
         "parts": [{"text": opening_text}],
     }
+    turn_event(active, "opening", "request")
     try:
         if is_round3:
             request_timeout(1)
         res = rpc_call(rpc_url, "SendMessage", {"message": msg})
         active["seller_text"] = seller_response_text(res)
     except Exception as e:
+        turn_event(active, "opening", "response", error=e)
         review = f"No deal in 0 rounds: shop did not respond to opening inquiry ({type(e).__name__})."
         if isinstance(e, (TimeoutError, httpx.TimeoutException)):
             active["failure"] = "network-timeout" if isinstance(e, httpx.TimeoutException) else "timeout"
@@ -923,6 +1005,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         return {"shop": chosen_shop["url"], "receipt": None, "stars": 2, "review": review}
 
     if "error" in res:
+        turn_event(active, "opening", "response", rpc_error=True)
         review = f"No deal in 0 rounds: seller returned RPC error {res['error']}."
         update_memory(memory, shop_name, {
             "item": item, "budget": budget, "price": None, "rounds": 0, "stars": 2, "outcome": "no-deal"
@@ -937,6 +1020,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
     min_valid_p = 500 if is_round3 else 50
     max_valid_p = max(budget * 4, list_price * 2, 1000)
     seller_ask = extract_last_number(task, min_valid_p, max_valid_p)
+    turn_event(active, "opening", "response", ask_after=seller_ask, state=task_state)
     seller_texts = [
         " ".join(p.get("text", "") for p in task_status.get("message", {}).get("parts", []))
     ]
@@ -1045,15 +1129,20 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
             "taskId": task_id,
             "parts": [{"text": follow_up_text}],
         }
+        ask_before = seller_ask
+        branch = "first" if rounds == 1 else "counter35" if rounds == 2 else "third"
+        turn_event(active, "offer", "request", rounds, branch, ask_before, offer)
         try:
             res = rpc_call(rpc_url, "SendMessage", {"message": follow_up})
             active["seller_text"] = seller_response_text(res)
         except Exception as exc:
+            turn_event(active, "offer", "response", rounds, branch, ask_before, offer, error=exc)
             failure_reason = f"counter RPC failed ({type(exc).__name__})"
             if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
                 active["failure"] = "network-timeout" if isinstance(exc, httpx.TimeoutException) else "timeout"
             break
         if "error" in res:
+            turn_event(active, "offer", "response", rounds, branch, ask_before, offer, rpc_error=True)
             failure_reason = f"counter RPC error: {res['error']}"
             break
 
@@ -1063,6 +1152,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         task_id = task.get("id") or task_id
         active.update(id=task_id, state=task_state)
         seller_ask = extract_last_number(task, min_valid_p, max_valid_p)
+        turn_event(active, "offer", "response", rounds, branch, ask_before, offer, seller_ask, task_state)
         seller_texts.append(
             " ".join(p.get("text", "") for p in task_status.get("message", {}).get("parts", []))
         )
@@ -1075,6 +1165,8 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
     if (is_round3 and rounds == 3 and not failure_reason
             and task_state == "TASK_STATE_INPUT_REQUIRED"
             and seller_ask is not None and seller_ask <= offer_limit):
+        ask_before = seller_ask
+        turn_event(active, "offer", "request", 4, "finalaccept", ask_before, ask_before)
         try:
             request_timeout(1)
             last_offer = seller_ask
@@ -1087,6 +1179,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
             }})
             active["seller_text"] = seller_response_text(res)
             if "error" in res:
+                turn_event(active, "offer", "response", 4, "finalaccept", ask_before, ask_before, rpc_error=True)
                 failure_reason = f"final acceptance RPC error: {res['error']}"
             else:
                 task = res.get("task", res)
@@ -1095,10 +1188,12 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
                 task_id = task.get("id") or task_id
                 active.update(id=task_id, state=task_state)
                 seller_ask = extract_last_number(task, min_valid_p, max_valid_p)
+                turn_event(active, "offer", "response", 4, "finalaccept", ask_before, last_offer, seller_ask, task_state)
                 seller_texts.append(
                     " ".join(p.get("text", "") for p in task_status.get("message", {}).get("parts", []))
                 )
         except Exception as exc:
+            turn_event(active, "offer", "response", 4, "finalaccept", ask_before, ask_before, error=exc)
             failure_reason = f"final acceptance RPC failed ({type(exc).__name__})"
 
     # 3. Inspect result & receipt
