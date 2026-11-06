@@ -283,6 +283,14 @@ def goods_request_warranty(unit: dict[str, Any], request: dict[str, Any]) -> int
     return cash_policy.warranty_hours(grade)
 
 
+def explicit_A72_choice(text: str) -> bool:
+    """Small positive-command allowlist; questions/negations are never consent."""
+    return bool(re.fullmatch(
+        r'\s*(?:(?:i\s+)?(?:choose|select)\s+72\s*(?:h|hours?)\s+warranty|'
+        r'72\s*(?:h|시간)\s*보증\s*선택(?:합니다|할게요)?)'
+        r'(?:\s+offer\s+\d+)?\s*[.!]?\s*', (text or '').lower()))
+
+
 def price_requested_unit(unit, buyer_text, pricing_context):
     if unit.get('kind') != 'goods' or str(unit.get('sku', '')).lower() not in GOODS_TERMS_PILOT_SKUS:
         return compute_unit_pricing_and_terms(unit, **pricing_context)
@@ -1163,10 +1171,19 @@ class Seller(AgentExecutor):
             grade_ok = (not request['grade'] or (grade <= request['grade'] if request['minimum'] else grade == request['grade']))
             # Only an explicit option choice upgrades a newly offered A0 quote.
             # A bare duration/price is never consent to change existing promises.
-            choose_72 = (deal.get('pilot_A0_option') and warranty == 0 and not request['invalid']
-                         and grade_ok and (request['warranty'] == 72 or request['required'] == 72)
-                         and bool(re.search(r'\bchoose\b|\bselect\b|선택', text_low))
-                         and not re.search(r"\bnot\b|\bdon't\b|말고|않|취소", text_low))
+            option_72 = (deal.get('pilot_A0_option') and warranty == 0
+                         and (request['warranty'] == 72 or request['required'] == 72)
+                         and bool(re.search(r'\b(?:choos\w*|chose\w*|select\w*|choice|option|switch|upgrade)\b|선택', text_low)))
+            positive_choice = explicit_A72_choice(text)
+            if option_72 and not positive_choice:
+                # Do not mutate/release the quote or consume a numeric offer on
+                # a negated, interrogative or otherwise unsupported option reply.
+                await up.requires_input(say(
+                    f"No option changed. Current quote remains grade={grade}, warranty_hours={warranty}, "
+                    f"asking price {deal['ask']}. To choose the other option, reply exactly "
+                    "'choose 72h warranty' or '72h 보증 선택'. No receipt issued."))
+                return
+            choose_72 = option_72 and positive_choice and not request['invalid'] and grade_ok
             if choose_72:
                 catalog = load_catalog(MARKET_DIR)
                 pricing = compute_unit_pricing_and_terms(deal['unit'], load_hub(), now=now_ts,

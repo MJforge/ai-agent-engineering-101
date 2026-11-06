@@ -228,7 +228,8 @@ class GoodsTermsPilotTests(unittest.TestCase):
         sku = self.stock()
         deal, _ = self.open_deal(sku+' grade A')
         events = self.turn('do not choose 72h warranty')
-        self.assertIn('reject', [k for k, _ in events])
+        self.assertEqual([k for k, _ in events], ['input'])
+        self.assertIs(self.agent.open['task-1'], deal)
         self.assertEqual(deal['warranty_hours'], 0)
 
     def test_natural_zero_days_and_invalid_warranty_durations_are_not_ignored(self):
@@ -297,7 +298,8 @@ class GoodsTermsPilotTests(unittest.TestCase):
                      '72h 보증 미선택', '72h 보증 선택 여부 미정', '72h 보증 선택할까요?',
                      'do not choose 72h warranty', 'I refuse to select 72h warranty',
                      'should I choose 72h warranty?', 'I might choose 72h warranty',
-                     'choose 72h warranty?'):
+                     'choose 72h warranty?', 'I have not chosen 72h warranty',
+                     'do not choose 72h warranty offer 999999'):
             with self.subTest(text=text):
                 sku = self.stock()
                 deal, _ = self.open_deal(sku+' grade A')
@@ -310,7 +312,7 @@ class GoodsTermsPilotTests(unittest.TestCase):
 
     def test_review_explicit_positive_options_requote_without_signing(self):
         for text in ('choose 72h warranty', 'select 72h warranty', 'I choose 72h warranty',
-                     '72h 보증 선택', '72h 보증 선택합니다'):
+                     '72h 보증 선택', '72h 보증 선택합니다', 'choose 72h warranty offer 999999'):
             with self.subTest(text=text):
                 sku = self.stock()
                 self.open_deal(sku+' grade A')
