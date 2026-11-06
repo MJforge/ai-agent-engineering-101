@@ -13,6 +13,7 @@ from typing import Any
 
 from adaptive_strategy import decide_restock
 import seller_cash_policy as cash_policy
+import seller_market_research as market_research
 from seller_forum import queue_availability_notice
 from visibility_guard import own_sale, paused, read_json
 from store import (
@@ -71,49 +72,14 @@ def supply_window(inv: dict[str, Any]) -> tuple[float, float] | None:
 
 def market_ratio(shops, board, catalog):
     """Pure calculation from full public API snapshots, never order-specific files."""
-    shops = shops.get("shops", []) if isinstance(shops, dict) else shops
-    board = board.get("shops", []) if isinstance(board, dict) else board
-    metrics = {s.get("name"): s for s in board if isinstance(s, dict)}
-    ratios = []
-    for shop in shops:
-        if not isinstance(shop, dict):
-            continue
-        data = {**shop, **metrics.get(shop.get("name"), {})}
-        revenue, profit, stock = data.get("revenue"), data.get("profit"), shop.get("stock")
-        if (not isinstance(revenue, (int, float)) or not math.isfinite(revenue)
-                or not isinstance(profit, (int, float)) or not math.isfinite(profit)
-                or not isinstance(stock, dict)):
-            continue
-        if any(s not in catalog or not isinstance(q, (int, float)) or not math.isfinite(q) or q < 0
-               for s, q in stock.items()):
-            continue
-        estimated = sum(q * int(catalog[s].get("list_price", 0)) * .75 for s, q in stock.items())
-        cash = 5_000_000 + profit
-        if cash < 0 or cash + estimated <= 0:
-            continue
-        ratios.append((revenue, str(shop.get("name", "")), estimated / (cash + estimated)))
-    if len(ratios) < 3:
-        return DEFAULT_RATIO, {"source": "default: insufficient public shops/financials", "default": True,
-                               "shops": len(ratios)}
-    top = sorted(ratios, key=lambda r: (-r[0], r[1]))[:5]
-    return max(RATIO_MIN, min(RATIO_MAX, statistics.median(r[2] for r in top))), {
-        "source": "/api/shops+/api/board: top revenue median", "default": False, "shops": len(top)}
+    return market_research.market_ratio(
+        shops, board, catalog, default_ratio=DEFAULT_RATIO, ratio_min=RATIO_MIN, ratio_max=RATIO_MAX)
 
 
 def resolve_market_ratio(hub, observation=None):
-    now = time.time()
-    if observation is not None and not observation[1]["default"]:
-        ratio, source = observation
-        hub["market_ratio_cache"] = {"ratio": ratio, "ts": now, "shops": source["shops"], "source": source["source"]}
-        return ratio, {**source, "cached": False, "ts": now}
-    cached = hub.get("market_ratio_cache", {})
-    ratio, ts = cached.get("ratio"), cached.get("ts")
-    if (isinstance(ratio, (int, float)) and RATIO_MIN <= ratio <= RATIO_MAX
-            and isinstance(ts, (int, float)) and 0 <= now - ts <= RATIO_CACHE_S):
-        return ratio, {"source": cached["source"], "shops": cached["shops"], "ts": ts,
-                       "default": False, "cached": True, "refresh_failed": True}
-    return DEFAULT_RATIO, {"source": "default: public API unavailable/insufficient, no fresh cache",
-                           "default": True, "cached": False, "shops": 0}
+    return market_research.resolve_market_ratio(
+        hub, observation, now=time.time(), default_ratio=DEFAULT_RATIO,
+        ratio_min=RATIO_MIN, ratio_max=RATIO_MAX, ratio_cache_s=RATIO_CACHE_S)
 
 
 def popularity(inquiries, misses, settlements, *, hot_max_depth=None):
