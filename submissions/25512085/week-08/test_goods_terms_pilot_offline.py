@@ -230,6 +230,19 @@ class GoodsTermsPilotTests(unittest.TestCase):
         self.assertIn('reject', [k for k, _ in events])
         self.assertEqual(deal['warranty_hours'], 0)
 
+    def test_natural_zero_days_and_invalid_warranty_durations_are_not_ignored(self):
+        for text in ('warranty 6 days', '6일 보증', 'warranty -1h', 'warranty nan h'):
+            with self.subTest(text=text):
+                sku = self.stock()
+                events = self.turn(sku+' '+text+' offer 999999')
+                self.assertIn('reject', [k for k, _ in events])
+                self.assertNotIn('receipt', [k for k, _ in events])
+        for text in ('grade=C warranty 0h', 'grade=C 0h warranty'):
+            with self.subTest(text=text):
+                sku = self.stock()
+                deal, _ = self.open_deal(sku+' '+text)
+                self.assertEqual((deal['grade'], deal['warranty_hours']), ('C', 0))
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
