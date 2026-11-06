@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 import restock
 import seller_forum
+import store
 from test_unified_buying_offline import BuyingFixture, NOW
 from verify_cash_refactor_offline import select_temp_parent
 
@@ -67,6 +68,16 @@ class NoticeExecutionTests(unittest.TestCase):
         with patch.object(Path, 'read_text', side_effect=OSError('synthetic unreadable feed')):
             self.run_notice()
         self.assertEqual(self.planner.call_args.args[-1], [])
+
+    def test_feed_freshness_includes_zero_and_120_seconds_only(self):
+        value = [{'id':1}]
+        for age in (0, 120, 121, -1):
+            with self.subTest(age=age):
+                self.feed(value, age)
+                seller_forum.queue_availability_notice(
+                    self.path, self.units, self.hub, self.catalog, NOW,
+                    availability_plan=self.planner, queue_action=self.enqueue)
+                self.assertEqual(self.planner.call_args.args[-1], value if 0<=age<=120 else [])
 
     def test_none_plan_does_not_enqueue_or_create_state(self):
         self.planner.return_value = None
@@ -133,10 +144,16 @@ class NoticeExecutionTests(unittest.TestCase):
 
 
 class RestockNoticeBoundaryTests(BuyingFixture, unittest.TestCase):
+    def setUp(self):
+        BuyingFixture.setUp(self)
+        self.hub.pop('forum_state')
+
     def test_finish_branches_keep_monkeypatch_boundary_and_log_order(self):
         for branch in ('outside_window', 'round_end', 'first_window', 'normal'):
             with self.subTest(branch=branch):
                 self.hub.clear()
+                self.hub.update(store.default_hub())
+                self.hub.pop('forum_state')
                 self.stderr.seek(0)
                 self.stderr.truncate()
                 self.inv['restock'] = {'opens_at':NOW-20, 'closes_at':NOW+160}
@@ -169,6 +186,25 @@ class RestockNoticeBoundaryTests(BuyingFixture, unittest.TestCase):
         helper.assert_not_called()
         planner.assert_not_called()
         self.assertNotIn('forum_state', self.hub)
+
+    def test_real_policy_replies_outside_window_then_suppresses_duplicate(self):
+        sku = self.item('G00000001')
+        self.stock(sku)
+        self.inv['units'][0]['cert'] = True
+        self.inv['restock'] = {}
+        feed = self.path / 'forum.json'
+        feed.write_text(json.dumps([{'id':123, 'ts':NOW, 'role':'buyer',
+                                     'owner':'outside', 'text':'want to buy '+sku}]), encoding='utf-8')
+        os.utime(feed, (NOW, NOW))
+        with patch.object(restock, 'queue_forum_action', return_value=True) as queue:
+            for _ in range(2):
+                self.assertEqual(restock.plan_with_hub(self.hub, self.path, self.catalog, self.inv, [],
+                                                      inventory_fresh=True), {'buy':[]})
+        queue.assert_called_once()
+        self.assertEqual(queue.call_args.args[1]['thread'], 123)
+        self.assertEqual(self.hub['forum_state']['availability_announced'], {sku:NOW})
+        self.assertEqual(self.hub['forum_state']['availability_replied_threads'], ['123'])
+        self.assertEqual(self.diag()['stop'], 'outside_window')
 
     def test_enqueue_failure_still_logs_and_returns_but_exception_prevents_both(self):
         with patch.object(restock.cash_policy, 'availability_plan', return_value=notice()), \
