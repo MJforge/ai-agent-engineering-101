@@ -28,6 +28,8 @@ MODULES = (
     'test_procurement_guard_offline',
     'test_market_research_offline',
     'test_endgame_taper_offline', 'test_restock_equity_target_offline',
+    'test_buyer_price_offline', 'test_buyer_retry_offline',
+    'test_buyer_failure_reason_offline', 'test_buyer_stockout_cooldown_offline',
 )
 
 
@@ -86,6 +88,8 @@ def main():
             modules = list(MODULES)
             if (BASE / 'test_cash_policy_modules_offline.py').exists():
                 modules.append('test_cash_policy_modules_offline')
+            if (BASE / 'test_buyer_savings_ranking_offline.py').exists():
+                modules.append('test_buyer_savings_ranking_offline')
             suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
             result = unittest.TextTestRunner(verbosity=2).run(suite)
         print(log)
