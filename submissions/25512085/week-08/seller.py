@@ -206,11 +206,14 @@ GOODS_TERMS_PILOT_SKUS = frozenset(('g021aae64', 'g0be9ed07', 'g81ade83e'))
 def goods_request_terms(text: str) -> dict[str, Any]:
     """Explicit public requirements only. Unknown quality/refund intent is not C0 consent."""
     low = (text or '').lower()
-    grades = re.findall(r'\bgrade\s*(?:[:=]|>=)?\s*([abc])\b|([abc])\s*급|\b([abc])(?=인가요|등급)', low)
+    grades = re.findall(
+        r'\b(?:exact_)?grade\s*(?:[:=]|>=)?\s*([abc])\b|([abc])\s*급|'
+        r'\b([abc])(?=인가요|등급|\s*이상|만)|\b([abc])\s*(?:-?grade\b|only\b)|'
+        r'\bonly\s+([abc])\b|등급\s*([abc])\b', low)
     grades = {next(g for g in match if g).upper() for match in grades}
-    minimum = bool(re.search(r'min(?:imum)?\s+grade|grade\s*>=|[abc]\s*급\s*이상|grade\s*[abc]\s*(?:or\s+above|이상)', low))
+    minimum = bool(re.search(r'min(?:imum)?\s+grade|grade\s*>=|[abc]\s*(?:급\s*)?이상|grade\s*[abc]\s*(?:or\s+above|이상)', low))
     exact = re.findall(r'\bwarranty_hours\s*[:=]\s*([^\s,;!?]+)', low)
-    invalid = len(grades) > 1 or bool(re.search(r'\bgrade\s*[:=]\s*(?![abc]\b)\S+', low))
+    invalid = len(grades) > 1 or bool(re.search(r'\bgrade\s*[:=]\s*(?![abc]\b)\S+|\b(?:not|no)\s+(?:grade\s+)?[abc]\b|[abc]\s*급\s*제외', low))
     exact_hours = None
     for value in exact:
         try:
@@ -231,7 +234,11 @@ def goods_request_terms(text: str) -> dict[str, Any]:
     invalid = invalid or required > 72 or bool(re.search(r'\bcert\s*[:=]\s*false\b', low))
     # Duration-less warranty/refund/quality/certificate requests retain the safe
     # historical cohort. Do not claim to know the buyer's hidden accept rules.
-    ambiguous = bool(re.search(r'quality|refund|return|reliable|premium|\bbest\b|\bnew\b|\bfresh\b|cert|품질|환불|반품|최상|신선|상태', low))
+    ambiguous = bool(re.search(r'quality|refund|return|reliable|premium|service|support|defect|durab|\bsafe\b|\bbest\b|\bnew\b|\bfresh\b|cert|품질|환불|반품|최상|신선|상태|고장|하자|정품|인증|안전', low))
+    if not grades and re.search(r'grade|등급|[abc]\s*[/,]\s*[abc]', low):
+        invalid = True  # Unsupported grade syntax needs clarification, not substitution.
+    if re.search(r'\bgrades\b', low):
+        invalid = True  # Do not silently discard an unparsed explicit allowed-grade set.
     if re.search(r'warranty|guarantee|보증|care', low) and exact_hours is None and not required:
         ambiguous = True
     return dict(grade=next(iter(grades), None), minimum=minimum, warranty=exact_hours,
@@ -397,6 +404,8 @@ def _select_preferred_unit(units: list[dict[str, Any]], buyer_text: str) -> dict
                     if request['minimum'] else str(u.get('live_grade') or u.get('grade')) == request['grade'])]
             pool = [u for u in pool if goods_request_warranty(u, request) >= request['required']
                     and (request['warranty'] is None or goods_request_warranty(u, request) == request['warranty'])]
+            if request['ambiguous']:
+                pool = [u for u in pool if goods_request_warranty(u, request) > 0]
             if not pool:
                 return None
             unconstrained = (not request['grade'] and request['warranty'] is None
@@ -678,6 +687,11 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any], *,
     if kind=='goods':
         # C's normal floor above already excludes unpaid warranty risk.
         hard_floor=max(normal_hard_floor,cash_policy.profit_floor(unit,hub,catalog,now,warranty=warranty_override))
+        if warranty_override is not None:
+            # A0 has zero actual refund risk, but no automatic discount is
+            # authorized. Retain the old warranty-inclusive reserve as a guard,
+            # not as a claim about A0's risk or its comparable market price.
+            hard_floor=max(hard_floor,cash_policy.profit_floor(unit,hub,catalog,now))
         open_ask=max(open_ask,hard_floor)
         r1_target=min(open_ask,max(r1_target,hard_floor))
         r2_target=min(r1_target,max(r2_target,hard_floor))

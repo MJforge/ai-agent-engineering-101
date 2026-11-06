@@ -13,6 +13,7 @@ REPO = BASE.parents[2]
 
 if __name__ == '__main__':
     label = sys.argv[1]
+    mode = sys.argv[2] if len(sys.argv) > 2 else 'all'
     tree = OUT/'evidence'/label/'submissions/25512085/week-08'
     tree.mkdir(parents=True, exist_ok=False)
     names = subprocess.check_output(['git', 'ls-files', '--', str(BASE/'*.py')], cwd=REPO, text=True).splitlines()
@@ -38,7 +39,7 @@ if __name__ == '__main__':
     env = {k:v for k,v in os.environ.items() if k in ('SYSTEMROOT','WINDIR','COMSPEC','PATH','PATHEXT')}
     env.update(HOME=str(home), USERPROFILE=str(home), PYTHONDONTWRITEBYTECODE='1')
     with (OUT/(label+'.log')).open('x', encoding='utf-8') as log:
-        p = subprocess.run([sys.executable, '-B', str(runner), 'all', label], env=env,
+        p = subprocess.run([sys.executable, '-B', str(runner), mode, label], env=env,
                            stdout=log, stderr=subprocess.STDOUT, timeout=240)
     print(next((line for line in (OUT/(label+'.log')).read_text(encoding='utf-8').splitlines()
                 if line.startswith('BACKPORT_TEST_RESULT=')), 'No result; inspect new log'))

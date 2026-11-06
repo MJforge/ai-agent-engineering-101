@@ -55,7 +55,7 @@ class GoodsTermsPilotTests(unittest.TestCase):
         self.assertEqual((deal['grade'], deal['warranty_hours']), ('A', 72))
 
     def test_B_minimum_not_C_even_when_cheap(self):
-        for text in ('B급 이상 저렴', 'minimum grade B cheap', 'grade>=B cheap'):
+        for text in ('B급 이상 저렴', 'B이상 저렴', 'B 이상 저렴', 'minimum grade B cheap', 'grade>=B cheap'):
             with self.subTest(text=text):
                 sku = self.stock(grades=('B', 'C'))
                 deal, _ = self.open_deal(sku+' '+text)
@@ -78,7 +78,7 @@ class GoodsTermsPilotTests(unittest.TestCase):
         self.assertEqual((deal['grade'], deal['warranty_hours']), ('A', 72))
 
     def test_ambiguous_quality_refund_and_cert_keep_conservative_terms(self):
-        for text in ('품질 중요', '환불 가능?', 'good quality', 'cert=true', 'A급 품질 보증 필요'):
+        for text in ('품질 중요', '환불 가능?', 'good quality', 'cert=true', 'after-sales service', '고장 적은 것', 'A급 품질 보증 필요'):
             with self.subTest(text=text):
                 sku = self.stock()
                 deal, _ = self.open_deal(sku+' '+text)
@@ -93,7 +93,8 @@ class GoodsTermsPilotTests(unittest.TestCase):
     def test_invalid_or_conflicting_conditions_never_sign(self):
         for text in ('grade=D', 'warranty_hours=-1', 'warranty_hours=nan',
                      'warranty_hours=73', 'grade=C warranty 6h', 'grade=A grade=C',
-                     'cert=false', 'grade=A warranty_hours=0 warranty 6h'):
+                     'cert=false', 'grade=A warranty_hours=0 warranty 6h', 'grades=[B,C]',
+                     'grade=unknown', 'not grade A'):
             with self.subTest(text=text):
                 sku = self.stock()
                 events = self.turn(sku+' '+text+' offer 999999')
@@ -172,6 +173,48 @@ class GoodsTermsPilotTests(unittest.TestCase):
             deal, _ = self.open_deal(sku+' grade A')
         self.assertFalse(deal['cash_first_quote'])
         self.assertEqual(deal['break_rate'], 0)
+
+    def test_A_wording_variants_never_sell_C(self):
+        for text in ('A only', 'only A', 'A-grade', 'A급만', '등급 A'):
+            with self.subTest(text=text):
+                sku = self.stock()
+                deal, _ = self.open_deal(sku+' '+text)
+                self.assertEqual((deal['grade'], deal['warranty_hours']), ('A', 0))
+
+    def test_ambiguous_refund_with_only_C_needs_new_inquiry(self):
+        sku = self.stock(grades=('C',))
+        events = self.turn(sku+' 환불 가능? offer 999999')
+        self.assertIn('reject', [k for k, _ in events])
+        self.assertNotIn('receipt', [k for k, _ in events])
+
+    def test_override_is_not_a_global_warranty_switch(self):
+        sku = self.stock()
+        for value in (True, -1, 6, 72, '0', float('nan')):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                seller.compute_unit_pricing_and_terms(self.inventory['units'][0], {}, now=self.now,
+                    catalog=self.catalog, clearance=1, warranty_override=value)
+        unit = dict(self.inventory['units'][0], sku='G00000001')
+        with self.assertRaises(ValueError):
+            seller.compute_unit_pricing_and_terms(unit, {}, now=self.now, catalog=self.catalog,
+                                                 clearance=1, warranty_override=0)
+
+    def test_A0_concession_receipt_same_conditions_and_no_floor_bypass(self):
+        sku = self.stock()
+        deal, _ = self.open_deal(sku+' grade A')
+        events = self.turn('offer 1')
+        self.assertIn('warranty_hours=0', str(events))
+        self.assertGreaterEqual(deal['ask'], deal['hard_floor'])
+        receipt = self.receipt(self.turn(str(deal['ask'])))
+        self.assertEqual((receipt['price'], receipt['warranty_hours']), (deal['ask'], 0))
+
+    def test_explicit_B6_and_no_matching_A_are_not_substituted(self):
+        sku = self.stock()
+        deal, _ = self.open_deal(sku+' grade=B warranty_hours=6')
+        self.assertEqual((deal['grade'], deal['warranty_hours']), ('B', 6))
+        sku = self.stock(grades=('B', 'C'))
+        events = self.turn(sku+' grade=A offer 999999')
+        self.assertIn('reject', [k for k, _ in events])
+        self.assertNotIn('receipt', [k for k, _ in events])
 
 
 if __name__ == '__main__':

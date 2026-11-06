@@ -24,6 +24,8 @@ def isolated_mkdtemp(suffix=None,prefix=None,dir=None):
 tempfile.mkdtemp = isolated_mkdtemp
 
 def audit(event,args):
+    if event in ('subprocess.Popen', 'os.system', 'os.posix_spawn'):
+        raise AssertionError('external process forbidden')
     if event in ('socket.connect','socket.sendto','socket.getaddrinfo'):
         raise AssertionError('external network forbidden')
     if event == 'open' and isinstance(args[0],(str,bytes,os.PathLike)):
@@ -38,7 +40,7 @@ sys.addaudithook(audit)
 os.chdir(cwd)
 sys.path.insert(0,str(cwd))
 if mode == 'focused':
-    names = ['test_forum_intel_offline','test_forum_quality_evidence_offline','test_seller_cash_offline','test_sku_break_rates_offline','test_hub_compaction_offline','test_buyer_gap_counter_offline','test_buyer_savings_ranking_offline','test_buyer_price_offline','test_buyer_retry_offline','test_buyer_failure_reason_offline','test_buyer_stockout_cooldown_offline','test_goods_selection_offline','test_procurement_guard_offline']
+    names = ['test_goods_terms_pilot_offline', 'test_grade_warranty_offline', 'test_warranty_disclosure_offline', 'test_goods_floor_offline', 'test_goods_selection_offline']
     suite = unittest.defaultTestLoader.loadTestsFromNames(names)
 else:
     suite = unittest.defaultTestLoader.discover('.',pattern='test_*_offline.py')
