@@ -25,6 +25,9 @@ MODULES = (
     'test_hub_compaction_offline', 'test_unified_buying_offline',
     'test_verify_cash_refactor_offline',
     'test_seller_forum_offline',
+    'test_procurement_guard_offline',
+    'test_market_research_offline',
+    'test_endgame_taper_offline', 'test_restock_equity_target_offline',
 )
 
 
