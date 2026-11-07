@@ -52,6 +52,16 @@ later turns; the buyer must clarify rather than have the seller infer a compleme
 Other duration-bearing warranty syntax that is not parsed is rejected, never
 reduced to "some warranty" or satisfied with B6 instead of the requested minimum.
 
+Each explicit grade/warranty field occurrence must be covered by the supported
+grammar, even when another clause parsed successfully. Unsupported operators such
+as `grade!=C` and `warranty_hours>=72`, unknown field suffixes, and residual
+operator/grade-set syntax reject before pricing acceptance on initial and later
+turns. The machine `warranty_hours` field supports only `:`/`=` assignments;
+natural `warranty of at least 72h` / `보증 최소 72시간` retain their minimum values.
+Repeated explicit grade or warranty clauses, including equal duplicates, require
+one clarified clause rather than letting a global minimum flag weaken an exact
+grade. These checks do not add an A0 product or alter grade-default pricing.
+
 Selection, opening, concession, final receipt and completion text use the same
 stored unit/grade/warranty; the existing live actual-cost floor remains binding.
 Receipt issuance is not payment confirmation. This is a candidate policy, not an

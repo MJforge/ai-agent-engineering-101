@@ -9,3 +9,7 @@
   (including subtests), covering both main counterexamples and duplicate clauses.
 - Per-marker coverage, trailing-operator checks and duplicate-clause rejection:
   green-focused 117 pass. Preserve both red and green logs before boundary probes.
+- Boundary red: 119 discovered, 16 subtest-inclusive failures on identifier suffixes,
+  residual grade sets and unknown values. New fields are not accepted by prefix.
+- Final local focused 119 pass; full 546 discovered, 544 pass, 2 existing launcher skips.
+  Parser-only source correction; grade-default pricing / A0 exclusion unchanged.

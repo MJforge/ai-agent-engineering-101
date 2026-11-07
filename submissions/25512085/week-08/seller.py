@@ -222,14 +222,15 @@ def goods_request_terms(text: str) -> dict[str, Any]:
         # A supported prefix does not consume an operator/list attached to its
         # value (grade=C/D, grade=C !=B, warranty 6h or 72h, etc.).
         return bool(re.match(
-            r'\s*(?:[!<>=~:/\\|&+*\-]|,\s*(?:[a-d]\b|\d)|'
-            r'\b(?:or|and|to|except)\s+(?:[a-d]\b|\d))', low[match.end():]))
+            r'\s*(?:[!<>=~:/\\|&+*\-\[]|,\s*(?:[a-z]\b|\d)|'
+            r'\b(?:or(?!\s+above\b)|to|except)\b|\band\s+(?:[a-z]\b|\d))|'
+            r'\s+[a-z]\b', low[match.end():]))
 
     # Validate EVERY explicit field occurrence, even after another valid clause.
     # Repeated grade clauses are conservatively rejected: a global minimum flag
     # must never weaken an exact grade in another clause, even for the same grade.
     if any(not covered(marker, grade_matches)
-           for marker in re.finditer(r'\b(?:exact_)?grades?\b|등급|[abc]\s*급', low)):
+           for marker in re.finditer(r'\b(?:exact_)?grades?\w*|등급|[abc]\s*급', low)):
         invalid = True
     if any(unsupported_tail(match) for match in grade_matches):
         invalid = True
@@ -276,14 +277,14 @@ def goods_request_terms(text: str) -> dict[str, Any]:
         invalid = True  # Multiple explicit warranties require one clarified clause.
     if any(unsupported_tail(match) for match in warranty_matches):
         invalid = True
-    for marker in re.finditer(r'\b(?:warranty_hours|warranty|guarantee)\b|보증', low):
+    for marker in re.finditer(r'\b(?:warranty\w*|guarantee\w*)\b|보증', low):
         if covered(marker, warranty_matches):
             continue
         # Bare warranty/quality questions retain the historical safe cohort, but
         # unconsumed structured fields, operators or numbers must fail closed.
         tail = re.split(r'\b(?:grade|warranty_hours|warranty|guarantee|offer|cert)\b|보증|등급|[,;\n]',
                         low[marker.end():], maxsplit=1)[0]
-        if marker.group() == 'warranty_hours' or re.search(r'[!<>=~:/\\|\d]|\b(?:nan|inf)\b', tail):
+        if marker.group().startswith('warranty_') or re.search(r'[!<>=~:/\\|\d]|\b(?:nan|inf)\b', tail):
             invalid = True
     if re.search(r'warranty|guarantee|보증', low):
         # Unparsed duration-bearing warranty language cannot be reduced to
