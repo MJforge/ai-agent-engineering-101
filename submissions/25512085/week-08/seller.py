@@ -206,14 +206,35 @@ GOODS_TERMS_PILOT_SKUS = frozenset(('g021aae64', 'g0be9ed07', 'g81ade83e'))
 def goods_request_terms(text: str) -> dict[str, Any]:
     """Explicit public requirements only. Unknown quality/refund intent is not C0 consent."""
     low = (text or '').lower()
-    grades = re.findall(
+    grade_matches = list(re.finditer(
         r'\b(?:exact_)?grade\s*(?:[:=]|>=)?\s*([abc])\b|([abc])\s*급|'
-        r'\b([abc])(?=인가요|등급|\s*이상|만)|\b([abc])\s*(?:-?grade\b|only\b)|'
-        r'\bonly\s+([abc])\b|등급\s*([abc])\b', low)
-    grades = {next(g for g in match if g).upper() for match in grades}
+        r'\b([abc])등급|\b([abc])(?=인가요|\s*이상|만)|\b([abc])\s*(?:-?grade\b|only\b)|'
+        r'\bonly\s+([abc])\b|등급\s*([abc])\b', low))
+    grades = {next(g for g in match.groups() if g).upper() for match in grade_matches}
     minimum = bool(re.search(r'min(?:imum)?\s+grade|grade\s*>=|[abc]\s*(?:급\s*)?이상|grade\s*[abc]\s*(?:or\s+above|이상)', low))
-    exact = re.findall(r'\bwarranty_hours\s*[:=]\s*([^\s,;!?]+)', low)
-    invalid = len(grades) > 1 or bool(re.search(r'\bgrade\s*[:=]\s*(?![abc]\b)\S+|\b(?:not|no)\s+(?:grade\s+)?[abc]\b|[abc]\s*급\s*제외', low))
+    exact_matches = list(re.finditer(r'\bwarranty_hours\s*[:=]\s*([^\s,;?]+)', low))
+    invalid = len(grade_matches) > 1 or bool(re.search(r'\bgrade\s*[:=]\s*(?![abc]\b)\S+|\b(?:not|no)\s+(?:grade\s+)?[abc]\b|[abc]\s*급\s*제외', low))
+
+    def covered(marker, matches):
+        return any(match.start() <= marker.start() and marker.end() <= match.end() for match in matches)
+
+    def unsupported_tail(match):
+        # A supported prefix does not consume an operator/list attached to its
+        # value (grade=C/D, grade=C !=B, warranty 6h or 72h, etc.).
+        return bool(re.match(
+            r'\s*(?:[!<>=~:/\\|&+*\-]|,\s*(?:[a-d]\b|\d)|'
+            r'\b(?:or|and|to|except)\s+(?:[a-d]\b|\d))', low[match.end():]))
+
+    # Validate EVERY explicit field occurrence, even after another valid clause.
+    # Repeated grade clauses are conservatively rejected: a global minimum flag
+    # must never weaken an exact grade in another clause, even for the same grade.
+    if any(not covered(marker, grade_matches)
+           for marker in re.finditer(r'\b(?:exact_)?grades?\b|등급|[abc]\s*급', low)):
+        invalid = True
+    if any(unsupported_tail(match) for match in grade_matches):
+        invalid = True
+    if re.search(r'\b[abc]\s*[/,]\s*[a-d]\b', low):
+        invalid = True
     # Recognizing a grade token is not positive consent to that grade. Reject
     # unsupported rejection/negation language rather than invert it or guess.
     if grades and re.search(
@@ -221,7 +242,8 @@ def goods_request_terms(text: str) -> dict[str, Any]:
             r'말고|아니|제외|거절|불가|원하지|싫|안\s*(?:돼|되|해|함|하)', low):
         invalid = True
     exact_hours = None
-    for value in exact:
+    for match in exact_matches:
+        value = match.group(1)
         try:
             hours = float(value)
         except ValueError:
@@ -233,10 +255,12 @@ def goods_request_terms(text: str) -> dict[str, Any]:
     required = required_warranty_hours(low)
     duration = r'([+-]?(?:\d+(?:\.\d+)?|nan|inf))\s*(hours?|hrs?|h|days?|시간|일)(?![a-zA-Z])'
     parsed_durations = set()
+    warranty_matches = list(exact_matches)
     qualifier = r'(?:(?:of\s+)?at\s+least\s+|minimum\s+|최소\s*)?'
     for pattern in (r'(?:warranty|guarantee|보증)\s*(?:hours?|기간)?[=: ]*'+qualifier+duration,
                     duration+r'\s*(?:warranty|guarantee|보증)'):
         for match in re.finditer(pattern, low):
+            warranty_matches.append(match)
             value, unit = match.groups()
             parsed_durations.add((match.start(1), match.end(2)))
             hours = float(value) * (24 if unit in ('day', 'days', '일') else 1)
@@ -248,6 +272,19 @@ def goods_request_terms(text: str) -> dict[str, Any]:
                 if exact_hours not in (None, 0):
                     invalid = True
                 exact_hours = 0
+    if len(exact_matches) + len(parsed_durations) > 1:
+        invalid = True  # Multiple explicit warranties require one clarified clause.
+    if any(unsupported_tail(match) for match in warranty_matches):
+        invalid = True
+    for marker in re.finditer(r'\b(?:warranty_hours|warranty|guarantee)\b|보증', low):
+        if covered(marker, warranty_matches):
+            continue
+        # Bare warranty/quality questions retain the historical safe cohort, but
+        # unconsumed structured fields, operators or numbers must fail closed.
+        tail = re.split(r'\b(?:grade|warranty_hours|warranty|guarantee|offer|cert)\b|보증|등급|[,;\n]',
+                        low[marker.end():], maxsplit=1)[0]
+        if marker.group() == 'warranty_hours' or re.search(r'[!<>=~:/\\|\d]|\b(?:nan|inf)\b', tail):
+            invalid = True
     if re.search(r'warranty|guarantee|보증', low):
         # Unparsed duration-bearing warranty language cannot be reduced to
         # "some warranty". Ask for supported explicit conditions instead.
