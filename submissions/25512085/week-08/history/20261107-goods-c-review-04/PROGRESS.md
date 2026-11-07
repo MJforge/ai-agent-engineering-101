@@ -18,3 +18,7 @@
   resumed-all: 551 discovered, 549 pass, 2 unchanged launcher skips.
 - Global compound-negation check, consumed supported suffix, 128-character explicit
   condition span cap and harmless-name boundary regressions all pass.
+- Source attribution 2fbd842. Revision06 prepare/dependencies/stage/validate/export
+  completed: VM focused 124 pass, full 492 discovered / 490 pass / 2 launcher skips.
+- Fresh final read-only observation and verify.py final succeeded: production HEAD,
+  clean status, 56 source hashes and process start metadata unchanged. No activation.
