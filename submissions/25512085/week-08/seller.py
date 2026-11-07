@@ -222,7 +222,7 @@ def goods_request_terms(text: str) -> dict[str, Any]:
         # A supported prefix does not consume an operator/list attached to its
         # value (grade=C/D, grade=C !=B, warranty 6h or 72h, etc.).
         return bool(re.match(
-            r'\s*(?:[!<>=~:/\\|&+*\-\[]|,\s*(?:[a-z]\b|\d)|'
+            r'\s*(?:[^\w\s.,;!?]|!|,\s*(?:[a-z]\b|\d)|'
             r'\b(?:or(?!\s+above\b)|to|except)\b|\band\s+(?:[a-z]\b|\d))|'
             r'\s+[a-z]\b', low[match.end():]))
 
