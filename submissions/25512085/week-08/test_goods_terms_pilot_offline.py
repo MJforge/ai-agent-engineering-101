@@ -406,7 +406,8 @@ class GoodsTermsPilotTests(unittest.TestCase):
     def test_review_field_suffixes_and_unconsumed_grade_sets_fail_closed(self):
         for condition in ('grade=C grade_min=C', 'grade=C grade_condition=C',
                           'grade=C or Z', 'grade=C or unknown', 'grade=C, Z',
-                          'grade=C D', 'grade=C [B,C]',
+                          'grade=C D', 'grade=C [B,C]', 'grade=C ≠A',
+                          'grade=C ≤B', 'grade=C %A',
                           'grade=B warranty_hours_min=72', 'grade=B warrantyhours>=72'):
             for later in (False, True):
                 with self.subTest(condition=condition, later=later):
