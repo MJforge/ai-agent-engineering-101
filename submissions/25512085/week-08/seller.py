@@ -284,7 +284,8 @@ def goods_request_terms(text: str) -> dict[str, Any]:
         # unconsumed structured fields, operators or numbers must fail closed.
         tail = re.split(r'\b(?:grade|warranty_hours|warranty|guarantee|offer|cert)\b|보증|등급|[,;\n]',
                         low[marker.end():], maxsplit=1)[0]
-        if marker.group().startswith('warranty_') or re.search(r'[!<>=~:/\\|\d]|\b(?:nan|inf)\b', tail):
+        if (marker.group().startswith('warranty_') or unsupported_tail(marker)
+                or re.search(r'[!<>=~:/\\|\d]|\b(?:nan|inf)\b', tail)):
             invalid = True
     if re.search(r'warranty|guarantee|보증', low):
         # Unparsed duration-bearing warranty language cannot be reduced to
