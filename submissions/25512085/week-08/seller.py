@@ -274,34 +274,6 @@ def goods_request_terms(text: str) -> dict[str, Any]:
                 required=required, ambiguous=ambiguous, invalid=invalid)
 
 
-def goods_request_warranty(unit: dict[str, Any], request: dict[str, Any]) -> int:
-    grade = str(unit.get('live_grade') or unit.get('grade') or 'A')
-    if (str(unit.get('sku', '')).lower() in GOODS_TERMS_PILOT_SKUS and grade == 'A'
-            and request['grade'] == 'A' and not request['minimum'] and not request['ambiguous']
-            and request['warranty'] in (None, 0) and request['required'] == 0):
-        return 0
-    return cash_policy.warranty_hours(grade)
-
-
-def explicit_A72_choice(text: str) -> bool:
-    """Small positive-command allowlist; questions/negations are never consent."""
-    return bool(re.fullmatch(
-        r'\s*(?:(?:i\s+)?(?:choose|select)\s+72\s*(?:h|hours?)\s+warranty|'
-        r'72\s*(?:h|시간)\s*보증\s*선택(?:합니다|할게요)?)'
-        r'(?:\s+offer\s+\d+)?\s*[.!]?\s*', (text or '').lower()))
-
-
-def price_requested_unit(unit, buyer_text, pricing_context):
-    if unit.get('kind') != 'goods' or str(unit.get('sku', '')).lower() not in GOODS_TERMS_PILOT_SKUS:
-        return compute_unit_pricing_and_terms(unit, **pricing_context)
-    request = goods_request_terms(buyer_text)
-    override = (dict(warranty_override=0) if unit.get('kind') == 'goods'
-                and str(unit.get('sku', '')).lower() in GOODS_TERMS_PILOT_SKUS
-                and str(unit.get('live_grade') or unit.get('grade')) == 'A'
-                and goods_request_warranty(unit, request) == 0 else {})
-    return compute_unit_pricing_and_terms(unit, **pricing_context, **override)
-
-
 def select_best_unit(units: list[dict[str, Any]], buyer_text: str, *, pricing_context=None) -> dict[str, Any] | None:
     """Preserve intent/SKU choice, then compare actual quotes only within its cohort.
 
@@ -334,7 +306,7 @@ def select_best_unit(units: list[dict[str, Any]], buyer_text: str, *, pricing_co
               and cash_policy.warranty_hours(str(u.get('live_grade') or u.get('grade') or 'A')) == warranty]
     now = pricing_context['now']
     try:
-        quotes = [(u, price_requested_unit(u, buyer_text, pricing_context)) for u in cohort]
+        quotes = [(u, compute_unit_pricing_and_terms(u, **pricing_context)) for u in cohort]
     except (OverflowError, ValueError, TypeError):
         # Comparing extra stock must not introduce a pricing failure for a legacy
         # selectable unit. Do not repair raw inputs or change their sale prices.
@@ -441,10 +413,12 @@ def _select_preferred_unit(units: list[dict[str, Any]], buyer_text: str) -> dict
                 pool = [u for u in pool if (
                     allowed.get(str(u.get('live_grade') or u.get('grade')), 99) <= allowed[request['grade']]
                     if request['minimum'] else str(u.get('live_grade') or u.get('grade')) == request['grade'])]
-            pool = [u for u in pool if goods_request_warranty(u, request) >= request['required']
-                    and (request['warranty'] is None or goods_request_warranty(u, request) == request['warranty'])]
+            # Zero/no-care wording never unbundles A/B warranty. Keep their
+            # historical grade terms; positive exact warranties still constrain.
+            pool = [u for u in pool if cash_policy.warranty_hours(str(u.get('live_grade') or u.get('grade'))) >= request['required']
+                    and (request['warranty'] in (None, 0) or cash_policy.warranty_hours(str(u.get('live_grade') or u.get('grade'))) == request['warranty'])]
             if request['ambiguous']:
-                pool = [u for u in pool if goods_request_warranty(u, request) > 0]
+                pool = [u for u in pool if cash_policy.warranty_hours(str(u.get('live_grade') or u.get('grade'))) > 0]
             if not pool:
                 return None
             unconstrained = (not request['grade'] and request['warranty'] is None
@@ -583,7 +557,7 @@ def required_warranty_hours(text):
     return max(values,default=0)
 
 
-def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any], *, now=None, catalog=None, clearance=None, warranty_override=None) -> dict[str, Any]:
+def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any], *, now=None, catalog=None, clearance=None) -> dict[str, Any]:
     """Compute High-Anchor opening ask, Fast-Close r1_target, hard reserve floor, and warranty_hours
     for a Round 3 stock unit, with differentiated clearance logic for expiring food vs aged goods."""
     cost = int(unit.get("cost") or 100)
@@ -593,9 +567,6 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any], *,
     grade = str(unit.get("live_grade") or unit.get("grade") or "A")
     hours_left = unit.get("hours_left")
     sku = str(unit.get("sku") or "")
-    if warranty_override is not None and (type(warranty_override) is not int or warranty_override != 0
-            or kind != 'goods' or grade != 'A' or sku.lower() not in GOODS_TERMS_PILOT_SKUS):
-        raise ValueError('Only the three-SKU A0 pilot may override grade warranty')
 
     now = time.time() if now is None else now
     catalog = load_catalog(MARKET_DIR) if catalog is None else catalog
@@ -639,9 +610,6 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any], *,
             r2_target = hard_floor
 
         default_warranty = cash_policy.warranty_hours(grade)
-        if warranty_override is not None:
-            default_warranty = warranty_override
-            break_rate = 0.0
     else:
         break_rate = 0.0
         hl = float(hours_left) if hours_left is not None else float("inf")
@@ -697,7 +665,7 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any], *,
         default_warranty = 0
 
     first_quote = None
-    if clearance == 1.0 and warranty_override is None:
+    if clearance == 1.0:
         first_quote = cash_policy.quote(unit,hub,catalog,now)
     if first_quote:
         open_ask,r1_target,r2_target,hard_floor = (first_quote[k] for k in ('open_ask','r1_target','r2_target','hard_floor'))
@@ -725,12 +693,7 @@ def compute_unit_pricing_and_terms(unit: dict[str, Any], hub: dict[str, Any], *,
             int(salvage + (p - salvage) * f) for p in (open_ask, r1_target, r2_target, hard_floor))
     if kind=='goods':
         # C's normal floor above already excludes unpaid warranty risk.
-        hard_floor=max(normal_hard_floor,cash_policy.profit_floor(unit,hub,catalog,now,warranty=warranty_override))
-        if warranty_override is not None:
-            # A0 has zero actual refund risk, but no automatic discount is
-            # authorized. Retain the old warranty-inclusive reserve as a guard,
-            # not as a claim about A0's risk or its comparable market price.
-            hard_floor=max(hard_floor,cash_policy.profit_floor(unit,hub,catalog,now))
+        hard_floor=max(normal_hard_floor,cash_policy.profit_floor(unit,hub,catalog,now))
         open_ask=max(open_ask,hard_floor)
         r1_target=min(open_ask,max(r1_target,hard_floor))
         r2_target=min(r1_target,max(r2_target,hard_floor))
@@ -994,7 +957,7 @@ class Seller(AgentExecutor):
                     await up.reject(say(reason))
                     return
 
-                pricing = price_requested_unit(unit, text, pricing_context)
+                pricing = compute_unit_pricing_and_terms(unit, **pricing_context)
                 ask = pricing["open_ask"]
                 r1_target = pricing["r1_target"]
                 hard_floor = pricing["hard_floor"]
@@ -1010,11 +973,7 @@ class Seller(AgentExecutor):
 
                 # Check if the buyer already included an initial offer price in their first message!
                 initial_offer = extract_buyer_offer(text, current_ask=ask, list_price=list_price, sku=unit["sku"])
-                # A0 is a new default, not implied consent from a price sent
-                # before our first disclosure. Always expose it before closing.
-                pilot_A0 = (unit.get('kind') == 'goods' and grade == 'A' and warranty == 0
-                            and str(unit.get('sku', '')).lower() in GOODS_TERMS_PILOT_SKUS)
-                if initial_offer and initial_offer >= ask and not pilot_A0 and (not is_food or required_hours is not None):
+                if initial_offer and initial_offer >= ask and (not is_food or required_hours is not None):
                     # Recheck live expiry immediately before the opening receipt path.
                     grade, hours_left = compute_live_unit_grade(unit, catalog)
                     if is_food and (grade == "expired" or not food_has_use_time(unit, required_hours)):
@@ -1060,8 +1019,6 @@ class Seller(AgentExecutor):
                     care_note = ((f" Price includes {'market maximum 72h warranty (시장 허용 최대 보증)' if warranty==72 else str(warranty)+'h warranty'}: "
                                   f"if it breaks within {warranty} h of the sale, the market refunds you the full price.")
                                  if warranty else f" Grade {grade}{' refurbished' if grade=='C' else ''}: warranty_hours=0, no warranty and no breakage refund; the quoted price is without warranty.")
-                    if pilot_A0:
-                        care_note += " You may instead explicitly choose 72h warranty; request that option for a fresh quote before accepting. No automatic no-warranty discount."
                     if grade in NO_CARE_GRADES:
                         care_note += (f" Without Safe-Care: {no_care_price(ask, unit['cost'], pricing['break_rate'])}"
                                       f" (no refund); say 'without care' to take that option.")
@@ -1098,7 +1055,6 @@ class Seller(AgentExecutor):
                     "list_price": list_price,
                     "grade": grade,
                     "warranty_hours": warranty,
-                    "pilot_A0_option": pilot_A0,
                     "break_rate": pricing["break_rate"],
                     "no_care": (unit.get("kind") == "goods" and grade in NO_CARE_GRADES
                                 and any(w in text.lower() for w in NO_CARE_WORDS)),
@@ -1169,32 +1125,8 @@ class Seller(AgentExecutor):
             grade = deal['grade']
             warranty = int(deal.get('warranty_hours', cash_policy.warranty_hours(grade)))
             grade_ok = (not request['grade'] or (grade <= request['grade'] if request['minimum'] else grade == request['grade']))
-            # Only an explicit option choice upgrades a newly offered A0 quote.
-            # A bare duration/price is never consent to change existing promises.
-            option_72 = (deal.get('pilot_A0_option') and warranty == 0
-                         and (request['warranty'] == 72 or request['required'] == 72)
-                         and bool(re.search(r'\b(?:choos\w*|chose\w*|select\w*|choice|option|switch|upgrade)\b|선택', text_low)))
-            positive_choice = explicit_A72_choice(text)
-            if option_72 and not positive_choice:
-                # Do not mutate/release the quote or consume a numeric offer on
-                # a negated, interrogative or otherwise unsupported option reply.
-                await up.requires_input(say(
-                    f"No option changed. Current quote remains grade={grade}, warranty_hours={warranty}, "
-                    f"asking price {deal['ask']}. To choose the other option, reply exactly "
-                    "'choose 72h warranty' or '72h 보증 선택'. No receipt issued."))
-                return
-            choose_72 = option_72 and positive_choice and not request['invalid'] and grade_ok
-            if choose_72:
-                catalog = load_catalog(MARKET_DIR)
-                pricing = compute_unit_pricing_and_terms(deal['unit'], load_hub(), now=now_ts,
-                                                         catalog=catalog, clearance=clearance_factor(now_ts))
-                for key in ('r1_target', 'r2_target', 'hard_floor', 'warranty_hours', 'break_rate', 'cash_first_quote'):
-                    deal[key] = pricing[key]
-                deal.update(ask=pricing['open_ask'], initial_ask=pricing['open_ask'], rounds=0, offers=[])
-                await up.requires_input(say(f"Updated certified grade A quote, warranty=72h, full breakage refund within 72h: asking price {deal['ask']}. Reply with that price to accept."))
-                return
             if (request['invalid'] or not grade_ok or request['required'] > warranty
-                    or (request['warranty'] is not None and request['warranty'] != warranty)
+                    or (request['warranty'] not in (None, 0) and request['warranty'] != warranty)
                     or (warranty == 0 and request['ambiguous'])):
                 self.open.pop(task.id, None)
                 await up.reject(say('Requested conditions do not match the disclosed unit/grade/warranty. Please start a new condition-specific inquiry. No receipt issued.'))
