@@ -403,6 +403,32 @@ class GoodsTermsPilotTests(unittest.TestCase):
                         self.open_deal(sku+' grade=B warranty_hours=6')
                     self.assert_rejected_conditions(('' if later else sku+' ')+'grade=B '+condition+' offer 999999')
 
+    def test_review_field_suffixes_and_unconsumed_grade_sets_fail_closed(self):
+        for condition in ('grade=C grade_min=C', 'grade=C grade_condition=C',
+                          'grade=C or Z', 'grade=C or unknown', 'grade=C, Z',
+                          'grade=C D', 'grade=C [B,C]',
+                          'grade=B warranty_hours_min=72', 'grade=B warrantyhours>=72'):
+            for later in (False, True):
+                with self.subTest(condition=condition, later=later):
+                    sku = self.stock()
+                    if later:
+                        self.open_deal(sku+' grade='+('B' if 'grade=B' in condition else 'C'))
+                    self.assert_rejected_conditions(('' if later else sku+' ')+condition+' offer 999999')
+
+    def test_review_supported_single_clauses_retain_exact_terms(self):
+        for condition, expected in (
+                ('grade=C', ('C', 0)), ('grade=C warranty_hours=0', ('C', 0)),
+                ('grade>=B cheap', ('B', 6)), ('grade B or above cheap', ('B', 6)),
+                ('grade=B warranty_hours=6', ('B', 6)), ('grade B and warranty 6h', ('B', 6)),
+                ('grade=A warranty_hours=0', ('A', 72)), ('A등급', ('A', 72)),
+                ('보증 최소 72시간', ('A', 72)), ('warranty of at least 72h', ('A', 72))):
+            with self.subTest(condition=condition):
+                sku = self.stock()
+                deal, _ = self.open_deal(sku+' '+condition)
+                self.assertEqual((deal['grade'], deal['warranty_hours']), expected)
+                receipt = self.receipt(self.turn(str(deal['ask'])))
+                self.assertEqual((receipt['claim'], receipt['warranty_hours']), expected)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
