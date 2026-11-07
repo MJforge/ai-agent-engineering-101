@@ -78,11 +78,14 @@ def prepare():
     paths = [seller_path, REL+'test_goods_terms_pilot_offline.py']
     patch = b''
     after = {}
+    seller_blob = None
     for path in paths:
         blob = subprocess.check_output(['git', 'show', source+':'+path], cwd=REPO)
         assert (REPO/path).read_bytes().replace(b'\r\n', b'\n') == blob, 'worktree_drift'
         old = (OUT/'evidence/remote-baseline'/path).read_bytes() if path in before['source_sha256'] else b''
         write(Path(path).name, blob)
+        if path == seller_path:
+            seller_blob = blob
         after[path] = hashlib.sha256(blob).hexdigest()
         patch += ''.join(difflib.unified_diff(old.decode().splitlines(True), blob.decode().splitlines(True),
                          fromfile='a/'+path if old else '/dev/null', tofile='b/'+path)).encode()
@@ -90,7 +93,7 @@ def prepare():
     def pricing(blob):
         return next(n for n in ast.parse(blob).body if isinstance(n, ast.FunctionDef)
                     and n.name == 'compute_unit_pricing_and_terms')
-    assert ast.dump(pricing(baseline)) == ast.dump(pricing((OUT/'seller.py').read_bytes())), 'pricing_AST_drift'
+    assert ast.dump(pricing(baseline)) == ast.dump(pricing(seller_blob)), 'pricing_AST_drift'
     write('backport.patch', patch)
     manifest = dict(base=before['head'], source=source, local_base=base, paths=paths,
                     source_sha256=before['source_sha256'], after=after, remote=REMOTE,

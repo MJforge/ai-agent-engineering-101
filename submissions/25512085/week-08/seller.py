@@ -1018,7 +1018,7 @@ class Seller(AgentExecutor):
                 if unit.get("kind") == "goods":
                     care_note = ((f" Price includes {'market maximum 72h warranty (시장 허용 최대 보증)' if warranty==72 else str(warranty)+'h warranty'}: "
                                   f"if it breaks within {warranty} h of the sale, the market refunds you the full price.")
-                                 if warranty else f" Grade {grade}{' refurbished' if grade=='C' else ''}: warranty_hours=0, no warranty and no breakage refund; the quoted price is without warranty.")
+                                 if warranty else " Grade C refurbished: warranty_hours=0, no warranty and no breakage refund; the quoted price is without warranty.")
                     if grade in NO_CARE_GRADES:
                         care_note += (f" Without Safe-Care: {no_care_price(ask, unit['cost'], pricing['break_rate'])}"
                                       f" (no refund); say 'without care' to take that option.")

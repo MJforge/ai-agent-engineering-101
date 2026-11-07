@@ -16,3 +16,8 @@
 - 새 read-only VM inspect: HEAD 4a5deb685368343abfd1310c572288a924351b01,
   tracked dirty 없음, 기존 allowlist 56개 전부 이전 보류 기준선 해시와 동일.
   seller/kit/tunnel PID/starttime도 기존 보류 기록과 동일. 키/state 접근 없음.
+- 첫 VM 격리 후보: baseline 440(2 skip), red 집중 111/실패 50,
+  후보 집중 111 통과, 전체 479/477 실행 통과/2 skip. 운영 변경/시그널 0.
+- 추가 self-review에서 A0 당시 일반화했던 무보증 설명 템플릿도 원래 C 전용 문구로
+  되돌린다. 동작상 C0 문구는 같지만 불필요한 shared 설명 delta까지 없애기 위함.
+  이미 생성한 후보/로그는 보존하고 revision02 별도 후보로 재검증한다.
