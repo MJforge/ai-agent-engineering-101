@@ -51,5 +51,7 @@ if __name__ == '__main__':
             print(control.ssh((REV/'validate_remote.py').read_text(), 'validate').decode())
         elif action == 'export':
             control.export()
+        elif action == 'observe-final':
+            print(control.ssh((HERE/'observe_final.py').read_text(), 'observe-final').decode())
         else:
-            raise ValueError('Only prepare/stage/validate/export allowed; no activation')
+            raise ValueError('Only prepare/stage/validate/export/observe-final allowed; no activation')
