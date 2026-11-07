@@ -9,3 +9,10 @@
 - A0 helper/override/세션 옵션 제거 및 고정 A72 복원 후 집중 108 중 실패 1:
   동작이 아닌 기존 보증 안내 문자열 fixture 기대값 차이(실제 Safe-Care 72h).
   원시 green-focused.log는 실패 그대로 보존한다.
+- fixture 보증 문자열 교정 + C0 협상 영수증/B72 거절/후속 0보증 A72 유지 회귀 추가.
+  final-focused 111 통과; final-all 538 발견/536 실행 통과/2 기존 launcher skip.
+- verify_local.py: 7개 py_compile(격리 cfile), 기존 가격 함수 AST 완전 동일,
+  소스/정책/runner 한정 diff --check exit 0. 주차 checker 없음, 실거래 미실행.
+- 새 read-only VM inspect: HEAD 4a5deb685368343abfd1310c572288a924351b01,
+  tracked dirty 없음, 기존 allowlist 56개 전부 이전 보류 기준선 해시와 동일.
+  seller/kit/tunnel PID/starttime도 기존 보류 기록과 동일. 키/state 접근 없음.

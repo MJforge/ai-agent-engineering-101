@@ -1,6 +1,6 @@
 # Grade warranty and demand-led forum policy
 
-The seller states the certified grade, catalog list and actual price truthfully. The historical defaults are A72h full-refund warranty (the market's permitted maximum), B6h, and C0h with no breakage refund. The local three-SKU new-inquiry pilot below is the only A0 exception. Terms are stated before checkout and preserved in both instant and negotiated signed receipts. Food terms are unchanged. Explicit warranty requirements that cannot be met are rejected without issuing a receipt.
+The seller states the certified grade, catalog list and actual price truthfully. The fixed defaults are A72h full-refund warranty (the market's permitted maximum), B6h, and C0h with no breakage refund. No A0 option is offered. Terms are stated before checkout and preserved in both instant and negotiated signed receipts. Food terms are unchanged. Explicit warranty requirements that cannot be met are rejected without issuing a receipt.
 
 The market rules at https://market.ourolabs.ai/rules cap warranty at72h and state that goods can break within6h after sale. Thus72h is a truthful maximum duration, not a claim of lower defects or additional insured failure probability beyond the six-hour generator. No reviews or votes are required.
 
@@ -24,34 +24,25 @@ historically selected SKU. Other SKUs, food, procurement and forum policy are un
 | Public buyer request | New quote |
 | --- | --- |
 | No grade/warranty/quality/refund/certificate condition mentioned | Prefer certified C0 if held; otherwise historical selection and warranty |
-| Explicit A only, including `A인가요?`, with no warranty or ambiguous quality/refund demand | Disclose A0/no breakage refund as the first quote; offer an explicit 72h option |
+| Explicit A only, including `A인가요?`, with or without warranty wording | Keep A72; no no-warranty option, switch or refreshed-option quote |
 | Explicit grade, minimum grade (including B 이상), or warranty duration | Filter by those requirements; never substitute an unacceptable grade or duration |
 | Ambiguous quality/refund/service/certificate request | Historical high-grade, warrantied fallback; if unavailable, reject without receipt |
 | Invalid/conflicting/unsupported explicit grade or warranty syntax | Reject without receipt; a clarified new inquiry is required |
 
-Silence is NOT evidence that hidden checkout acceptance permits C0 or A0. These
+Silence is NOT evidence that hidden checkout acceptance permits C0. These
 are public quotes, not a claim of guaranteed payment. No hidden acceptance rules
 are bypassed. C remains refurbished and A remains A, with actual certificate and
-disclosed duration; A0 must never be described as C refurbished.
+disclosed duration.
 Natural warranty durations include hours/days (시간/일); zero is an explicit
-no-warranty condition, and negative/nonfinite/over-72h requirements are rejected.
+wording does not remove the grade's bundled warranty. Even explicit
+`grade=A warranty_hours=0` can receive A72, as before; no A0 feature is provided.
+Explicit C0 still receives C0. Negative/nonfinite/over-72h requirements are rejected.
 
-A0 has zero paid-refund probability (`break_rate=0`). Its opening and concession
-targets use the existing A fallback calculations, NOT A72 settled comparables.
-Its reserve is the maximum of the historical A reserve, the actual zero-warranty
-cost/storage/contribution floor, and the historical default-warranty floor as a
-separate conservative guard. No automatic no-warranty discount or invented cost,
-fee or discount is introduced. Without comparable evidence this can leave A0 and
-A72 at the same price. A72 may use its own existing comparable path, so no claim
-is made that A0 is always cheaper; a requested option receives a separate quote.
-
-An initial numeric offer cannot instantly accept a not-yet-disclosed A0 default.
-The first response quotes A0 and one actionable price, not two option prices.
-Only an explicit `choose 72h warranty` / `72h 보증 선택` requests a refreshed A72
-quote; that turn issues no receipt even if it contains a price. A later numeric
-acceptance keeps the refreshed terms. Bare warranty requirements that exceed the
-stored duration are rejected, even without a price. Existing A72/B6/C0/custom
-stored commitments are never downgraded by a numeric response or a new default.
+All grade pricing, comparable selection, refund risk, floors and concessions use
+the existing grade-default path, without a warranty override or automatic discount.
+Bare warranty requirements exceeding stored duration reject even without a price.
+Existing A72/B6/C0/custom stored commitments are never downgraded by a numeric
+response or the new C-first selection. There is no session option/requote branch.
 
 Independent-review hardening: a recognized grade token in rejection language
 (e.g. `grade C is not acceptable`, `C급 말고`) is not a positive grade request.
@@ -61,15 +52,8 @@ later turns; the buyer must clarify rather than have the seller infer a compleme
 Other duration-bearing warranty syntax that is not parsed is rejected, never
 reduced to "some warranty" or satisfied with B6 instead of the requested minimum.
 
-The A72 choice is a full positive-command allowlist (`choose/select 72h warranty`,
-optional `I`, or `72h/72시간 보증 선택`, optionally `합니다/할게요`; an optional
-trailing `offer NUMBER` still only requests a fresh quote). A question mark,
-negation, uncertainty or additional unsupported prose is not selection consent.
-For a 72h option-related reply that fails this allowlist, including `72h 보증 선택
-안 함`, retain the entire A0 session unchanged and ask for the explicit command.
-Do not reprice, reset rounds, consume a numeric offer, sign, or release its unit.
-
 Selection, opening, concession, final receipt and completion text use the same
 stored unit/grade/warranty; the existing live actual-cost floor remains binding.
-Receipt issuance is not payment confirmation. No VM access/deployment, market
-RPC, posting, procurement, blanket discount or existing log edits occurred.
+Receipt issuance is not payment confirmation. This is a candidate policy, not an
+activation claim. Remote isolated validation is separate from deployment. No market
+RPC, posting, procurement, blanket discount or existing log edits are authorized.

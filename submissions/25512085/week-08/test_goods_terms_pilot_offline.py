@@ -205,7 +205,7 @@ class GoodsTermsPilotTests(unittest.TestCase):
         sku = self.stock()
         deal, _ = self.open_deal(sku+' grade A')
         events = self.turn('offer 1')
-        self.assertIn('warranty_hours=72', str(events))
+        self.assertIn('72h', str(events))
         self.assertGreaterEqual(deal['ask'], deal['hard_floor'])
         receipt = self.receipt(self.turn(str(deal['ask'])))
         self.assertEqual((receipt['price'], receipt['warranty_hours']), (deal['ask'], 72))
@@ -317,6 +317,28 @@ class GoodsTermsPilotTests(unittest.TestCase):
     def test_explicit_zero_warranty_initial_price_uses_A72_receipt(self):
         sku = self.stock()
         receipt = self.receipt(self.turn(sku+' grade=A warranty_hours=0 offer 999999'))
+        self.assertEqual((receipt['claim'], receipt['warranty_hours']), ('A', 72))
+
+    def test_C0_concession_receipt_matches_stored_conditions(self):
+        sku = self.stock()
+        deal, _ = self.open_deal(sku)
+        self.turn('offer 1')
+        self.assertGreaterEqual(deal['ask'], deal['hard_floor'])
+        receipt = self.receipt(self.turn(str(deal['ask'])))
+        self.assertEqual((receipt['unit'], receipt['claim'], receipt['warranty_hours'], receipt['price']),
+                         (deal['unit']['unit'], 'C', 0, deal['ask']))
+        self.assertEqual(receipt['refund_policy'], 'no refund if the item breaks')
+
+    def test_explicit_B_cannot_meet_72h_even_when_A_exists(self):
+        sku = self.stock()
+        events = self.turn(sku+' grade=B warranty 72h offer 999999')
+        self.assertEqual([k for k, _ in events], ['reject'])
+        self.assertFalse(self.agent.committed_units)
+
+    def test_later_zero_warranty_with_price_keeps_promised_A72(self):
+        sku = self.stock()
+        deal, _ = self.open_deal(sku+' grade A')
+        receipt = self.receipt(self.turn('warranty_hours=0 offer '+str(deal['ask'])))
         self.assertEqual((receipt['claim'], receipt['warranty_hours']), ('A', 72))
 
 
