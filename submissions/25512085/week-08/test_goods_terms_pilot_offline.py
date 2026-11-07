@@ -431,6 +431,52 @@ class GoodsTermsPilotTests(unittest.TestCase):
                 receipt = self.receipt(self.turn(str(deal['ask'])))
                 self.assertEqual((receipt['claim'], receipt['warranty_hours']), expected)
 
+    COMPOUND_GRADE_CONDITIONS = (
+        'grade B or above except A', 'grade B or above excluding A',
+        'grade B or above but not A', 'except A, grade B or above',
+        'grade B or above sofa, excluding A', 'grade B or above with exception of A',
+        'B급 이상 A 제외', 'B급 이상 A 빼고', 'B급 이상 A빼고요',
+        'B급 이상 A 말고', 'grade B or above != A', 'grade B or above / C',
+    )
+
+    def test_review_compound_minimum_grade_initial_with_and_without_price(self):
+        for condition in self.COMPOUND_GRADE_CONDITIONS:
+            for price in ('', ' offer 999999'):
+                with self.subTest(condition=condition, price=price):
+                    sku = self.stock()
+                    self.assert_rejected_conditions(sku+' '+condition+price)
+
+    def test_review_compound_minimum_grade_later_with_and_without_price(self):
+        for condition in self.COMPOUND_GRADE_CONDITIONS:
+            for price in ('', ' offer 999999'):
+                with self.subTest(condition=condition, price=price):
+                    sku = self.stock()
+                    self.open_deal(sku+' grade A')
+                    self.assert_rejected_conditions(condition+price)
+
+    def test_review_consumed_minimum_suffix_keeps_supported_single_condition(self):
+        for condition, expected in (
+                ('grade B or above', ('A', 72)), ('grade B or above cheap', ('B', 6)),
+                ('B급 이상', ('A', 72)), ('B급 이상 저렴', ('B', 6))):
+            with self.subTest(condition=condition):
+                sku = self.stock()
+                deal, _ = self.open_deal(sku+' '+condition)
+                self.assertEqual((deal['grade'], deal['warranty_hours']), expected)
+                receipt = self.receipt(self.turn(str(deal['ask'])))
+                self.assertEqual((receipt['claim'], receipt['warranty_hours']), expected)
+
+    def test_review_compound_negation_words_do_not_match_harmless_name_substrings(self):
+        for name in ('Exceptional sofa', 'Excludington table', '빼고테이블', 'A'*200+'sofa'):
+            with self.subTest(name=name):
+                sku = self.stock()
+                deal, _ = self.open_deal(sku+' '+name+' grade A')
+                self.assertEqual((deal['grade'], deal['warranty_hours']), ('A', 72))
+                self.assertFalse(seller.goods_request_terms(sku+' '+name)['invalid'])
+
+    def test_review_explicit_grade_clause_length_is_bounded_not_whole_name(self):
+        self.assertTrue(seller.goods_request_terms('grade B'+' '*129+'or above')['invalid'])
+        self.assertFalse(seller.goods_request_terms('A'*200+'sofa grade B or above')['invalid'])
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
