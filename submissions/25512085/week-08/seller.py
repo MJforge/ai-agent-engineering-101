@@ -207,13 +207,15 @@ def goods_request_terms(text: str) -> dict[str, Any]:
     """Explicit public requirements only. Unknown quality/refund intent is not C0 consent."""
     low = (text or '').lower()
     grade_matches = list(re.finditer(
-        r'\b(?:exact_)?grade\s*(?:[:=]|>=)?\s*([abc])\b|([abc])\s*급|'
+        r'(?:\b(?:exact_)?grade\s*(?:[:=]|>=)?\s*([abc])\b|([abc])\s*급|'
         r'\b([abc])등급|\b([abc])(?=인가요|\s*이상|만)|\b([abc])\s*(?:-?grade\b|only\b)|'
-        r'\bonly\s+([abc])\b|등급\s*([abc])\b', low))
+        r'\bonly\s+([abc])\b|등급\s*([abc])\b)(?:\s*(?:or\s+above\b|이상))?', low))
     grades = {next(g for g in match.groups() if g).upper() for match in grade_matches}
     minimum = bool(re.search(r'min(?:imum)?\s+grade|grade\s*>=|[abc]\s*(?:급\s*)?이상|grade\s*[abc]\s*(?:or\s+above|이상)', low))
     exact_matches = list(re.finditer(r'\bwarranty_hours\s*[:=]\s*([^\s,;?]+)', low))
-    invalid = len(grade_matches) > 1 or bool(re.search(r'\bgrade\s*[:=]\s*(?![abc]\b)\S+|\b(?:not|no)\s+(?:grade\s+)?[abc]\b|[abc]\s*급\s*제외', low))
+    # Bound only the explicit condition span, not SKU/product names or the message.
+    invalid = (len(grade_matches) > 1 or any(match.end() - match.start() > 128 for match in grade_matches)
+               or bool(re.search(r'\bgrade\s*[:=]\s*(?![abc]\b)\S+|\b(?:not|no)\s+(?:grade\s+)?[abc]\b|[abc]\s*급\s*제외', low)))
 
     def covered(marker, matches):
         return any(match.start() <= marker.start() and marker.end() <= match.end() for match in matches)
@@ -232,14 +234,17 @@ def goods_request_terms(text: str) -> dict[str, Any]:
     if any(not covered(marker, grade_matches)
            for marker in re.finditer(r'\b(?:exact_)?grades?\w*|등급|[abc]\s*급', low)):
         invalid = True
-    if any(unsupported_tail(match) for match in grade_matches):
+    if any(unsupported_tail(match) or re.match(r'\s*or\b', low[match.end():]) for match in grade_matches):
         invalid = True
     if re.search(r'\b[abc]\s*[/,]\s*[a-d]\b', low):
         invalid = True
     # Recognizing a grade token is not positive consent to that grade. Reject
     # unsupported rejection/negation language rather than invert it or guess.
+    # Scan the whole grade-bearing message, including beyond a consumed minimum
+    # suffix. Word boundaries avoid matching names such as Exceptional/Excludington.
     if grades and re.search(
-            r"\b(?:not|never|unacceptable|unwanted|refuse|reject|exclude|cannot|can't|don't|won't|isn't)\b|"
+            r"\b(?:not|never|unacceptable|unwanted|refuse|reject|exclud(?:e[sd]?|ing)|except(?:ing)?|exceptions?|cannot|can't|don't|won't|isn't)\b|"
+            r'빼고(?:요)?(?![가-힣a-z0-9_])|'
             r'말고|아니|제외|거절|불가|원하지|싫|안\s*(?:돼|되|해|함|하)', low):
         invalid = True
     exact_hours = None
