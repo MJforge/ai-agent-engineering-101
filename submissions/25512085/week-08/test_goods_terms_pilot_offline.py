@@ -341,6 +341,68 @@ class GoodsTermsPilotTests(unittest.TestCase):
         receipt = self.receipt(self.turn('warranty_hours=0 offer '+str(deal['ask'])))
         self.assertEqual((receipt['claim'], receipt['warranty_hours']), ('A', 72))
 
+    def assert_rejected_conditions(self, text):
+        events = self.turn(text)
+        self.assertEqual([kind for kind, _ in events], ['reject'])
+        self.assertFalse(self.agent.committed_units)
+        self.assertFalse(self.agent.open)
+
+    def test_review_partial_grade_clause_initial_with_and_without_price(self):
+        for price in ('', ' offer 999999'):
+            with self.subTest(price=price):
+                sku = self.stock()
+                self.assert_rejected_conditions(sku+' grade=C grade!=C'+price)
+
+    def test_review_partial_grade_clause_later_with_and_without_price(self):
+        for price in ('', ' offer 999999'):
+            with self.subTest(price=price):
+                self.stock()
+                self.open_deal(self.SKUS[0]+' grade=C')
+                self.assert_rejected_conditions('grade=C grade!=C'+price)
+
+    def test_review_partial_warranty_clause_initial_with_and_without_price(self):
+        for price in ('', ' offer 999999'):
+            with self.subTest(price=price):
+                sku = self.stock()
+                self.assert_rejected_conditions(sku+' grade=B warranty_hours>=72'+price)
+
+    def test_review_partial_warranty_clause_later_with_and_without_price(self):
+        for price in ('', ' offer 999999'):
+            with self.subTest(price=price):
+                sku = self.stock()
+                self.open_deal(sku+' grade=B warranty_hours=6')
+                self.assert_rejected_conditions('grade=B warranty_hours>=72'+price)
+
+    def test_review_all_grade_clauses_and_suffixes_must_be_consumed(self):
+        conditions = ('grade=C grade!=C', 'grade=C grade<>C', 'grade=C grade=unknown',
+                      'grade=C grade:C/D', 'grade=C grade=C', 'grade>=B grade=B',
+                      'grade=C or D', 'grade=C, D', 'grade=C !=B',
+                      'grade=C grade==C', 'grade=C grade~C', 'C급 grade!=C',
+                      '등급 C 등급!=C', 'grade=C grade C 이상')
+        for condition in conditions:
+            for later in (False, True):
+                with self.subTest(condition=condition, later=later):
+                    sku = self.stock()
+                    if later:
+                        self.open_deal(sku+' grade=C')
+                    self.assert_rejected_conditions(('' if later else sku+' ')+condition+' offer 999999')
+
+    def test_review_all_warranty_clauses_and_suffixes_must_be_consumed(self):
+        conditions = ('warranty_hours>=72', 'warranty_hours!=6', 'warranty_hours==6',
+                      'warranty_hours=6 warranty_hours!=6', 'warranty_hours=6!=72',
+                      'warranty 6h warranty>=72h', 'warranty 6h 보증>=72시간',
+                      'warranty_hours=6/72', 'warranty_hours=6 or 72',
+                      'warranty_hours=6 warranty_hours=72', 'warranty_hours=6 warranty>=72',
+                      'warranty_hours=6 warranty 72', 'warranty_hours=6 보증 최소 72',
+                      'warranty_hours=6 warranty_hours=6')
+        for condition in conditions:
+            for later in (False, True):
+                with self.subTest(condition=condition, later=later):
+                    sku = self.stock()
+                    if later:
+                        self.open_deal(sku+' grade=B warranty_hours=6')
+                    self.assert_rejected_conditions(('' if later else sku+' ')+'grade=B '+condition+' offer 999999')
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
