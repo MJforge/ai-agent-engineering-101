@@ -394,7 +394,8 @@ class GoodsTermsPilotTests(unittest.TestCase):
                       'warranty_hours=6/72', 'warranty_hours=6 or 72',
                       'warranty_hours=6 warranty_hours=72', 'warranty_hours=6 warranty>=72',
                       'warranty_hours=6 warranty 72', 'warranty_hours=6 보증 최소 72',
-                      'warranty_hours=6 warranty_hours=6')
+                      'warranty_hours=6 warranty_hours=6',
+                      'warranty_hours=6 warranty≥six', 'warranty_hours=6 보증≤six')
         for condition in conditions:
             for later in (False, True):
                 with self.subTest(condition=condition, later=later):
