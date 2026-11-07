@@ -62,6 +62,17 @@ Repeated explicit grade or warranty clauses, including equal duplicates, require
 one clarified clause rather than letting a global minimum flag weaken an exact
 grade. These checks do not add an A0 product or alter grade-default pricing.
 
+Supported minimum-grade suffixes (`or above`, `이상`) are consumed as part of the
+grade clause before its remaining tail is checked. In any grade-bearing message,
+unsupported compound exclusions (`except`, `excluding`, `but not`, `제외`, `빼고`,
+`말고`) reject globally, including before or beyond that suffix; do not infer the
+remaining allowed-grade set. English negative keywords use word boundaries, and
+the added Korean `빼고` token requires an ending boundary, so harmless name
+substrings such as Exceptional, Excludington and 빼고테이블 are not new negations.
+Only the matched explicit grade clause is capped at 128 characters, including its
+supported minimum suffix; product names and the whole inquiry are not capped by
+this check. No whole-message prose whitelist is introduced.
+
 Selection, opening, concession, final receipt and completion text use the same
 stored unit/grade/warranty; the existing live actual-cost floor remains binding.
 Receipt issuance is not payment confirmation. This is a candidate policy, not an

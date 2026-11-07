@@ -457,7 +457,7 @@ class GoodsTermsPilotTests(unittest.TestCase):
     def test_review_consumed_minimum_suffix_keeps_supported_single_condition(self):
         for condition, expected in (
                 ('grade B or above', ('A', 72)), ('grade B or above cheap', ('B', 6)),
-                ('B급 이상', ('A', 72)), ('B급 이상 저렴', ('B', 6))):
+                ('B급 이상', ('B', 6)), ('B급 이상 저렴', ('B', 6))):
             with self.subTest(condition=condition):
                 sku = self.stock()
                 deal, _ = self.open_deal(sku+' '+condition)

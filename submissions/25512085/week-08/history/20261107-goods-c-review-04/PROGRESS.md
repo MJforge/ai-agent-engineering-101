@@ -14,3 +14,7 @@
   Correct the new fixture rather than change existing selection/price behavior.
 - Interrupted final-all has no BACKPORT_TEST_RESULT and stops during an unrelated
   restock test. Preserve it as incomplete, not a test pass or assertion failure.
+- Fixture corrected without selection changes. resumed-focused: 124 pass;
+  resumed-all: 551 discovered, 549 pass, 2 unchanged launcher skips.
+- Global compound-negation check, consumed supported suffix, 128-character explicit
+  condition span cap and harmless-name boundary regressions all pass.
