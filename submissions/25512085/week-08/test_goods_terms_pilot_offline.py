@@ -1,5 +1,5 @@
 """Three-SKU terms pilot: synthetic inventory, temporary signing key, no market I/O."""
-import copy
+import inspect
 import unittest
 from unittest.mock import patch
 
@@ -35,20 +35,24 @@ class GoodsTermsPilotTests(unittest.TestCase):
                 deal, _ = self.open_deal(sku)
                 self.assertEqual((deal['grade'], deal['warranty_hours']), ('C', 0))
 
-    def test_A_only_new_quote_is_A0_and_mentions_warrantied_option(self):
+    def test_A_only_new_quote_is_A72_without_no_warranty_option(self):
         for sku in self.SKUS:
             with self.subTest(sku=sku):
                 self.stock(sku)
                 deal, text = self.open_deal(sku+' grade A')
-                self.assertEqual((deal['grade'], deal['warranty_hours'], deal['break_rate']), ('A', 0, 0))
-                self.assertIn('warranty_hours=0', text)
+                self.assertEqual((deal['grade'], deal['warranty_hours']), ('A', 72))
+                self.assertGreater(deal['break_rate'], 0)
+                self.assertNotIn('warranty_hours=0', text)
                 self.assertIn('72h', text)
+                self.assertNotIn('choose', text.lower())
+                self.assertNotIn('without warranty', text.lower())
+                self.assertNotIn('pilot_A0_option', deal)
                 self.assertNotIn('Grade C refurbished', text)
 
     def test_A_question_is_not_permission_to_sell_C(self):
         sku = self.stock()
         deal, _ = self.open_deal(sku+' A인가요?')
-        self.assertEqual((deal['grade'], deal['warranty_hours']), ('A', 0))
+        self.assertEqual((deal['grade'], deal['warranty_hours']), ('A', 72))
 
     def test_explicit_A72_preserved(self):
         sku = self.stock()
@@ -102,22 +106,20 @@ class GoodsTermsPilotTests(unittest.TestCase):
                 self.assertIn('reject', [k for k, _ in events])
                 self.assertNotIn('receipt', [k for k, _ in events])
 
-    def test_A0_numeric_acceptance_receipt_and_completion_match(self):
+    def test_A72_numeric_acceptance_receipt_and_completion_match(self):
         sku = self.stock()
         deal, _ = self.open_deal(sku+' grade A')
         events = self.turn(str(deal['ask']))
         receipt = self.receipt(events)
         self.assertEqual((receipt['unit'], receipt['claim'], receipt['warranty_hours'], receipt['price']),
-                         (deal['unit']['unit'], 'A', 0, deal['ask']))
-        self.assertIn('warranty=0h', str(events))
-        self.assertEqual(receipt['refund_policy'], 'no refund if the item breaks')
+                         (deal['unit']['unit'], 'A', 72, deal['ask']))
+        self.assertIn('warranty=72h', str(events))
+        self.assertNotEqual(receipt['refund_policy'], 'no refund if the item breaks')
 
-    def test_A0_is_disclosed_before_initial_price_can_close(self):
+    def test_A72_initial_price_can_close_without_new_option_flow(self):
         sku = self.stock()
-        deal, text = self.open_deal(sku+' grade A offer 999999')
-        self.assertEqual(deal['warranty_hours'], 0)
-        self.assertIn('warranty_hours=0', text)
-        self.assertFalse(self.agent.committed_units)
+        receipt = self.receipt(self.turn(sku+' grade A offer 999999'))
+        self.assertEqual((receipt['claim'], receipt['warranty_hours']), ('A', 72))
 
     def test_explicit_C0_instant_receipt_matches(self):
         sku = self.stock()
@@ -127,13 +129,13 @@ class GoodsTermsPilotTests(unittest.TestCase):
     def test_existing_A72_promise_numeric_reply_never_downgrades(self):
         sku = self.stock()
         deal, _ = self.open_deal(sku+' grade A warranty 72h')
-        deal.pop('pilot_A0_option', None)  # Simulate a pre-pilot in-memory promise.
+        self.assertNotIn('pilot_A0_option', deal)
         receipt = self.receipt(self.turn(str(deal['ask'])))
         self.assertEqual(receipt['warranty_hours'], 72)
 
     def test_later_minimum_warranty_without_price_cannot_be_ignored(self):
         sku = self.stock()
-        self.open_deal(sku+' grade A')
+        self.open_deal(sku)
         events = self.turn('warranty 6h')
         self.assertIn('reject', [k for k, _ in events])
         self.assertFalse(self.agent.open)
@@ -145,43 +147,45 @@ class GoodsTermsPilotTests(unittest.TestCase):
         self.assertIn('reject', [k for k, _ in events])
         self.assertNotIn('receipt', [k for k, _ in events])
 
-    def test_A72_option_requires_explicit_new_quote_then_numeric_acceptance(self):
+    def test_A72_requirement_keeps_existing_quote_without_option_repricing(self):
         sku = self.stock()
-        self.open_deal(sku+' grade A')
-        events = self.turn('choose 72h warranty')
+        deal, _ = self.open_deal(sku+' grade A')
+        before = {key: deal[key] for key in ('unit', 'ask', 'initial_ask', 'hard_floor', 'r1_target', 'r2_target')}
+        events = self.turn('warranty 72h')
         self.assertEqual([k for k, _ in events], ['input'])
-        deal = self.agent.open['task-1']
+        self.assertEqual({key: deal[key] for key in before}, before)
         self.assertEqual(deal['warranty_hours'], 72)
-        self.assertIn('72h', str(events))
         receipt = self.receipt(self.turn(str(deal['ask'])))
         self.assertEqual(receipt['warranty_hours'], 72)
 
-    def test_A0_no_discount_old_floor_and_actual_zero_refund_risk(self):
+    def test_A72_pricing_is_unchanged_default_grade_pricing(self):
         sku = self.stock()
         unit = self.inventory['units'][0]
         standard = seller.compute_unit_pricing_and_terms(unit, {}, now=self.now, catalog=self.catalog, clearance=1)
         deal, _ = self.open_deal(sku+' grade A')
         self.assertEqual(deal['ask'], standard['open_ask'])
-        self.assertGreaterEqual(deal['hard_floor'], standard['hard_floor'])
-        self.assertEqual(deal['break_rate'], 0)
-        self.assertGreaterEqual(deal['hard_floor'], seller.cash_policy.profit_floor(
-            unit, {}, self.catalog, self.now, warranty=0))
+        self.assertEqual(deal['hard_floor'], standard['hard_floor'])
+        self.assertEqual(deal['break_rate'], standard['break_rate'])
+        self.assertGreater(deal['break_rate'], 0)
 
-    def test_A0_does_not_relabel_A72_comparable_as_A0(self):
+    def test_A72_keeps_existing_comparable_pricing_path(self):
         sku = self.stock()
         hub = {'demand_radar': {'sku_comparables': {sku: [dict(
             grade='A', amount=77777, warranty_hours=72, ts=self.now-i) for i in range(5)]}}}
+        standard = seller.compute_unit_pricing_and_terms(
+            self.inventory['units'][0], hub, now=self.now, catalog=self.catalog, clearance=1)
         with patch.object(seller, 'load_hub', return_value=hub):
             deal, _ = self.open_deal(sku+' grade A')
-        self.assertFalse(deal['cash_first_quote'])
-        self.assertEqual(deal['break_rate'], 0)
+        self.assertEqual(deal['cash_first_quote'], standard['cash_first_quote'])
+        self.assertEqual(deal['ask'], standard['open_ask'])
+        self.assertEqual(deal['break_rate'], standard['break_rate'])
 
     def test_A_wording_variants_never_sell_C(self):
         for text in ('A only', 'only A', 'A-grade', 'A급만', '등급 A'):
             with self.subTest(text=text):
                 sku = self.stock()
                 deal, _ = self.open_deal(sku+' '+text)
-                self.assertEqual((deal['grade'], deal['warranty_hours']), ('A', 0))
+                self.assertEqual((deal['grade'], deal['warranty_hours']), ('A', 72))
 
     def test_ambiguous_refund_with_only_C_needs_new_inquiry(self):
         sku = self.stock(grades=('C',))
@@ -189,25 +193,22 @@ class GoodsTermsPilotTests(unittest.TestCase):
         self.assertIn('reject', [k for k, _ in events])
         self.assertNotIn('receipt', [k for k, _ in events])
 
-    def test_override_is_not_a_global_warranty_switch(self):
+    def test_A0_pricing_override_and_option_helper_are_removed(self):
+        self.assertNotIn('warranty_override', inspect.signature(seller.compute_unit_pricing_and_terms).parameters)
+        self.assertFalse(hasattr(seller, 'explicit_A72_choice'))
         sku = self.stock()
-        for value in (True, -1, 6, 72, '0', float('nan')):
-            with self.subTest(value=value), self.assertRaises(ValueError):
-                seller.compute_unit_pricing_and_terms(self.inventory['units'][0], {}, now=self.now,
-                    catalog=self.catalog, clearance=1, warranty_override=value)
-        unit = dict(self.inventory['units'][0], sku='G00000001')
-        with self.assertRaises(ValueError):
-            seller.compute_unit_pricing_and_terms(unit, {}, now=self.now, catalog=self.catalog,
-                                                 clearance=1, warranty_override=0)
+        with self.assertRaises(TypeError):
+            seller.compute_unit_pricing_and_terms(self.inventory['units'][0], {}, now=self.now,
+                catalog=self.catalog, clearance=1, warranty_override=0)
 
-    def test_A0_concession_receipt_same_conditions_and_no_floor_bypass(self):
+    def test_A72_concession_receipt_same_conditions_and_no_floor_bypass(self):
         sku = self.stock()
         deal, _ = self.open_deal(sku+' grade A')
         events = self.turn('offer 1')
-        self.assertIn('warranty_hours=0', str(events))
+        self.assertIn('warranty_hours=72', str(events))
         self.assertGreaterEqual(deal['ask'], deal['hard_floor'])
         receipt = self.receipt(self.turn(str(deal['ask'])))
-        self.assertEqual((receipt['price'], receipt['warranty_hours']), (deal['ask'], 0))
+        self.assertEqual((receipt['price'], receipt['warranty_hours']), (deal['ask'], 72))
 
     def test_explicit_B6_and_no_matching_A_are_not_substituted(self):
         sku = self.stock()
@@ -218,19 +219,19 @@ class GoodsTermsPilotTests(unittest.TestCase):
         self.assertIn('reject', [k for k, _ in events])
         self.assertNotIn('receipt', [k for k, _ in events])
 
-    def test_numeric_72_is_not_A72_option_consent(self):
+    def test_numeric_72_never_changes_A72_terms(self):
         sku = self.stock()
         deal, _ = self.open_deal(sku+' grade A')
         self.turn('72')
-        self.assertEqual(deal['warranty_hours'], 0)
+        self.assertEqual(deal['warranty_hours'], 72)
 
-    def test_negated_option_choice_never_changes_terms(self):
+    def test_no_care_request_cannot_downgrade_existing_A72(self):
         sku = self.stock()
         deal, _ = self.open_deal(sku+' grade A')
-        events = self.turn('do not choose 72h warranty')
+        events = self.turn('without care')
         self.assertEqual([k for k, _ in events], ['input'])
         self.assertIs(self.agent.open['task-1'], deal)
-        self.assertEqual(deal['warranty_hours'], 0)
+        self.assertEqual(deal['warranty_hours'], 72)
 
     def test_natural_zero_days_and_invalid_warranty_durations_are_not_ignored(self):
         for text in ('warranty 6 days', '6일 보증', 'warranty -1h', 'warranty nan h'):
@@ -293,33 +294,30 @@ class GoodsTermsPilotTests(unittest.TestCase):
                 receipt = self.receipt(self.turn(sku+' '+text+' offer 999999'))
                 self.assertEqual((receipt['claim'], receipt['warranty_hours']), ('A', 72))
 
-    def test_review_negated_and_unclear_options_preserve_entire_A0_quote(self):
-        for text in ('72h 보증 선택 안 함', '72h 보증 선택 안해요', '72h 보증 선택하지 않습니다',
-                     '72h 보증 미선택', '72h 보증 선택 여부 미정', '72h 보증 선택할까요?',
-                     'do not choose 72h warranty', 'I refuse to select 72h warranty',
-                     'should I choose 72h warranty?', 'I might choose 72h warranty',
-                     'choose 72h warranty?', 'I have not chosen 72h warranty',
-                     'do not choose 72h warranty offer 999999'):
+    def test_explicit_zero_warranty_never_creates_A0(self):
+        for text in ('grade=A warranty_hours=0', 'grade A warranty 0h',
+                     'grade A without care', 'A급 보증 0시간'):
             with self.subTest(text=text):
-                sku = self.stock()
-                deal, _ = self.open_deal(sku+' grade A')
-                before = copy.deepcopy(deal)
-                events = self.turn(text)
-                self.assertEqual([k for k, _ in events], ['input'])
-                self.assertIn('task-1', self.agent.open)
-                self.assertEqual(self.agent.open['task-1'], before)
-                self.assertFalse(self.agent.committed_units)
+                for sku in self.SKUS:
+                    self.stock(sku)
+                    deal, wording = self.open_deal(sku+' '+text)
+                    self.assertEqual((deal['grade'], deal['warranty_hours']), ('A', 72))
+                    self.assertNotIn('warranty_hours=0', wording)
+                    self.assertNotIn('choose', wording.lower())
+                    receipt = self.receipt(self.turn(str(deal['ask'])))
+                    self.assertEqual((receipt['claim'], receipt['warranty_hours']), ('A', 72))
 
-    def test_review_explicit_positive_options_requote_without_signing(self):
-        for text in ('choose 72h warranty', 'select 72h warranty', 'I choose 72h warranty',
-                     '72h 보증 선택', '72h 보증 선택합니다', 'choose 72h warranty offer 999999'):
+    def test_zero_warranty_with_no_grade_retains_default_A72(self):
+        for text in ('warranty_hours=0', 'warranty 0h', 'without care'):
             with self.subTest(text=text):
                 sku = self.stock()
-                self.open_deal(sku+' grade A')
-                events = self.turn(text)
-                self.assertEqual([k for k, _ in events], ['input'])
-                self.assertEqual(self.agent.open['task-1']['warranty_hours'], 72)
-                self.assertFalse(self.agent.committed_units)
+                deal, _ = self.open_deal(sku+' '+text)
+                self.assertEqual((deal['grade'], deal['warranty_hours']), ('A', 72))
+
+    def test_explicit_zero_warranty_initial_price_uses_A72_receipt(self):
+        sku = self.stock()
+        receipt = self.receipt(self.turn(sku+' grade=A warranty_hours=0 offer 999999'))
+        self.assertEqual((receipt['claim'], receipt['warranty_hours']), ('A', 72))
 
 
 if __name__ == '__main__':
