@@ -19,6 +19,7 @@ import statistics
 import threading
 import time
 import urllib.request
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ from adaptive_strategy import note_ledger_coverage, refresh_buyer_policy
 MARKET_URL = os.environ.get("MARKET_URL", "https://market.ourolabs.ai").rstrip("/")
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state_hub.json"
+_buyer_outcome_batches = ContextVar('buyer_outcome_batches', default=None)
 
 # Core target non-food ("goods") categories for Stage 1 high-margin seed portfolio
 SEED_GOODS_CATEGORIES = [
@@ -257,10 +259,27 @@ def save_hub(hub: dict[str, Any], path: Path = STATE_FILE) -> None:
 @contextlib.contextmanager
 def mutate_hub(path: Path = STATE_FILE, timeout: float = 8.0):
     """Context manager to safely load, mutate, and save state_hub.json under an exclusive lock."""
-    with file_lock(path, timeout=timeout):
-        hub = load_hub(path, _locked=True)
-        yield hub
-        _save_hub_unlocked(hub, path)
+    batches = _buyer_outcome_batches.get()
+    outermost = batches is None
+    if outermost:
+        batches = []
+        token = _buyer_outcome_batches.set(batches)
+    try:
+        with file_lock(path, timeout=timeout):
+            hub = load_hub(path, _locked=True)
+            yield hub
+            _save_hub_unlocked(hub, path)
+    finally:
+        if outermost:
+            _buyer_outcome_batches.reset(token)
+            # Synchronous, short-lived producers: no daemon queue. Flush only
+            # after ALL nested mutate_hub locks have been released, even on error.
+            from buyer_outcomes import append_events, diagnostic
+            for journal, events in batches:
+                if events is None:
+                    diagnostic('journal_prepare_failed_unknown')
+                else:
+                    append_events(events, journal)
 
 
 def load_json_safe(path: Path, default: Any = None) -> Any:
@@ -387,6 +406,17 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
     would count each settled deal twice. Rounds 1/2 have no settle entries.
     Market aggregates skip rows at/below ledger_seq; own sales use separate seq keys
     so identity bootstrap can recover sales already consumed by another hook."""
+    # Copy sanitized evidence only; NEVER perform journal I/O under the hub lock.
+    # Standalone apply_ledger_rows is in-memory only. Production calls are under
+    # mutate_hub, whose outermost exit flushes this context-local evidence.
+    batches = _buyer_outcome_batches.get()
+    if batches is not None:
+        from buyer_outcomes import prepare
+        try:
+            evidence = prepare(rows, catalog, OWN_NAME, time.time())
+        except Exception:
+            evidence = None
+        batches.append((BASE_DIR / 'runtime' / 'buyer-outcomes-v1.jsonl', evidence))
     note_ledger_coverage(hub, rows, time.time())
     radar = hub["demand_radar"]
     last_seq = int(hub.get("ledger_seq", 0))
