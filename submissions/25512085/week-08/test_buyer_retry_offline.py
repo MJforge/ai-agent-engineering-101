@@ -19,7 +19,8 @@ class BuyerRetryTests(unittest.TestCase):
     setUp = price_tests.BuyerPriceTests.setUp
 
     def run_market(self, actions, *, duplicate=False, elapsed=0, support=None, legacy=False, shop_skus=None,
-                   timeout_advance=0, lock_enter=0, lock_exit=0, error_text="fake rejection", shop_name=None):
+                   timeout_advance=0, lock_enter=0, lock_exit=0, error_text="fake rejection", shop_name=None,
+                   receipt_terms=None):
         clock = [0.0]
         shops = [{"name": f"shop{i}", "url": f"https://shop{i}.invalid",
                   "offers": [{"sku": shop_skus[i] if shop_skus else self.sku}]} for i in range(len(actions))]
@@ -85,12 +86,13 @@ class BuyerRetryTests(unittest.TestCase):
                 receipt = {"item": shop_skus[i] if shop_skus else self.sku,
                            "price": price, "task": f"task-{i}", "shop": f"shop{i}",
                            "sig_seller": "offline-signature-placeholder"}
+                receipt.update((receipt_terms or {}).get(i, {}))
                 if action == "unsigned":
                     receipt.pop("sig_seller")
                 if action == "forged-list":
                     receipt.update(price=20040, list_price=10000000)
                 if action == "warranty":
-                    receipt.update(price=16000, warranty_hours=6)
+                    receipt.update(price=13000, warranty_hours=6)  # inside goods .80 cap
                 task["artifacts"] = [{"parts": [{"data": receipt}]}]
             return SimpleNamespace(json=lambda: {"result": task})
 
@@ -295,6 +297,26 @@ class BuyerRetryTests(unittest.TestCase):
         self.assertEqual(run.result["accept"]["warranty_hours"], 6)
         self.assertIn("break rate", run.diagnostic)
 
+    def test_goods_savings_cap_alone_declines_then_retries(self):
+        self.order['kind'] = 'goods'
+        self.catalog[self.sku]['list_price'] = 30000
+        terms = {0: {'claim': 'A', 'warranty_hours': 6},
+                 1: {'claim': 'A', 'warranty_hours': 6}}
+        # Only disable the new savings rule: same signed receipt passes all older guards.
+        with patch.object(buyer, 'GOODS_MIN_DISCOUNT_PERCENT', 0):
+            control = self.run_market([24500], receipt_terms=terms)
+        self.assert_single_success(control, shop=0)
+        self.hub['pending_deals'].clear()
+        run = self.run_market([24500, 18000], receipt_terms=terms)
+        self.assert_single_success(run)
+        self.assertEqual(run.cards, [0, 1])
+        first = run.memory['shop0']['recent'][-1]
+        self.assertEqual(first['outcome'], 'declined-price-policy')
+        self.assertIn('declined-price-policy', run.diagnostic)
+        self.assertIn('cap 24000', run.diagnostic)
+        self.assertNotIn('break rate', run.diagnostic)
+        self.assertFalse(run.memory['shop0']['dishonest'])
+
     def test_round2_keeps_five_counters_and_rpc_timeout(self):
         run = self.run_market(["working"], legacy=True)
         self.assertEqual(len(run.offers), 5)
@@ -410,13 +432,13 @@ class BuyerFinalAcceptanceTests(unittest.TestCase):
         self.hub["demand_radar"]["sku_settles"] = {self.sku: [10000] * 3}
         result, offers, _ = self.run_final_turn(ask=14800)
         self.assertEqual(len(offers), 3)
-        self.assertLessEqual(max(offers), 14696)
+        self.assertLessEqual(max(offers), 13360)  # new .80 cap dominates comparable .88
         self.assertIsNone(result["receipt"])
-        self.assertIn("offer limit 14696", result["review"])
+        self.assertIn("offer limit 13360", result["review"])
 
     def test_goods_final_receipt_still_requires_positive_surplus_or_warranty(self):
         self.order["kind"] = "goods"
-        result, offers, _ = self.run_final_turn(warranty=0)
+        result, offers, _ = self.run_final_turn(ask=13000, warranty=0)
         self.assertEqual(len(offers), 4)
         self.assertIsNone(result["receipt"])
         self.assertIn("break rate", result["review"])

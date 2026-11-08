@@ -79,12 +79,14 @@ class BuyerSavingsRankingTests(unittest.TestCase):
                 _, scores, _ = self.select({'sku': 10000}, budget=budget)
                 self.assertAlmostEqual(scores['sku'], (10000-pay)/10000 * mult * (3.8/4.2))
 
-    def test_missing_zero_price_fallback_boundary_and_invalid_prices(self):
+    def test_missing_zero_price_deferral_boundary_and_invalid_prices(self):
         for price in (None, 0):
             with self.subTest(price=price):
-                result, scores, _ = self.select({'sku': price}, budget=10000)
-                self.assertEqual(result[1]['list_price'], 10000)  # existing goods fallback
-                self.assertAlmostEqual(scores['sku'], .20 * (3.8/4.2))
+                # Unpriceable goods must not consume a shop URL ahead of a valid SKU.
+                result, scores, probes = self.select({'sku': price}, budget=10000)
+                self.assertIsNone(result[0])
+                self.assertEqual(scores, {})
+                self.assertEqual(probes, 0)
                 result, scores, _ = self.select({'sku': price}, kind='food')
                 self.assertIsNone(result[0])
                 self.assertEqual(scores, {})

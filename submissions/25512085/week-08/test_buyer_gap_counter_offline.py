@@ -47,7 +47,9 @@ class BuyerGapCounterTests(unittest.TestCase):
     def test_goods_use_the_same_gap_rule(self):
         self.order["kind"] = "goods"
         _, offers, _, _ = self.quotes([90000, 80000])
-        self.assertEqual(offers[:3], [60000, 67000, 80000])
+        # Opening ask now exceeds .80 goods cap: existing .72 opening anchor.
+        # Then 59586 + half-up(.35 * (80000 - 59586)) = 66731.
+        self.assertEqual(offers[:3], [59586, 66731, 80000])
 
     def test_binding_policy_and_budget_caps(self):
         for budget, cap in ((120000, 93104), (85000, 85000)):

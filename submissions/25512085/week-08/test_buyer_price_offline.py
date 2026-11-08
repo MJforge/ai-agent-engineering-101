@@ -241,10 +241,11 @@ class BuyerPriceTests(unittest.TestCase):
         # No claim: goods still conservatively assume C. 0.65 * 16700 < 12000.
         result, _, _, _ = self.run_buyer(receipt=self.receipt(12000))
         self.assertIsNone(result["receipt"])
-        result, _, _, _ = self.run_buyer(receipt=self.receipt(16000, warranty_hours=6))
-        self.assertEqual(result["receipt"]["price"], 16000)  # no food 90% cap
+        # Stay inside the new goods 80% safety cap while isolating quality rules.
+        result, _, _, _ = self.run_buyer(receipt=self.receipt(13000, warranty_hours=6))
+        self.assertEqual(result["receipt"]["price"], 13000)
         self.assertEqual(result["accept"]["warranty_hours"], 6)
-        result, _, _, _ = self.run_buyer(receipt=self.receipt(16000, claim="A"))
+        result, _, _, _ = self.run_buyer(receipt=self.receipt(13000, claim="A"))
         self.assertIsNotNone(result["receipt"])
 
     def test_goods_negotiation_caps_offers_and_rejects_zero_surplus(self):
@@ -252,8 +253,8 @@ class BuyerPriceTests(unittest.TestCase):
         result, offers, _, memory = self.run_buyer(ask=16700)
         self.assertIsNone(result["receipt"])
         self.assertEqual(len(offers), 3)
-        self.assertEqual(offers[-1], 15364)
-        self.assertTrue(all(0 < p <= 15364 for p in offers))
+        self.assertEqual(offers[-1], 13360)  # 16700 * .80, now stricter than .92
+        self.assertTrue(all(0 < p <= 13360 for p in offers))
         result, _, _, memory = self.run_buyer(receipt=self.receipt(16700, warranty_hours=6))
         self.assertIsNone(result["receipt"])
         self.assertEqual(memory["shop"]["recent"][-1]["outcome"], "declined-price-policy")

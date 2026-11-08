@@ -51,6 +51,7 @@ MAX_RECENT_HISTORY = 5
 # Buyer policy choices, not market rules or empirically optimal discounts.
 FOOD_LIST_PRICE_PERCENT = 90
 GOODS_OFFER_CAP_PERCENT = 92
+GOODS_MIN_DISCOUNT_PERCENT = 20
 COMPARABLE_WINDOW_S = 3 * 3600
 COMPARABLE_MIN_SAMPLES = 3
 REQUEST_DEADLINE = ContextVar("buyer_request_deadline", default=None)
@@ -479,6 +480,38 @@ def check_acp_support(shop_url: str, timeout: float = 2.0) -> bool | None:
         return None  # Transport failure is not proof of unsupported ACP.
 
 
+def settled_price_samples(hub, sku):
+    """Legacy SKU-market order amounts, not shop quotes or fresh unit comparables.
+
+    The stored scalar schema has no timestamp/qty/grade/shop. Do not invent
+    freshness or quantities; count valid observations, retaining the last 15.
+    """
+    rows = (hub.get("demand_radar", {}).get("sku_settles", {}).get(sku) or [])
+    if not isinstance(rows, list):
+        return []
+    return [p for p in rows if positive_number(p) and p <= 10**12][-15:]
+
+
+def goods_price_cap(catalog, hub, sku, budget):
+    """One integer cap for selected AND receipt SKUs; unknown list means defer.
+
+    Minimum savings is a policy assumption, not a predicted executable price.
+    Keep the earlier offer/comparable/list/budget restrictions as upper bounds;
+    receipt quality/warranty validation remains separate and mandatory.
+    """
+    lp = (catalog.get(sku) or {}).get("list_price")
+    if not positive_number(lp) or not float(lp).is_integer():
+        return None
+    lp = int(lp)
+    cap = min(budget, lp - 1, lp * GOODS_OFFER_CAP_PERCENT // 100,
+              lp * (100 - GOODS_MIN_DISCOUNT_PERCENT) // 100)
+    settles = settled_price_samples(hub, sku)
+    if len(settles) >= 3:
+        cap = min(cap, max(lp * 88 // 100,
+                           math.floor(statistics.median(settles) * 112 / 100)))
+    return cap if cap >= 1 else None
+
+
 def pick_round3_shop_and_sku(
     shops: list[dict],
     memory: dict,
@@ -490,8 +523,9 @@ def pick_round3_shop_and_sku(
     """Rank acceptable in-stock pairs by expected list-relative savings (Patch3.4).
 
     This is a per-candidate proxy, not the aggregate Saved score (sum of scored
-    transaction savings rates / (deals + 100)). Keep existing expected-pay,
-    feasibility, trust, bestseller and diversity policies unchanged.
+    transaction savings rates / (deals + 100)). SKU-market history is not a
+    shop-specific or executable-price prediction. Keep existing feasibility,
+    trust, bestseller and diversity policies unchanged.
     """
     acceptable = set(order_data.get("acceptable") or [])
     shops = [s for s in shops if any(off.get("sku") in acceptable for off in s.get("offers") or [])]
@@ -534,10 +568,14 @@ def pick_round3_shop_and_sku(
         for off in c.get("offers") or []:
             sku = off.get("sku", "")
             sku_meta = catalog.get(sku) or {}
+            if order_data.get("kind") == "goods" and goods_price_cap(catalog, hub, sku, budget) is None:
+                # Reject unpriceable SKUs before choosing/probing a URL, so they
+                # cannot hide a valid SKU held by the same shop from this attempt.
+                continue
             if order_data.get("kind") == "food" and not positive_number(sku_meta.get("list_price")):
                 continue
-            # Preserve the existing goods missing/zero-price budget fallback;
-            # food already defers above. Never divide by invalid/nonpositive prices.
+            # Goods/food defer above; keep fallback for other legacy kinds only.
+            # Never divide by invalid/nonpositive prices.
             if isinstance(sku_meta.get("list_price"), bool):
                 continue
             price_basis = sku_meta.get("list_price") or budget
@@ -559,14 +597,13 @@ def pick_round3_shop_and_sku(
             else:
                 feasibility_mult = 1.0
 
-            settles = [
-                p for p in (hub.get("demand_radar", {}).get("sku_settles", {}).get(sku) or [])
-                if positive_number(p)
-            ]
+            settles = settled_price_samples(hub, sku)
             if len(settles) >= 3:
-                hist_pay = int(statistics.median(settles[-15:]))
-                est_pay = min(budget, max(est_cost_floor, min(int(list_price * 0.80), hist_pay)))
+                # Preserve evidence even above budget/purchase cap or below our
+                # estimated cost floor. Never fabricate an affordable discount.
+                est_pay = statistics.median(settles)
             else:
+                # No sufficient evidence: explicit 80%-of-list prior, not a quote.
                 est_pay = min(budget, max(est_cost_floor, int(list_price * 0.80)))
             est_savings_rate = (list_price - est_pay) / list_price
             # Combined utility: expected savings rate * existing weights
@@ -578,7 +615,10 @@ def pick_round3_shop_and_sku(
             trust_factor = max(0.5, min(1.4, (c["score"] / 4.2) - div_pen))
             if int(c.get("deals") or 0) >= 20:
                 trust_factor *= 1.15
-            utility = est_savings_rate * feasibility_mult * trust_factor * bestseller_boost
+            # Raw median/rate stay truthful. Floor utility only: multiplying a
+            # negative rate by penalties must not reward less trustworthy shops.
+            # Nonpositive candidates remain tied/available in existing order.
+            utility = max(0.0, est_savings_rate) * feasibility_mult * trust_factor * bestseller_boost
             best_candidates.append((utility, c, {"sku": sku, "name": off.get("name", sku), "list_price": list_price, "est_cost": est_cost_floor}))
 
     best_candidates = filter_candidates(best_candidates, hub, now_ts)
@@ -950,6 +990,11 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         if price_limit is None or price_limit < 1:
             return {"shop": shop_url, "receipt": None, "stars": None,
                     "review": "No deal: food catalog list price is unknown."}
+    elif is_round3_goods:
+        price_limit = goods_price_cap(catalog, hub, target_sku_info["sku"], budget)
+        if price_limit is None:
+            return {"shop": shop_url, "receipt": None, "stars": None,
+                    "review": "No deal: goods catalog list price is unknown or has no safe integer price."}
 
     # 1. Fetch Agent Card
     card_url = f"{shop_url}/.well-known/agent-card.json"
@@ -1037,18 +1082,6 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
     step_inc = 5  # Legacy only; Round 3 counters do not depend on budget steps.
 
     offer_limit = price_limit
-    if is_round3_goods:
-        offer_limit = min(price_limit, max(1, math.floor(list_price * GOODS_OFFER_CAP_PERCENT / 100)))
-        settles = [
-            p for p in (hub.get("demand_radar", {}).get("sku_settles", {}).get(sku_code) or [])
-            if positive_number(p)
-        ]
-        if len(settles) >= 3:
-            comp_cap = max(
-                math.floor(list_price * 0.88),
-                math.floor(statistics.median(settles[-15:]) * 112 / 100),
-            )
-            offer_limit = min(offer_limit, comp_cap)
 
     failure_reason = ""
     while task_state == "TASK_STATE_INPUT_REQUIRED" and rounds < (3 if is_round3 else 5):
@@ -1228,9 +1261,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
             # acceptable SKU shipped there is a pre-existing integration limit.
             receipt_cap, food_accept = food_price_policy(catalog, hub, rec_item, budget, order_data, raw_receipt)
         elif is_round3_goods:
-            actual_lp = (catalog.get(rec_item) or {}).get("list_price") or list_price
-            if positive_number(actual_lp):
-                receipt_cap = min(budget, max(1, int(actual_lp) - 1))
+            receipt_cap = goods_price_cap(catalog, hub, rec_item, budget)
         price_policy_declined = (is_round3_food or is_round3_goods) and (
             receipt_cap is None or (positive_number(rec_price) and rec_price > receipt_cap))
         receipt_invalid = (
@@ -1302,7 +1333,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
             if is_round3 and order_data.get("kind") == "goods":
                 warranty_h = float(raw_receipt.get("warranty_hours") or 0)
                 claimed = str(raw_receipt.get("claim") or "C")
-                lp = int((catalog.get(rec_item) or {}).get("list_price") or list_price)
+                lp = int(catalog[rec_item]["list_price"])
                 b = BREAK_RATE.get(claimed, BREAK_RATE["C"])
                 if warranty_h < GOODS_BREAK_WINDOW_H and (1 - b) * lp - recorded_price <= 0:
                     final_receipt = None
@@ -1358,7 +1389,8 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         "review": review,
     }
     if is_round3 and final_receipt is not None and recorded_price is not None:
-        result_line["accept"] = build_accept_policy(order_data, recorded_price, list_price,
+        accept_list_price = int(catalog[rec_item]["list_price"]) if is_round3_goods else list_price
+        result_line["accept"] = build_accept_policy(order_data, recorded_price, accept_list_price,
                                                     float(final_receipt.get("warranty_hours") or 0))
         result_line["accept"].update(food_accept)
         # This is only a pending checkout, not a paid purchase or successful memory.
