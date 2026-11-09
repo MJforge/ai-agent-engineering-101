@@ -310,7 +310,11 @@ def replay_kind(event):
 
 
 def summarize(events, own_name, now, *, max_orders=MAX_ORDERS):
-    """Bounded pure replay. No aggregate official Saved without complete cohorts."""
+    """Bounded replay; Saved and normalized surplus are distinct contributions.
+
+    known_broken_contribution is deprecated legacy surplus (not Saved), retaining
+    its old partial-refund unknown behavior. No official Saved without coverage.
+    """
     orders, breaks = OrderedDict(), OrderedDict()
     seen = {}
     # Bounded by at most two order IDs per consumed event (MAX_EVENTS cap).
@@ -408,6 +412,7 @@ def summarize(events, own_name, now, *, max_orders=MAX_ORDERS):
         paid, lp = sale.get('paid_amount'), sale.get('list_price')
         reason = None
         contribution = None
+        saved_contribution = normalized_surplus = None
         item_kind, kind_source = replay_kind(sale)
         if order in conflict_orders or sale.get('conflict') or (broken and broken.get('conflict')):
             reason = 'conflicting_events'
@@ -425,17 +430,24 @@ def summarize(events, own_name, now, *, max_orders=MAX_ORDERS):
             refund = broken.get('refunded_amount')
             if number(refund) is None or refund > paid:
                 reason = 'refund_unknown'
-            elif refund == paid and paid > 0:
-                contribution = 0
-            elif refund == 0:
-                contribution = -paid / lp
             else:
-                reason = 'partial_refund_semantics_unknown'
+                # Exact linked goods broken: served value is zero. This is the
+                # surplus formula, NOT Saved's special unserved-deal rule.
+                normalized_surplus = (refund - paid) / lp
+                if refund == paid and paid > 0:
+                    saved_contribution = contribution = 0
+                elif refund == 0:
+                    saved_contribution = -1
+                    contribution = normalized_surplus
+                else:
+                    reason = 'partial_refund_semantics_unknown'
         else:
             reason = 'ledger_coverage_unproven'
         if truncated:
             reason = 'replay_truncated_unknown'
             contribution = None
+            saved_contribution = normalized_surplus = None
+        surplus_reason = None if normalized_surplus is not None else reason
         results.append(dict(order=order, ledger=sale.get('seq'),
                             item_kind=item_kind, item_kind_source=kind_source,
                             kind_versions_seen=sale['kind_versions_seen'],
@@ -443,6 +455,9 @@ def summarize(events, own_name, now, *, max_orders=MAX_ORDERS):
                             mature_6h=now >= sale['ts'] + 21600,
                             observation_complete=False,
                             surface_discount=(lp-paid)/lp if number(paid) is not None and number(lp) else None,
+                            saved_contribution=saved_contribution,
+                            normalized_surplus_contribution=normalized_surplus,
+                            normalized_surplus_unknown_reason=surplus_reason,
                             known_broken_contribution=contribution, unknown_reason=reason,
                             broken_ts=broken.get('ts') if broken else None,
                             refunded_amount=broken.get('refunded_amount') if broken else None))
@@ -450,6 +465,13 @@ def summarize(events, own_name, now, *, max_orders=MAX_ORDERS):
     order_kinds = {k: sum(c['item_kind'] == k for c in results) for k in ('goods', 'food', 'unknown')}
     event_kinds = {k: sum(replay_kind(e)[0] == k for (kind, _), e in seen.items()
                           if kind == 'settle') for k in ('goods', 'food', 'unknown')}
+    # Counts only, not a score or a proxy for the official (deals + 100) denominator.
+    contribution_counts = dict(retained_order_denominator=len(results))
+    for name in ('saved', 'normalized_surplus'):
+        known = sum(c[name + '_contribution'] is not None for c in results)
+        contribution_counts[name + '_known_orders'] = known
+        contribution_counts[name + '_unknown_orders'] = len(results) - known
     return dict(cohorts=results, coverage=dict(counters), official_saved=None,
+                contribution_counts=contribution_counts,
                 item_kind_orders=order_kinds, item_kind_settle_events=event_kinds,
                 complete=False, truncated=truncated)
