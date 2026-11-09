@@ -295,7 +295,7 @@ class BuyerRetryTests(unittest.TestCase):
         run = self.run_market([12000, "warranty"])
         self.assert_single_success(run)
         self.assertEqual(run.result["accept"]["warranty_hours"], 6)
-        self.assertIn("break rate", run.diagnostic)
+        self.assertIn("expected Saved", run.diagnostic)
 
     def test_goods_savings_cap_alone_declines_then_retries(self):
         self.order['kind'] = 'goods'
@@ -441,7 +441,7 @@ class BuyerFinalAcceptanceTests(unittest.TestCase):
         result, offers, _ = self.run_final_turn(ask=13000, warranty=0)
         self.assertEqual(len(offers), 4)
         self.assertIsNone(result["receipt"])
-        self.assertIn("break rate", result["review"])
+        self.assertIn("expected Saved", result["review"])
 
     def test_round2_keeps_five_counters_without_final_acceptance(self):
         result, offers, _ = self.run_final_turn(legacy=True)

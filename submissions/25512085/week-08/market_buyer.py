@@ -512,6 +512,66 @@ def goods_price_cap(catalog, hub, sku, budget):
     return cap if cap >= 1 else None
 
 
+def goods_expected_saved(amount, list_price, grade, warranty_h=None):
+    """Per-order Saved proxy, using policy priors, NOT empirical failure rates.
+
+    Missing warranty has no benefit; short coverage has no assumed timing
+    distribution. Missing/unknown string grades use C; invalid types abstain.
+    Claims still need kit certs.
+    """
+    if (not positive_number(amount) or not positive_number(list_price)
+            or (grade is not None and not isinstance(grade, str))):
+        return None
+    grade = grade if grade in BREAK_RATE else 'C'
+    if warranty_h is None:
+        warranty_h = 0
+    if (not isinstance(warranty_h, (int, float)) or isinstance(warranty_h, bool)
+            or not math.isfinite(warranty_h) or warranty_h < 0):
+        return None
+    q = BREAK_RATE[grade]
+    discount = (list_price - amount) / list_price
+    return (1 - q) * discount - (0 if warranty_h >= GOODS_BREAK_WINDOW_H else q)
+
+
+def goods_ranking_proxy(hub, sku, shop_name, shop_url, list_price, prior_pay, now):
+    """Fresh shop x SKU x condition observations; never executable quotes.
+
+    Three observations per condition required. Shrink price toward the SKU
+    price prior with three pseudo-observations, not toward invented A/coverage.
+    Otherwise use C/no-refund pessimism, so unknown terms get no free benefit.
+    Existing collection, own-buyer exclusion and 50-row/3h bounds are unchanged.
+    """
+    groups = {}
+    rows = hub.get('demand_radar', {}).get('sku_comparables', {}).get(sku) or []
+    if not isinstance(rows, list):
+        rows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        ts, amount = row.get('ts'), row.get('amount')
+        grade, warranty = row.get('grade'), row.get('warranty_hours')
+        if (row.get('shop') not in (shop_name, shop_url)
+                or not positive_number(ts) or not 0 <= now - ts <= COMPARABLE_WINDOW_S
+                or not positive_number(amount) or amount > 10**12
+                or not isinstance(grade, str) or grade not in BREAK_RATE
+                or warranty is None
+                or goods_expected_saved(amount, list_price, grade, warranty) is None):
+            continue
+        condition = (grade, warranty >= GOODS_BREAK_WINDOW_H)
+        groups.setdefault(condition, []).append((ts, amount))
+    qualified = [(condition, samples) for condition, samples in groups.items()
+                 if len(samples) >= COMPARABLE_MIN_SAMPLES]
+    if not qualified:
+        return goods_expected_saved(prior_pay, list_price, 'C', 0)
+    # Most recently observed qualified condition, not the most flattering score.
+    (grade, full_window), samples = max(qualified, key=lambda group: max(r[0] for r in group[1]))
+    n = len(samples)
+    predicted_pay = (n * statistics.median(r[1] for r in samples)
+                     + COMPARABLE_MIN_SAMPLES * prior_pay) / (n + COMPARABLE_MIN_SAMPLES)
+    return goods_expected_saved(predicted_pay, list_price, grade,
+                                GOODS_BREAK_WINDOW_H if full_window else 0)
+
+
 def pick_round3_shop_and_sku(
     shops: list[dict],
     memory: dict,
@@ -520,11 +580,11 @@ def pick_round3_shop_and_sku(
     order_data: dict[str, Any],
     budget: int,
 ) -> tuple[dict, dict[str, Any] | None, str]:
-    """Rank acceptable in-stock pairs by expected list-relative savings (Patch3.4).
+    """Rank acceptable pairs by a per-order savings proxy (goods: risk-aware).
 
     This is a per-candidate proxy, not the aggregate Saved score (sum of scored
-    transaction savings rates / (deals + 100)). SKU-market history is not a
-    shop-specific or executable-price prediction. Keep existing feasibility,
+    transaction savings rates / (deals + 100)). Goods condition observations
+    predict neither the next unit nor executable prices. Keep feasibility,
     trust, bestseller and diversity policies unchanged.
     """
     acceptable = set(order_data.get("acceptable") or [])
@@ -606,6 +666,9 @@ def pick_round3_shop_and_sku(
                 # No sufficient evidence: explicit 80%-of-list prior, not a quote.
                 est_pay = min(budget, max(est_cost_floor, int(list_price * 0.80)))
             est_savings_rate = (list_price - est_pay) / list_price
+            if order_data.get("kind") == "goods":
+                est_savings_rate = goods_ranking_proxy(
+                    hub, sku, c['name'], c['url'], list_price, est_pay, now_ts)
             # Combined utility: expected savings rate * existing weights
             # Give an extra preference to market bestsellers with proven trading liquidity
             bestseller_boost = 1.35 if sku in (
@@ -699,7 +762,7 @@ def pick_shop(shops: list[dict], memory: dict, item: str, budget: int) -> tuple[
 
 
 def build_accept_policy(order_data: dict[str, Any], agreed_price: int, list_price: int,
-                        receipt_warranty_h: float = 0) -> dict[str, Any]:
+                        receipt_warranty_h: float = 0, receipt_grade: str = "C") -> dict[str, Any]:
     """Construct Round 3 pre-payment `accept` policy verified by market_kit.py before paying."""
     kind = order_data.get("kind")
     policy: dict[str, Any] = {"cert": True}
@@ -709,12 +772,24 @@ def build_accept_policy(order_data: dict[str, Any], agreed_price: int, list_pric
         policy["min_hours_left"] = round(use_hours + 0.25, 2)
         policy["grades"] = ["A", "B", "C"]
     elif kind == "goods":
-        policy["grades"] = ["A", "B", "C"]
+        # Never allow a worse grade than the receipt claim, even when full
+        # coverage would make that grade positive. The kit checks actual certs.
+        if receipt_warranty_h is None:
+            receipt_warranty_h = 0
+        score = goods_expected_saved(agreed_price, list_price, receipt_grade, receipt_warranty_h)
+        if score is None or score <= 0:
+            raise ValueError("goods receipt has no positive expected Saved")
+        receipt_grade = receipt_grade if receipt_grade in BREAK_RATE else 'C'
+        policy["grades"] = [grade for grade in BREAK_RATE
+                            if BREAK_RATE[grade] <= BREAK_RATE[receipt_grade]
+                            and goods_expected_saved(agreed_price, list_price, grade, receipt_warranty_h) > 0]
         # The kit builds the checkout from the shop's own terms, not from our copy of the receipt. If the shop
         # promised the full-window warranty, require it, so a checkout without it is not paid. Deals agreed
-        # without a warranty were already checked for positive expected surplus before getting here.
+        # without a warranty were already checked for positive expected Saved before getting here.
         if receipt_warranty_h >= GOODS_BREAK_WINDOW_H:
             policy["warranty_hours"] = GOODS_BREAK_WINDOW_H
+        elif positive_number(receipt_warranty_h):
+            policy["warranty_hours"] = receipt_warranty_h
     return policy
 
 
@@ -1327,22 +1402,17 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
                 )
                 outcome = "no-service-deal"
 
-            # Goods without a warranty covering the break window: a broken unit is worth 0 to the order, so the
-            # expected surplus is (1 - break_rate) x list - price. Pay only while it stays positive; with the
-            # warranty a break is refunded and any price under list is worth it. No grade claim: assume C.
-            if is_round3 and order_data.get("kind") == "goods":
-                warranty_h = float(raw_receipt.get("warranty_hours") or 0)
-                claimed = str(raw_receipt.get("claim") or "C")
-                lp = int(catalog[rec_item]["list_price"])
-                b = BREAK_RATE.get(claimed, BREAK_RATE["C"])
-                if warranty_h < GOODS_BREAK_WINDOW_H and (1 - b) * lp - recorded_price <= 0:
+            # Check actual receipt SKU/price/terms on every completion path.
+            # Seller claims are only hints; actual certified checkout is pending.
+            if is_round3_goods:
+                saved = goods_expected_saved(recorded_price, catalog[rec_item]["list_price"],
+                                             raw_receipt.get("claim"), raw_receipt.get("warranty_hours"))
+                if saved is None or saved <= 0:
                     final_receipt = None
                     stars = 3
-                    review = (
-                        f"No deal: grade {claimed} {rec_item} at {recorded_price} with no {GOODS_BREAK_WINDOW_H} h "
-                        f"warranty is worth less than its price at a {round(b * 100)}% break rate (list {lp})."
-                    )
+                    review = f"No deal: declined-price-policy for {rec_item}; invalid terms or nonpositive expected Saved."
                     outcome = "declined-no-warranty"
+                    active["failure"] = "price"
 
     else:
         final_receipt = None
@@ -1390,8 +1460,11 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
     }
     if is_round3 and final_receipt is not None and recorded_price is not None:
         accept_list_price = int(catalog[rec_item]["list_price"]) if is_round3_goods else list_price
+        accept_warranty = final_receipt.get("warranty_hours") or 0
+        if not is_round3_goods:
+            accept_warranty = float(accept_warranty)  # preserve the existing food/legacy path
         result_line["accept"] = build_accept_policy(order_data, recorded_price, accept_list_price,
-                                                    float(final_receipt.get("warranty_hours") or 0))
+                                                    accept_warranty, final_receipt.get("claim"))
         result_line["accept"].update(food_accept)
         # This is only a pending checkout, not a paid purchase or successful memory.
         # Build/validate everything before writing a single final candidate.

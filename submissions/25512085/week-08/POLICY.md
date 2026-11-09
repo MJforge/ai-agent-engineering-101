@@ -1,5 +1,11 @@
 # Week-08 운영 정책 통합본 및 중복·불일치 검토
 
+> 2026-11-09 로컬 step2 후보(미배포, 독립 리뷰 완료): goods buyer의 기존
+> 양의 기대효용 gate를 ExpectedSaved 양수 gate로 대체하고 조건별 ranking 및
+> checkout 등급/보증 조건을 강화했다. seller/restock·20% cap·food는 불변이다.
+> 아래 역사적 buyer 설명보다 [step2 구현/제약/검증](history/20261109-buyer-saved-strategy-step2/IMPLEMENTATION.md)이 우선한다.
+> provenance 보존의 3.2MB 회귀 충돌은 해결했고 전체 682개 테스트를 통과했다. acceptable SKU 교체 한계는 남으며 VM 배포는 별도 승인 대상이다.
+
 - 기준: 브랜치 `week-08`, HEAD `a1292c2`의 작업 트리 코드(2026-11-04 정적 읽기).
 - **정적 분석입니다.** 코드를 실행하지 않았고 테스트·VM·네트워크도 사용하지 않았습니다. 아래 "실제 적용값"은 코드 조건을 따라가 계산한 값이지 실행 결과가 아닙니다.
 - `git show`로 개별 커밋(0691117, fcda40b, 6a88136, bb80dbb, a1292c2, a285d38, 320dc4a, 41f8e5c)의 diff를 보지 못했습니다(이 작업에서는 셸을 쓰지 않음). 현재 파일 내용만 근거로 삼았고, 커밋별 변경 내역은 **미확인**입니다. a285d38은 코드에서 해당 해시를 찾을 수 없어 seller.py의 현재 청산 로직(아래 3장)만 기술했습니다.
@@ -690,4 +696,34 @@ production restock 명령의 `--visibility-guard`는 상태 없음/오류/미래
   미지원 복합 제외·부정은 위치와 무관하게 거절하며 보완 등급 집합을 추측하지 않는다.
   명시 등급 조건 span만 128자로 제한하고 SKU/상품명이나 전체 메시지에는 이 제한을
   적용하지 않는다. 새 부정 토큰은 단어 경계를 사용해 무해한 상품명 부분문자열을
-  제외 표현으로 오인하지 않도록 검증한다. 기존 등급별 가격·선택 힌트는 그대로다.
+   제외 표현으로 오인하지 않도록 검증한다. 기존 등급별 가격·선택 힌트는 그대로다.
+
+## Buyer Saved step2 후속 수정 범위 (2026-11-09, local only·메인 리뷰 대기)
+
+이 절은 문서 상단 step2 후보의 **메타데이터 크기 충돌 미해결** 상태를 대체한다.
+과거 가격·매입 표는 수정하지 않는다. goods ExpectedSaved 양수 gate 및 checkout
+등급/보증 강화는 유지하며 seller/restock·20% goods cap·food·step1은 불변이다.
+
+- 실제 기존 schema는 scalar `sku_settles` **30개/SKU**, structured
+  `sku_comparables` **50개/SKU·3시간**이다. 기존 core 가격·등급·시각·보증·만료 증거와
+  consumer 중앙가를 줄여 공간을 확보하지 않는다.
+- ranking용 추가 식별자는 **shop만**, 허브 전체 최대 **120행**에 보존한다.
+  같은 shop×SKU×(grade, >=6h 여부)에서 가장 최근3개씩, 최소3개가 있는 조건을
+  최신 관측순으로 우선한다(완전 조건 최대40개). 남는 공간만 sparse 조건 축적에 쓴다.
+  min3 미달, 퇴출·초과·기존 compaction으로 식별자를 잃은 행은 unknown fallback이다.
+  tag 예산이 가득 차면 sparse 진입이 지연될 수 있으며 과거 정보를 역추정하지 않는다.
+- shop은 앞뒤 공백/제어문자 없는 비어 있지 않은 문자열, UTF-8 최대128bytes만 허용한다.
+  긴 URL/이름을 잘라 다른 shop으로 합치지 않고 unknown 처리한다. order/seq는 prediction에
+  필요 없어 compaction에서 제거하며, 기존 ledger cursor/seen_seqs의 ingestion dedup은 유지한다.
+  원장 원본이나 journal은 수정하지 않는다. 매 ingestion 반환 및 기존 compaction에서
+  같은 선택 함수를 적용하여 전시장 행 수만큼 shop 태그가 증식하지 않게 한다.
+- 기존 **3.2MB 검증 한도는 그대로**다. 대형 합성 fixture 결과 **3,106,002 bytes**로 통과했다.
+  기존 4,860,776 bytes 실패 및 red 로그는 보존한다.
+- visibility 두 실패는 mock/clock 누수로 단정하지 않았다. 동일 모듈 단독 실행도 긴
+  runner 라벨이면 reservation 임시 경로262자로 ENOENT가 재현됐다. runtime 임시경로와
+  source tree에서 라벨을 빼고 고유 짧은 UUID를 사용해 해결했다. 거래 코드·timeout·skip은
+  변경하지 않았다. 새 경로 길이 회귀와 긴 라벨 실행으로 확인했다.
+- 전체 격리 suite **682개 통과**. ranking 품질의 실거래 실증은 여전히 N=0이다.
+  kit acceptable SKU 교체에 따른 정가/risk/cap 완전 보장 한계는 기존 통합 범위 밖으로
+  남으며, 메인 리뷰 및 별도 배포 승인 전 VM 반영·commit·push를 하지 않는다.
+  상세 명령·로그: [step2 구현 기록](history/20261109-buyer-saved-strategy-step2/IMPLEMENTATION.md).

@@ -283,8 +283,9 @@ class BuyerPriceTests(unittest.TestCase):
         self.assertEqual(radar["cat_sold_ts"]["food"], [self.now])
         observation = radar["sku_comparables"][self.sku][0]
         self.assertEqual(observation["grade"], "A")
-        self.assertEqual(observation["order"], "order-1")
-        self.assertEqual(observation["seq"], 1)
+        self.assertNotIn("order", observation)  # prediction metadata is not a second ledger
+        self.assertNotIn("seq", observation)
+        self.assertEqual(hub["ledger_seq"], 1)  # replay dedup remains cursor-based
         for seq in range(2, 65):
             entry = copy.deepcopy(row)
             entry["seq"] = seq

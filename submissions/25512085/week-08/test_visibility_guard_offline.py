@@ -445,6 +445,12 @@ class SupplyGateTests(GuardFixture):
     def supply(self, qty=1, sku="G12345678"):
         return self.market.call("POST", "/api/supply", "shop", json={"sku": sku, "qty": qty})
 
+    def test_isolated_atomic_reservation_path_stays_below_windows_limit(self):
+        # Long full-suite labels used to push this temp name past MAX_PATH,
+        # making write_text fail with ENOENT before the fake market was called.
+        target = self.md / f"visibility_supply_reservations.json.{os.getpid()}.{threading.get_ident()}.tmp"
+        self.assertLess(len(str(target)), 260, str(target))
+
     def test_pause_restores_one_only_once_per_sku_window_even_401(self):
         self.market.response = 401
         self.assertEqual(self.supply().status_code, 401)

@@ -40,35 +40,37 @@ class BuyerSavingsRankingTests(unittest.TestCase):
     def test_equal_discount_same_base_utility_across_price_scales(self):
         _, scores, _ = self.select({'small': 1000, 'large': 100000})
         self.assertAlmostEqual(scores['small'], scores['large'])
-        self.assertAlmostEqual(scores['small'], .20 * (3.8 / 4.2))
+        self.assertEqual(scores['small'], 0)  # unknown C/no-refund proxy is negative
 
     def test_higher_rate_beats_larger_absolute_saving(self):
         result, scores, probes = self.select({'large': 100000, 'small': 10000},
-                                            settles={'small': [6500] * 3})
-        # 3500 saved at 35% beats 20000 saved at 20%; no quote multiplexing.
+                                            settles={'small': [4000] * 3})
+        # 60% discount remains positive even under unknown C/no-refund prior.
         self.assertEqual(result[1]['sku'], 'small')
         self.assertGreater(scores['small'], scores['large'])
         self.assertEqual(probes, 1)
 
     def test_no_fixed_money_floor(self):
         _, scores, _ = self.select({'small': 1000, 'large': 10000},
-                                    settles={'small': [650] * 3, 'large': [6500] * 3})
-        self.assertAlmostEqual(scores['small'], .35 * (3.8 / 4.2))
+                                    settles={'small': [400] * 3, 'large': [4000] * 3})
+        self.assertAlmostEqual(scores['small'], (.65*.6-.35) * (3.8 / 4.2))
         self.assertAlmostEqual(scores['small'], scores['large'])
 
     def test_bestseller_trust_and_deal_weights_remain(self):
         _, scores, _ = self.select({'plain': 10000, 'G1515d951': 10000,
                                     'trusted': 10000}, board={
-                                        'trusted': {'stars': 5, 'deals': 20}})
+                                         'trusted': {'stars': 5, 'deals': 20}},
+                                    settles={sku: [4000]*3 for sku in ('plain', 'G1515d951', 'trusted')})
         self.assertAlmostEqual(scores['G1515d951'] / scores['plain'], 1.35)
-        self.assertAlmostEqual(scores['trusted'], .20 * (5 / 4.2) * 1.15)
+        self.assertAlmostEqual(scores['trusted'], (.65*.6-.35) * (5 / 4.2) * 1.15)
 
     def test_diversity_and_recent_failure_weights_remain(self):
         _, scores, _ = self.select({'plain': 10000, 'recent': 10000}, memory={
             'recent': {'last_visited_ts': NOW - 10,
-                       'recent': [{'outcome': 'no-deal'}] * 4}})
+                       'recent': [{'outcome': 'no-deal'}] * 4}},
+                                    settles={'plain': [4000]*3, 'recent': [4000]*3})
         # .35 recent visit + .25 four memories + .22 each of last three failures.
-        self.assertAlmostEqual(scores['recent'], .20 * .5)
+        self.assertAlmostEqual(scores['recent'], (.65*.6-.35) * .5)
         self.assertGreater(scores['plain'], scores['recent'])
 
     def test_feasibility_and_budget_estimate_unchanged(self):
@@ -77,7 +79,8 @@ class BuyerSavingsRankingTests(unittest.TestCase):
                                    (6000, 6000, .15)]:
             with self.subTest(budget=budget):
                 _, scores, _ = self.select({'sku': 10000}, budget=budget)
-                self.assertAlmostEqual(scores['sku'], (10000-pay)/10000 * mult * (3.8/4.2))
+                risk = max(0, .65*(10000-pay)/10000-.35)
+                self.assertAlmostEqual(scores['sku'], risk * mult * (3.8/4.2))
 
     def test_missing_zero_price_deferral_boundary_and_invalid_prices(self):
         for price in (None, 0):

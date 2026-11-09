@@ -53,6 +53,9 @@ SEED_GOODS_CATEGORIES = [
 # (Safe-Care pricing) and market_buyer.py (whether to buy goods without a warranty).
 BREAK_RATE = {"A": 0.03, "B": 0.15, "C": 0.35}
 GOODS_BREAK_WINDOW_H = 6
+BUYER_SHOP_METADATA_MAX_ROWS = 120  # global tag budget, not additional price observations
+BUYER_SHOP_METADATA_SAMPLES = 3
+BUYER_SHOP_METADATA_MAX_BYTES = 128
 
 # Round 3 ends 2026-11-17 23:59 KST (week-08 page). Stock left then is worth 0 to net profit (agent.md: "stock
 # that never sells is a loss"), so restock stops buying near the end and seller.py clears stock in the last day.
@@ -169,19 +172,65 @@ def migrate_no_rebuy(hub: dict[str, Any]) -> None:
         hub["no_rebuy_overflow"] = bool(hub.get("no_rebuy_overflow") or overflow)
 
 
+def _compact_buyer_shop_metadata(comparables: dict, now: float) -> None:
+    """Keep bounded prediction tags, never truncate/reprice core observations.
+
+    Only shop is needed for ranking. Ledger cursor/seen_seqs already deduplicate
+    ingestion, so per-row order/seq need not survive. Prefer complete recent
+    condition groups, retaining three newest tags each; spare slots can seed
+    sparse groups without claiming they meet the three-observation threshold.
+    """
+    groups = {}
+    for sku, rows in comparables.items():
+        for index, row in enumerate(rows):
+            shop = row.pop('shop', None)
+            row.pop('order', None)
+            row.pop('seq', None)
+            if (not isinstance(shop, str) or not shop or shop.strip() != shop
+                    or not shop.isprintable()):
+                continue
+            try:
+                if len(shop.encode('utf-8')) > BUYER_SHOP_METADATA_MAX_BYTES:
+                    continue
+            except UnicodeEncodeError:
+                continue
+            ts, amount = row.get('ts'), row.get('amount')
+            grade, warranty = row.get('grade'), row.get('warranty_hours')
+            if (not isinstance(grade, str) or grade not in BREAK_RATE
+                    or not all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                               and math.isfinite(x) for x in (ts, amount, warranty))
+                    or not 0 <= now-ts <= 10800 or not 0 < amount <= 10**12 or warranty < 0):
+                continue
+            condition = (sku, shop, grade, warranty >= GOODS_BREAK_WINDOW_H)
+            groups.setdefault(condition, []).append((ts, index, row))
+    selected = [(key, sorted(samples, key=lambda r: (r[0], r[1]), reverse=True)
+                 [:BUYER_SHOP_METADATA_SAMPLES]) for key, samples in groups.items()]
+    selected.sort(key=lambda group: (len(group[1]) < BUYER_SHOP_METADATA_SAMPLES,
+                                     -group[1][0][0], *group[0]))
+    remaining = BUYER_SHOP_METADATA_MAX_ROWS
+    for (_, shop, _, _), samples in selected:
+        if len(samples) <= remaining:
+            for _, _, row in samples:
+                row['shop'] = shop
+            remaining -= len(samples)
+
+
 def compact_hub(hub: dict[str, Any], now: float) -> None:
     """Lossless for current consumers: all 50 samples within their 3h window.
 
     A smaller sample cap changes medians. Do not truncate to 15 just to meet a
     byte target. Forum citations use their own bounded window, not comparables.
+    Only a global bounded subset retains shop tags for buyer condition ranking.
+    Core price/condition evidence and existing 50-observation/3h limits stay intact.
     """
     from seller_cash_policy import compact_cash_sales, compact_break_orders, number
     radar = hub.get('demand_radar', {})
-    fields = ('ts', 'amount', 'grade', 'expires_at', 'warranty_hours')
+    fields = ('ts', 'amount', 'grade', 'expires_at', 'warranty_hours', 'shop')
     radar['sku_comparables'] = {
         sku: kept for sku, rows in radar.get('sku_comparables', {}).items()
         if (kept := [{k:r[k] for k in fields if k in r and r[k] is not None}
-                     for r in rows if number(r.get('ts')) and now-10800 <= r['ts'] <= now])}
+                      for r in rows if number(r.get('ts')) and now-10800 <= r['ts'] <= now])}
+    _compact_buyer_shop_metadata(radar['sku_comparables'], now)
     if 'seller_cash' in hub:
         compact_cash_sales(hub, now)
     if 'break_observer' in hub:
@@ -612,6 +661,9 @@ def apply_ledger_rows(hub: dict[str, Any], rows: list[dict[str, Any]], catalog: 
                 radar["recent_refs"] = refs[-25:]
 
     hub["ledger_seq"] = seq
+    # Bound prediction-only tags on every ingestion return, not just the minute
+    # sweep. Do not alter core prices, demand counters, or the original journal.
+    _compact_buyer_shop_metadata(radar.get('sku_comparables', {}), time.time())
 
 
 def sync_broken_and_payments(hub: dict[str, Any], market_dir: Path) -> list[dict[str, Any]]:

@@ -180,22 +180,22 @@ class PriceEvidenceTests(unittest.TestCase):
                 result, scores, _ = self.select({'sku': 10000}, settles={'sku': [median]*3})
                 self.assertIsNotNone(result[0])  # retain candidates, not fictitious feasible prices
                 # Only utility is floored; the median remains 11000, not a fictitious cap price.
-                self.assertAlmostEqual(scores['sku'], max(0, (10000-median)/10000) * (3.8/4.2))
+                self.assertAlmostEqual(scores['sku'], max(0, .65*(10000-median)/10000-.35) * (3.8/4.2))
 
     def test_evidence_is_not_replaced_by_budget(self):
         _, scores, _ = self.select({'sku': 10000}, budget=7000, settles={'sku': [8500]*3})
-        self.assertAlmostEqual(scores['sku'], .15 * .45 * (3.8/4.2))
+        self.assertEqual(scores['sku'], 0)  # unknown condition: no warranty benefit
 
     def test_bad_prices_and_insufficient_samples_use_explicit_fallback(self):
         for values in ([8500]*2, [None, 0, False, True, float('nan'), float('inf'), -1, '8500'], []):
             _, scores, _ = self.select({'sku': 10000}, settles={'sku': values})
-            self.assertAlmostEqual(scores['sku'], .20 * (3.8/4.2))
+            self.assertEqual(scores['sku'], 0)
 
     def test_structured_qty_cannot_be_invented_from_scalar_schema(self):
         for qty in (None, 0, False, True, float('nan'), 2):
             _, scores, _ = self.select({'sku': 10000},
                 settles={'sku': [{'amount': 8500, 'qty': qty}] * 3})
-            self.assertAlmostEqual(scores['sku'], .20 * (3.8/4.2))
+            self.assertEqual(scores['sku'], 0)
         # Scalar observations count samples, not units or arbitrary dict quantities.
         for rows in (None, 0, False, True, float('nan'), {'qty': 3}):
             self.assertEqual(buyer.settled_price_samples({'demand_radar': {'sku_settles': {'sku': rows}}}, 'sku'), [])
@@ -203,15 +203,15 @@ class PriceEvidenceTests(unittest.TestCase):
     def test_valid_sample_count_last_fifteen_and_price_range(self):
         rows = [5000] * 15 + [8500] * 15 + [True, float('nan'), 10**12 + 1]
         _, scores, _ = self.select({'sku': 10000}, settles={'sku': rows})
-        self.assertAlmostEqual(scores['sku'], .15 * (3.8/4.2))
+        self.assertEqual(scores['sku'], 0)
         _, scores, _ = self.select({'sku': 10000}, settles={'sku': [8500]*2 + [True]})
-        self.assertAlmostEqual(scores['sku'], .20 * (3.8/4.2))
+        self.assertEqual(scores['sku'], 0)
 
     def test_negative_savings_does_not_reward_low_trust_or_diversity_penalties(self):
         shops = [{'name': name, 'url': 'https://' + name + '.invalid',
                   'offers': [{'sku': 'sku'}]} for name in ('good', 'penalized')]
         order = {'order': 'synthetic', 'kind': 'goods', 'acceptable': ['sku']}
-        for median in (8500, 11000):
+        for median in (4000, 11000):
             for memory, board in [({}, {'good': {'stars': 5}, 'penalized': {'stars': 3}}),
                                    ({'penalized': {'last_visited_ts': ranking_tests.NOW - 10}}, {}),
                                    ({'penalized': {'recent': [{'outcome': 'no-deal'}]}}, {}),
@@ -229,7 +229,7 @@ class PriceEvidenceTests(unittest.TestCase):
                     scores = {row[1]['name']: row[0] for row in candidates}
                     self.assertGreaterEqual(scores['good'], scores['penalized'])
                     self.assertEqual(result[0]['name'], 'good')
-                    if median == 8500:
+                    if median == 4000:
                         self.assertGreater(scores['good'], scores['penalized'])
 
     def test_negative_savings_feasibility_penalty_is_not_a_reward(self):
