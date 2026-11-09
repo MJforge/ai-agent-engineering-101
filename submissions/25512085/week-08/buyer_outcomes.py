@@ -27,6 +27,44 @@ def number(value):
     return value if type(value) in (int, float) and 0 <= value <= 10**12 and math.isfinite(value) else None
 
 
+def kind_evidence(meta, data, event_kind, observed_at):
+    """Catalog observation, NOT evidence of the original order's kind."""
+    value = meta.get('kind') if isinstance(meta, dict) else None
+    state = ('missing' if not isinstance(meta, dict) or 'kind' not in meta else
+             'null' if value is None else 'valid' if type(value) is str and value in ('goods', 'food') else 'invalid')
+    catalog_kind = value if state == 'valid' else 'unknown'
+    candidates = []
+    invalid = False
+    event_field = False
+    for key in ('item_kind', 'kind'):
+        if key not in data:
+            continue
+        v = data[key]
+        if key == 'kind' and v == event_kind:
+            event_field = True  # Event kind is not an item kind.
+        elif type(v) is str and v in ('goods', 'food'):
+            candidates.append(v)
+        else:
+            invalid = True
+    ledger_state = ('invalid' if invalid else 'conflict' if len(set(candidates)) > 1 else
+                    'valid' if candidates else 'event_kind' if event_field else 'missing')
+    ledger_kind = candidates[0] if ledger_state == 'valid' else 'unknown'
+    item_kind, source = resolved_kind(catalog_kind, ledger_kind, ledger_state)
+    return dict(item_kind=item_kind, item_kind_source=source,
+                catalog_kind=catalog_kind, catalog_kind_state=state,
+                catalog_kind_observed_at=observed_at,
+                ledger_item_kind=ledger_kind, ledger_kind_state=ledger_state)
+
+
+def resolved_kind(catalog_kind, ledger_kind, ledger_state):
+    if ledger_state in ('invalid', 'conflict') or (ledger_kind != 'unknown' and
+                                                  catalog_kind != 'unknown' and ledger_kind != catalog_kind):
+        return 'unknown', 'catalog_ledger_conflict'
+    if catalog_kind == 'unknown':
+        return 'unknown', 'catalog_kind_unknown'
+    return catalog_kind, 'catalog_at_observation'
+
+
 def normalize(rows, catalog, own_name, observed_at):
     """Only existing ledger data; no receipt, budget, URL, name/time matching."""
     counts = Counter()
@@ -56,11 +94,11 @@ def normalize(rows, catalog, own_name, observed_at):
         if type(seq) is not int or not 0 <= seq <= 10**12 or ts is None:
             counts['no_ledger_or_timestamp'] += 1
             continue
-        event = dict(version=1, kind=kind, buyer=buyer, order=order, seq=seq,
+        event = dict(version=2, kind=kind, buyer=buyer, order=order, seq=seq,
                      ts=ts, observed_at=observed_at, unit=identifier(data.get('unit')))
         if kind == 'settle':
             sku = identifier(data.get('sku') or data.get('item'))
-            meta = catalog.get(sku, {})
+            meta = catalog.get(sku, {}) if isinstance(catalog, dict) else {}
             lp = number(meta.get('list_price')) if isinstance(meta, dict) else None
             if not lp:
                 counts['unknown_price'] += 1
@@ -68,8 +106,8 @@ def normalize(rows, catalog, own_name, observed_at):
                          list_price=lp or None,
                          list_price_source='catalog_at_observation' if lp else None,
                          grade=data.get('grade') if data.get('grade') in ('A', 'B', 'C') else None,
-                         warranty_hours=number(data.get('warranty_hours')),
-                         goods=bool(sku and re.fullmatch(r'[gG][0-9a-fA-F]{7,10}', sku)))
+                          warranty_hours=number(data.get('warranty_hours')))
+            event.update(kind_evidence(meta, data, kind, observed_at))
         else:
             # The existing seller observer documents this field, not `amount`.
             event['refunded_amount'] = number(data.get('refunded'))
@@ -121,7 +159,7 @@ def prepare(rows, catalog, own_name, observed_at):
     """In-memory snapshot only; safe to call while the hub is locked."""
     events, counts = normalize(rows, catalog, own_name, observed_at)
     if events or counts:
-        events.append(dict(version=1, kind='coverage', observed_at=observed_at,
+        events.append(dict(version=2, kind='coverage', observed_at=observed_at,
                            unlinked=counts, complete=False))
     return events
 
@@ -160,8 +198,8 @@ _COVERAGE_KEYS = ('no_identity', 'no_order', 'no_ledger_or_timestamp',
 
 
 def validate_event(raw):
-    """One v1 boundary for file AND direct replay; return allowlisted copies only."""
-    if type(raw) is not dict or type(raw.get('version')) is not int or raw['version'] != 1:
+    """Versioned boundary for file AND direct replay; never repair source bytes."""
+    if type(raw) is not dict or type(raw.get('version')) is not int or raw['version'] not in (1, 2):
         return None
     kind = raw.get('kind')
     if type(kind) is not str or kind not in ('settle', 'broken', 'coverage'):
@@ -169,7 +207,7 @@ def validate_event(raw):
     observed = number(raw.get('observed_at'))
     if observed is None:
         return None
-    clean = dict(version=1, kind=kind, observed_at=observed)
+    clean = dict(version=raw['version'], kind=kind, observed_at=observed)
     if kind == 'coverage':
         counts = raw.get('unlinked')
         if type(counts) is not dict or raw.get('complete') is not False:
@@ -206,16 +244,38 @@ def validate_event(raw):
             return None
         if source is not None and (type(source) is not str or source != 'catalog_at_observation'):
             return None
-        if type(goods) is not bool:
+        if raw['version'] == 1 and type(goods) is not bool:
             return None
         lp = clean['list_price']
         if ((lp is not None and (lp <= 0 or source != 'catalog_at_observation'))
                 or (lp is None and source is not None)):
             return None
-        is_goods = bool(clean['sku'] and re.fullmatch(r'[gG][0-9a-fA-F]{7,10}', clean['sku']))
-        if goods != is_goods:
-            return None
-        clean.update(grade=grade, list_price_source=source, goods=goods)
+        clean.update(grade=grade, list_price_source=source)
+        if raw['version'] == 1:
+            clean['goods'] = goods  # Historical bytes accepted, never used to infer kind.
+        else:
+            if 'goods' in raw:
+                return None
+            enums = dict(item_kind=('goods', 'food', 'unknown'),
+                         item_kind_source=('catalog_at_observation', 'catalog_kind_unknown', 'catalog_ledger_conflict'),
+                         catalog_kind=('goods', 'food', 'unknown'),
+                         catalog_kind_state=('valid', 'missing', 'null', 'invalid'),
+                         ledger_item_kind=('goods', 'food', 'unknown'),
+                         ledger_kind_state=('valid', 'missing', 'event_kind', 'invalid', 'conflict'))
+            for key, values in enums.items():
+                if type(raw.get(key)) is not str or raw[key] not in values:
+                    return None
+                clean[key] = raw[key]
+            stamp = number(raw.get('catalog_kind_observed_at'))
+            if stamp is None or stamp != observed:
+                return None
+            clean['catalog_kind_observed_at'] = stamp
+            if ((clean['catalog_kind_state'] == 'valid') != (clean['catalog_kind'] != 'unknown') or
+                    (clean['ledger_kind_state'] == 'valid') != (clean['ledger_item_kind'] != 'unknown')):
+                return None
+            if (clean['item_kind'], clean['item_kind_source']) != resolved_kind(
+                    clean['catalog_kind'], clean['ledger_item_kind'], clean['ledger_kind_state']):
+                return None
     return clean
 
 
@@ -238,10 +298,24 @@ def read_events(path):
                 yield {'kind': 'corrupt'}
 
 
+def replay_kind(event):
+    """Frozen catalog observation, constrained by all explicit ledger kind facts."""
+    if event['version'] == 1:
+        return 'unknown', 'legacy_kind_unknown'
+    known = event['ledger_kinds_seen']
+    if len(known) > 1 or event['ledger_kind_uncertain']:
+        return 'unknown', 'catalog_ledger_conflict'
+    return resolved_kind(event['catalog_kind'], next(iter(known), 'unknown'),
+                         'valid' if known else 'missing')
+
+
 def summarize(events, own_name, now, *, max_orders=MAX_ORDERS):
     """Bounded pure replay. No aggregate official Saved without complete cohorts."""
     orders, breaks = OrderedDict(), OrderedDict()
-    seen = set()
+    seen = {}
+    # Bounded by at most two order IDs per consumed event (MAX_EVENTS cap).
+    # Keep collision evidence even if the other order has not arrived or was evicted.
+    conflict_orders = set()
     counters = Counter()
     truncated = False
     try:
@@ -273,18 +347,57 @@ def summarize(events, own_name, now, *, max_orders=MAX_ORDERS):
             continue
         key = (kind, e.get('seq'))
         if key in seen:
+            previous = seen[key]
+            # Price/kind snapshots may change between observations, not ledger facts.
+            facts = ('buyer', 'order', 'ts', 'unit', 'sku', 'paid_amount', 'grade', 'warranty_hours') if kind == 'settle' else ('buyer', 'order', 'ts', 'unit', 'refunded_amount')
+            ledger_kind_conflict = False
+            if kind == 'settle' and e['version'] == 2:
+                if e['ledger_kind_state'] == 'valid':
+                    previous['ledger_kinds_seen'].add(e['ledger_item_kind'])
+                if e['ledger_kind_state'] in ('invalid', 'conflict'):
+                    previous['ledger_kind_uncertain'] = True
+                ledger_kind_conflict = len(previous['ledger_kinds_seen']) > 1
+            if any(previous.get(k) != e.get(k) for k in facts) or ledger_kind_conflict:
+                conflict_orders.update((previous['order'], e['order']))
+                previous['conflict'] = True
+                target = orders if kind == 'settle' else breaks
+                if previous['order'] in target:
+                    target[previous['order']]['conflict'] = True
+                if e['order'] in target:
+                    target[e['order']]['conflict'] = True
+                counters['duplicate_integrity_conflict'] += 1
+            elif kind == 'settle':
+                previous['kind_versions_seen'] = sorted(set(previous['kind_versions_seen'] + [e['version']]))
+                if previous['version'] == 1 and e['version'] == 2:
+                    # Explicit later observation only; no current catalog lookups.
+                    for k in ('item_kind', 'item_kind_source', 'catalog_kind', 'catalog_kind_state',
+                              'catalog_kind_observed_at', 'ledger_item_kind', 'ledger_kind_state'):
+                        previous[k] = e[k]
+                    previous['version'] = 2
+                elif e['version'] == 2 and previous.get('item_kind') != e['item_kind']:
+                    previous['observation_kind_changed'] = True
             continue
-        seen.add(key)
         order = e.get('order')
         if not identifier(order):
             counters['no_order'] += 1
             continue
         target = orders if kind == 'settle' else breaks
+        entry = dict(e)
+        if kind == 'settle':
+            entry['kind_versions_seen'] = [e['version']]
+            entry['ledger_kinds_seen'] = ({e['ledger_item_kind']} if e['version'] == 2
+                                          and e['ledger_kind_state'] == 'valid' else set())
+            entry['ledger_kind_uncertain'] = (e['version'] == 2 and
+                                               e['ledger_kind_state'] in ('invalid', 'conflict'))
+        if order in conflict_orders:
+            entry['conflict'] = True
+        seen[key] = entry
         if order in target:
             # Cannot assume multiple refunds are incremental; no summation guess.
+            conflict_orders.add(order)
             target[order]['conflict'] = True
         else:
-            target[order] = dict(e)
+            target[order] = entry
         if len(target) > max_orders:
             target.popitem(last=False)
             counters['pending_eviction_unknown'] += 1
@@ -295,13 +408,16 @@ def summarize(events, own_name, now, *, max_orders=MAX_ORDERS):
         paid, lp = sale.get('paid_amount'), sale.get('list_price')
         reason = None
         contribution = None
-        if sale.get('conflict') or (broken and broken.get('conflict')):
+        item_kind, kind_source = replay_kind(sale)
+        if order in conflict_orders or sale.get('conflict') or (broken and broken.get('conflict')):
             reason = 'conflicting_events'
         elif broken and sale.get('unit') and broken.get('unit') and sale['unit'] != broken['unit']:
             reason = 'unit_mismatch'
         elif broken and broken['ts'] < sale['ts']:
             reason = 'break_before_settlement'
-        elif not sale.get('goods'):
+        elif item_kind == 'unknown':
+            reason = 'legacy_kind_unknown' if sale['version'] == 1 else 'item_kind_unknown'
+        elif item_kind == 'food':
             reason = 'food_served_value_unknown'
         elif number(paid) is None or not number(lp):
             reason = 'price_unknown'
@@ -321,6 +437,9 @@ def summarize(events, own_name, now, *, max_orders=MAX_ORDERS):
             reason = 'replay_truncated_unknown'
             contribution = None
         results.append(dict(order=order, ledger=sale.get('seq'),
+                            item_kind=item_kind, item_kind_source=kind_source,
+                            kind_versions_seen=sale['kind_versions_seen'],
+                            observation_kind_changed=sale.get('observation_kind_changed', False),
                             mature_6h=now >= sale['ts'] + 21600,
                             observation_complete=False,
                             surface_discount=(lp-paid)/lp if number(paid) is not None and number(lp) else None,
@@ -328,5 +447,9 @@ def summarize(events, own_name, now, *, max_orders=MAX_ORDERS):
                             broken_ts=broken.get('ts') if broken else None,
                             refunded_amount=broken.get('refunded_amount') if broken else None))
     counters['broken_without_settle'] = len(set(breaks) - set(orders))
+    order_kinds = {k: sum(c['item_kind'] == k for c in results) for k in ('goods', 'food', 'unknown')}
+    event_kinds = {k: sum(replay_kind(e)[0] == k for (kind, _), e in seen.items()
+                          if kind == 'settle') for k in ('goods', 'food', 'unknown')}
     return dict(cohorts=results, coverage=dict(counters), official_saved=None,
+                item_kind_orders=order_kinds, item_kind_settle_events=event_kinds,
                 complete=False, truncated=truncated)

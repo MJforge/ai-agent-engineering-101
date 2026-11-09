@@ -82,7 +82,7 @@ class P2Tests(unittest.TestCase):
     def test_bad_rows_rejected_but_following_good_evidence_survives(self):
         sale = events()[0]
         invalid = [None, [], 3, True, 'sensitive-unknown-text', {},
-                   dict(sale, version=True), dict(sale, version=0), dict(sale, version=2),
+                   dict(sale, version=True), dict(sale, version=0), dict(sale, version=3),
                    dict(sale, kind=[]), dict(sale, kind='unknown'),
                    dict(sale, seq=True), dict(sale, seq=-1), dict(sale, seq=10**400),
                    dict(sale, ts=True), dict(sale, ts=float('nan')),
@@ -94,7 +94,7 @@ class P2Tests(unittest.TestCase):
                    dict(sale, paid_amount=True), dict(sale, paid_amount=-1),
                    dict(sale, list_price=0), dict(sale, list_price_source=None),
                    dict(sale, grade=[]), dict(sale, warranty_hours=float('nan')),
-                   dict(sale, sku='f00000001', goods=True),
+                   dict(sale, catalog_kind='food'),
                    dict(events()[1], refunded_amount=-1),
                    dict(events()[1], refunded_amount=True)]
         expected = outcomes.summarize(events(), OWN, 30000)['cohorts']
@@ -121,6 +121,11 @@ class P2Tests(unittest.TestCase):
 
     def test_v1_compatibility_and_allowlist_do_not_mutate_input(self):
         fixture = events()
+        fixture[0] = {k: v for k, v in fixture[0].items() if k not in (
+            'item_kind', 'item_kind_source', 'catalog_kind', 'catalog_kind_state',
+            'catalog_kind_observed_at', 'ledger_item_kind', 'ledger_kind_state')}
+        fixture[0].update(version=1, goods=True)
+        fixture[1]['version'] = 1
         fixture[0].update(JWT='SECRET', receipt={'sig': 'SECRET'}, budget=999)
         before = copy.deepcopy(fixture)
         with tempfile.TemporaryDirectory() as tmp:

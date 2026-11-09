@@ -11,7 +11,7 @@ import buyer_outcomes as outcomes
 import store
 
 OWN = 'mjforge'
-CAT = {'g00000001': {'list_price': 100, 'category': 'goods'}}
+CAT = {'g00000001': {'list_price': 100, 'kind': 'goods', 'category': 'goods'}}
 
 
 def row(kind='settle', seq=1, order='order-1', buyer=OWN, ts=100, **extra):
@@ -81,7 +81,7 @@ class OutcomesTests(unittest.TestCase):
     def test_missing_snapshot_unknown_not_budget(self):
         c = replay([row(budget=100)], catalog={})['cohorts'][0]
         self.assertIsNone(c['surface_discount'])
-        self.assertEqual(c['unknown_reason'], 'price_unknown')
+        self.assertEqual(c['unknown_reason'], 'item_kind_unknown')
 
     def test_mature_is_not_complete_even_a72(self):
         c = replay([row(warranty_hours=72)])['cohorts'][0]
@@ -103,7 +103,7 @@ class OutcomesTests(unittest.TestCase):
         self.assertEqual(c['unknown_reason'], 'break_before_settlement')
 
     def test_food_no_goods_formula(self):
-        c = replay([row(item='f00000001')], catalog={'f00000001': {'list_price': 100}})['cohorts'][0]
+        c = replay([row(item='f00000001')], catalog={'f00000001': {'list_price': 100, 'kind': 'food'}})['cohorts'][0]
         self.assertEqual(c['unknown_reason'], 'food_served_value_unknown')
 
     def test_conflicting_refunds_not_summed(self):
