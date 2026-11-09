@@ -798,6 +798,25 @@ def positive_number(value: Any) -> bool:
             and math.isfinite(value) and value > 0)
 
 
+def food_lifetime_precheck(receipt: dict, accept: dict, now: float | None = None) -> str | None:
+    """Decline known-bad hints, never authenticate a receipt or replace kit checks.
+
+    Only the existing numeric absolute expires_at format is understood. Missing,
+    malformed and relative hours_left hints remain unknown (not proof of freshness).
+    Use the final merged accept, including any comparable-price shelf-life gate.
+    """
+    if receipt.get("cert") is False:
+        return "seller explicitly declined the required market certificate"
+    expiry = receipt.get("expires_at")
+    if not positive_number(expiry):
+        return None
+    now = time.time() if now is None else now
+    hours = (expiry - now) / 3600
+    if hours < accept["min_hours_left"]:
+        return f"hint has {hours:.6g}h left; accept requires {accept['min_hours_left']}h"
+    return None
+
+
 def similar_food_remaining(sample_hours: float, target_hours: float, required_hours: float) -> bool:
     """Compare shelf life at each sale, not today's aged historical inventory.
 
@@ -1098,7 +1117,9 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         reserve = max(500, int(list_price * 0.58))
         opening_text = (
             f"I want to buy {sku_name} ({sku_code}). Please quote your best price with market certificate (cert=true)"
-            + (f" and at least {order_data.get('use_within_hours')}h shelf life." if order_data.get("use_within_hours") else " and warranty.")
+            + (f" and at least {build_accept_policy(order_data, 0, list_price)['min_hours_left']}h shelf life."
+               if is_round3_food else
+               f" and at least {order_data.get('use_within_hours')}h shelf life." if order_data.get("use_within_hours") else " and warranty.")
         )
     else:
         sku_code = None
@@ -1330,11 +1351,15 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
             item_matches = not rec_item or (rec_item.lower() == item_low)
 
         receipt_cap = budget
+        food_lifetime_decline = None
         if is_round3_food:
             # Recompute on the receipt SKU, never category/target fallback. This
             # does not pin the kit's later checkout to that SKU: a different
             # acceptable SKU shipped there is a pre-existing integration limit.
             receipt_cap, food_accept = food_price_policy(catalog, hub, rec_item, budget, order_data, raw_receipt)
+            food_policy = build_accept_policy(order_data, rec_price, list_price)
+            food_policy.update(food_accept)
+            food_lifetime_decline = food_lifetime_precheck(raw_receipt, food_policy)
         elif is_round3_goods:
             receipt_cap = goods_price_cap(catalog, hub, rec_item, budget)
         price_policy_declined = (is_round3_food or is_round3_goods) and (
@@ -1374,6 +1399,14 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
             review = f"No deal: declined-price-policy for {rec_item} at {rec_price} (cap {receipt_cap})."
             outcome = "declined-price-policy"
             active["failure"] = "price"
+        elif food_lifetime_decline:
+            final_receipt = None
+            recorded_price = rec_price
+            stars = 3
+            review = (f"No deal: declined-price-policy food-lifetime-precheck for {rec_item}; "
+                      f"{food_lifetime_decline}. Trying another shop.")
+            outcome = "declined-price-policy"
+            active["failure"] = "price"  # Existing retry/cooldown schema; not seller dishonesty.
         else:
             final_receipt = raw_receipt
             recorded_price = int(rec_price)
@@ -1463,9 +1496,12 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         accept_warranty = final_receipt.get("warranty_hours") or 0
         if not is_round3_goods:
             accept_warranty = float(accept_warranty)  # preserve the existing food/legacy path
-        result_line["accept"] = build_accept_policy(order_data, recorded_price, accept_list_price,
-                                                    accept_warranty, final_receipt.get("claim"))
-        result_line["accept"].update(food_accept)
+        if is_round3_food:
+            result_line["accept"] = food_policy  # Exactly the gate used by the hint precheck.
+        else:
+            result_line["accept"] = build_accept_policy(order_data, recorded_price, accept_list_price,
+                                                        accept_warranty, final_receipt.get("claim"))
+            result_line["accept"].update(food_accept)
         # This is only a pending checkout, not a paid purchase or successful memory.
         # Build/validate everything before writing a single final candidate.
         request_timeout(1)

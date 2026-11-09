@@ -71,7 +71,7 @@ class BuyerIntegerWireTests(unittest.TestCase):
         self.catalog[self.sku]['list_price'] = 103449
         result, messages, offers, events = self.simulate()
         self.assertEqual(messages[0]['parts'][0]['text'],
-            f'I want to buy synthetic ({self.sku}). Please quote your best price with market certificate (cert=true) and at least 12h shelf life.')
+            f'I want to buy synthetic ({self.sku}). Please quote your best price with market certificate (cert=true) and at least 12.25h shelf life.')
         self.assertNotIn('taskId', messages[0])
         self.assertEqual(offers, [60000, 74000, 93104, 80000])
         self.assertEqual(result['receipt']['price'], 80000)

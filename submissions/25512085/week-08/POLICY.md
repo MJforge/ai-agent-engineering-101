@@ -1,8 +1,14 @@
 # Week-08 운영 정책 통합본 및 중복·불일치 검토
 
-> 2026-11-09 로컬 step2 후보(미배포, 독립 리뷰 완료): goods buyer의 기존
+> 2026-11-09 로컬 step3 후보(미배포): 식품 문의에 사용시간+0.25h와 cert 요구를 명시하고,
+> 유효한 절대 만료시각 힌트가 최종 accept의 잔여시간보다 부족하거나 cert=false면
+> 기존 price-policy 거절/다른 상점 retry로 처리한다. 누락·잘못된 힌트는 인증으로 간주하지
+> 않고 kit 최종 검증을 유지한다. [step3 구현/검증/한계](history/20261109-buyer-saved-strategy-step3/IMPLEMENTATION.md) 참조.
+> step2 goods·20% cap·ranking/store, 식품 90% 가격정책, seller/restock은 변경하지 않았다.
+>
+> 과거 step2 기록(미배포, 독립 리뷰 완료): goods buyer의 기존
 > 양의 기대효용 gate를 ExpectedSaved 양수 gate로 대체하고 조건별 ranking 및
-> checkout 등급/보증 조건을 강화했다. seller/restock·20% cap·food는 불변이다.
+> checkout 등급/보증 조건을 강화했다. 그 단계에서 seller/restock·20% cap·food는 불변이었다.
 > 아래 역사적 buyer 설명보다 [step2 구현/제약/검증](history/20261109-buyer-saved-strategy-step2/IMPLEMENTATION.md)이 우선한다.
 > provenance 보존의 3.2MB 회귀 충돌은 해결했고 전체 682개 테스트를 통과했다. acceptable SKU 교체 한계는 남으며 VM 배포는 별도 승인 대상이다.
 
