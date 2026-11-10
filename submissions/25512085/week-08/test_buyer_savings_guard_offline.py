@@ -188,6 +188,23 @@ class GoodsSavingsGuardTests(unittest.TestCase):
         cap, _ = buyer.food_price_policy(self.catalog, self.hub, self.sku, 200000, self.order)
         self.assertEqual(cap, 74000)
 
+    def test_mature_uncovered_goods_require_minimum_expected_saved(self):
+        self.goods()
+        self.hub['demand_radar']['sku_settles'] = {self.sku: [75000] * 5}
+        # C with w=None at 46% of LP has expected Saved ~ +0.001 <= 0.25 -> rejected
+        result, _, _, _ = self.run_buyer(receipt=self.receipt(46000, claim='C'), budget=200000)
+        self.assertIsNone(result['receipt'])
+        # Same C at 60% of LP with w=6 has expected Saved = 0.65 * 0.40 = +0.26 > 0 -> accepted
+        result, _, _, _ = self.run_buyer(receipt=self.receipt(60000, claim='C', warranty_hours=6), budget=200000)
+        self.assertIsNotNone(result['receipt'])
+        # B with w=None at 60% of LP has expected Saved = 0.85 * 0.40 - 0.15 = +0.19 <= 0.25 -> rejected
+        self.hub['pending_deals'] = {}
+        result, _, _, _ = self.run_buyer(receipt=self.receipt(60000, claim='B'), budget=200000)
+        self.assertIsNone(result['receipt'])
+        # B with w=None at 50% of LP has expected Saved = 0.85 * 0.50 - 0.15 = +0.275 > 0.25 -> accepted
+        result, _, _, _ = self.run_buyer(receipt=self.receipt(50000, claim='B'), budget=200000)
+        self.assertIsNotNone(result['receipt'])
+
 
 class PriceEvidenceTests(unittest.TestCase):
     select = ranking_tests.BuyerSavingsRankingTests.select

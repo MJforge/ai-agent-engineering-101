@@ -55,6 +55,7 @@ GOODS_MIN_DISCOUNT_PERCENT = 20
 MATURE_SETTLE_MIN_SAMPLES = 5
 MATURE_GOODS_CAP_PERCENT = 72
 MATURE_FOOD_CAP_PERCENT = 74
+MATURE_UNCOVERED_MIN_SAVED = 0.25
 COMPARABLE_WINDOW_S = 3 * 3600
 COMPARABLE_MIN_SAMPLES = 3
 REQUEST_DEADLINE = ContextVar("buyer_request_deadline", default=None)
@@ -1450,9 +1451,14 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
             # Check actual receipt SKU/price/terms on every completion path.
             # Seller claims are only hints; actual certified checkout is pending.
             if is_round3_goods:
+                w_h = raw_receipt.get("warranty_hours")
                 saved = goods_expected_saved(recorded_price, catalog[rec_item]["list_price"],
-                                             raw_receipt.get("claim"), raw_receipt.get("warranty_hours"))
-                if saved is None or saved <= 0:
+                                             raw_receipt.get("claim"), w_h)
+                mature = len(settled_price_samples(hub, rec_item)) >= MATURE_SETTLE_MIN_SAMPLES
+                covered = (isinstance(w_h, (int, float)) and not isinstance(w_h, bool)
+                           and w_h >= GOODS_BREAK_WINDOW_H)
+                min_saved = 0.0 if (not mature or covered) else MATURE_UNCOVERED_MIN_SAVED
+                if saved is None or saved <= min_saved:
                     final_receipt = None
                     stars = 3
                     review = f"No deal: declined-price-policy for {rec_item}; invalid terms or nonpositive expected Saved."
