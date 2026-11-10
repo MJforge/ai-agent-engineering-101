@@ -238,6 +238,7 @@ class P2Tests(unittest.TestCase):
             )
             with outcomes.exclusive(path):
                 result = subprocess.run([sys.executable, '-B', '-c', code, str(path)],
+                                        cwd=Path(__file__).resolve().parent,
                                         capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stderr.strip(), '[buyer-outcomes] journal_write_failed_unknown')

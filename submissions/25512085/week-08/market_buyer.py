@@ -52,6 +52,9 @@ MAX_RECENT_HISTORY = 5
 FOOD_LIST_PRICE_PERCENT = 90
 GOODS_OFFER_CAP_PERCENT = 92
 GOODS_MIN_DISCOUNT_PERCENT = 20
+MATURE_SETTLE_MIN_SAMPLES = 5
+MATURE_GOODS_CAP_PERCENT = 72
+MATURE_FOOD_CAP_PERCENT = 74
 COMPARABLE_WINDOW_S = 3 * 3600
 COMPARABLE_MIN_SAMPLES = 3
 REQUEST_DEADLINE = ContextVar("buyer_request_deadline", default=None)
@@ -506,7 +509,11 @@ def goods_price_cap(catalog, hub, sku, budget):
     cap = min(budget, lp - 1, lp * GOODS_OFFER_CAP_PERCENT // 100,
               lp * (100 - GOODS_MIN_DISCOUNT_PERCENT) // 100)
     settles = settled_price_samples(hub, sku)
-    if len(settles) >= 3:
+    if len(settles) >= MATURE_SETTLE_MIN_SAMPLES:
+        cap = min(cap, lp * MATURE_GOODS_CAP_PERCENT // 100,
+                  max(lp * 62 // 100,
+                      math.floor(statistics.median(settles) * 105 / 100)))
+    elif len(settles) >= 3:
         cap = min(cap, max(lp * 88 // 100,
                            math.floor(statistics.median(settles) * 112 / 100)))
     return cap if cap >= 1 else None
@@ -842,6 +849,11 @@ def food_price_policy(catalog: dict, hub: dict, sku: str, budget: int, order: di
     if not positive_number(lp):
         return None, {}
     cap = min(budget, math.floor(lp * FOOD_LIST_PRICE_PERCENT / 100))
+    settles = settled_price_samples(hub, sku)
+    if len(settles) >= MATURE_SETTLE_MIN_SAMPLES:
+        cap = min(cap, math.floor(lp * MATURE_FOOD_CAP_PERCENT / 100),
+                  max(math.floor(lp * 60 / 100),
+                      math.floor(statistics.median(settles) * 106 / 100)))
     receipt = receipt or {}
     grade = receipt.get("claim")
     expiry = receipt.get("expires_at")

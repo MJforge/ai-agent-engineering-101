@@ -170,6 +170,24 @@ class GoodsSavingsGuardTests(unittest.TestCase):
         result, _, _, _ = self.run_buyer(receipt=rec, budget=200000)
         self.assertIsNone(result['receipt'])  # actual C surplus <=0, original SKU would pass
 
+    def test_mature_settles_tighten_goods_and_food_caps(self):
+        self.goods()
+        self.hub['demand_radar']['sku_settles'] = {self.sku: [60000] * 5}
+        self.assertEqual(buyer.goods_price_cap(self.catalog, self.hub, self.sku, 200000), 63000)
+        self.hub['demand_radar']['sku_settles'] = {self.sku: [75000] * 5}
+        self.assertEqual(buyer.goods_price_cap(self.catalog, self.hub, self.sku, 200000), 72000)
+        result, offers, _, _ = self.run_buyer(ask=80000, budget=200000)
+        self.assertIsNone(result['receipt'])
+        self.assertEqual(offers[-1], 72000)
+        self.order['kind'] = 'food'
+        self.catalog[self.sku]['list_price'] = 100000
+        self.hub['demand_radar']['sku_settles'] = {self.sku: [60000] * 5}
+        cap, _ = buyer.food_price_policy(self.catalog, self.hub, self.sku, 200000, self.order)
+        self.assertEqual(cap, 63600)
+        self.hub['demand_radar']['sku_settles'] = {self.sku: [80000] * 5}
+        cap, _ = buyer.food_price_policy(self.catalog, self.hub, self.sku, 200000, self.order)
+        self.assertEqual(cap, 74000)
+
 
 class PriceEvidenceTests(unittest.TestCase):
     select = ranking_tests.BuyerSavingsRankingTests.select
