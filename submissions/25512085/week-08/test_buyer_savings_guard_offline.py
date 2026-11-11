@@ -194,8 +194,15 @@ class GoodsSavingsGuardTests(unittest.TestCase):
         # C with w=None at 46% of LP has expected Saved ~ +0.001 <= 0.25 -> rejected
         result, _, _, _ = self.run_buyer(receipt=self.receipt(46000, claim='C'), budget=200000)
         self.assertIsNone(result['receipt'])
-        # Same C at 60% of LP with w=6 has expected Saved = 0.65 * 0.40 = +0.26 > 0 -> accepted
+        # Covered C (w=6) at 65% of LP has expected Saved = 0.65 * 0.35 = +0.2275 <= 0.25 -> rejected
+        result, _, _, _ = self.run_buyer(receipt=self.receipt(65000, claim='C', warranty_hours=6), budget=200000)
+        self.assertIsNone(result['receipt'])
+        # Covered C (w=6) at 60% of LP has expected Saved = 0.65 * 0.40 = +0.26 > 0.25 -> accepted
         result, _, _, _ = self.run_buyer(receipt=self.receipt(60000, claim='C', warranty_hours=6), budget=200000)
+        self.assertIsNotNone(result['receipt'])
+        # Covered A (w=6) at 72% of LP has expected Saved = 0.97 * 0.28 = +0.2716 > 0.25 -> accepted
+        self.hub['pending_deals'] = {}
+        result, _, _, _ = self.run_buyer(receipt=self.receipt(72000, claim='A', warranty_hours=6), budget=200000)
         self.assertIsNotNone(result['receipt'])
         # B with w=None at 60% of LP has expected Saved = 0.85 * 0.40 - 0.15 = +0.19 <= 0.25 -> rejected
         self.hub['pending_deals'] = {}

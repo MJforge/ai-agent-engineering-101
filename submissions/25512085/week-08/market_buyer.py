@@ -1455,9 +1455,7 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
                 saved = goods_expected_saved(recorded_price, catalog[rec_item]["list_price"],
                                              raw_receipt.get("claim"), w_h)
                 mature = len(settled_price_samples(hub, rec_item)) >= MATURE_SETTLE_MIN_SAMPLES
-                covered = (isinstance(w_h, (int, float)) and not isinstance(w_h, bool)
-                           and w_h >= GOODS_BREAK_WINDOW_H)
-                min_saved = 0.0 if (not mature or covered) else MATURE_UNCOVERED_MIN_SAVED
+                min_saved = 0.0 if not mature else MATURE_UNCOVERED_MIN_SAVED
                 if saved is None or saved <= min_saved:
                     final_receipt = None
                     stars = 3
