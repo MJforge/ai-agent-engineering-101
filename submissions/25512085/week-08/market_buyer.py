@@ -53,8 +53,8 @@ FOOD_LIST_PRICE_PERCENT = 90
 GOODS_OFFER_CAP_PERCENT = 92
 GOODS_MIN_DISCOUNT_PERCENT = 20
 MATURE_SETTLE_MIN_SAMPLES = 5
-MATURE_GOODS_CAP_PERCENT = 72
-MATURE_FOOD_CAP_PERCENT = 74
+MATURE_GOODS_CAP_PERCENT = 67
+MATURE_FOOD_CAP_PERCENT = 66
 MATURE_UNCOVERED_MIN_SAVED = 0.25
 COMPARABLE_WINDOW_S = 3 * 3600
 COMPARABLE_MIN_SAMPLES = 3
@@ -512,8 +512,8 @@ def goods_price_cap(catalog, hub, sku, budget):
     settles = settled_price_samples(hub, sku)
     if len(settles) >= MATURE_SETTLE_MIN_SAMPLES:
         cap = min(cap, lp * MATURE_GOODS_CAP_PERCENT // 100,
-                  max(lp * 62 // 100,
-                      math.floor(statistics.median(settles) * 105 / 100)))
+                  max(lp * 58 // 100,
+                      math.floor(statistics.median(settles))))
     elif len(settles) >= 3:
         cap = min(cap, max(lp * 88 // 100,
                            math.floor(statistics.median(settles) * 112 / 100)))
@@ -853,8 +853,8 @@ def food_price_policy(catalog: dict, hub: dict, sku: str, budget: int, order: di
     settles = settled_price_samples(hub, sku)
     if len(settles) >= MATURE_SETTLE_MIN_SAMPLES:
         cap = min(cap, math.floor(lp * MATURE_FOOD_CAP_PERCENT / 100),
-                  max(math.floor(lp * 60 / 100),
-                      math.floor(statistics.median(settles) * 106 / 100)))
+                  max(math.floor(lp * 54 / 100),
+                      math.floor(statistics.median(settles))))
     receipt = receipt or {}
     grade = receipt.get("claim")
     expiry = receipt.get("expires_at")
@@ -1127,7 +1127,8 @@ def _run_attempt(chosen_shop, target_sku_info, reason, memory, hub, catalog,
         sku_code = target_sku_info["sku"]
         sku_name = target_sku_info["name"]
         list_price = int(target_sku_info.get("list_price") or budget)
-        reserve = max(500, int(list_price * 0.58))
+        mature_sku = len(settled_price_samples(hub, sku_code)) >= MATURE_SETTLE_MIN_SAMPLES
+        reserve = max(500, int(list_price * (0.52 if mature_sku else 0.58)))
         opening_text = (
             f"I want to buy {sku_name} ({sku_code}). Please quote your best price with market certificate (cert=true)"
             + (f" and at least {build_accept_policy(order_data, 0, list_price)['min_hours_left']}h shelf life."

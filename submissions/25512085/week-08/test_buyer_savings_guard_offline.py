@@ -173,20 +173,20 @@ class GoodsSavingsGuardTests(unittest.TestCase):
     def test_mature_settles_tighten_goods_and_food_caps(self):
         self.goods()
         self.hub['demand_radar']['sku_settles'] = {self.sku: [60000] * 5}
-        self.assertEqual(buyer.goods_price_cap(self.catalog, self.hub, self.sku, 200000), 63000)
+        self.assertEqual(buyer.goods_price_cap(self.catalog, self.hub, self.sku, 200000), 60000)
         self.hub['demand_radar']['sku_settles'] = {self.sku: [75000] * 5}
-        self.assertEqual(buyer.goods_price_cap(self.catalog, self.hub, self.sku, 200000), 72000)
+        self.assertEqual(buyer.goods_price_cap(self.catalog, self.hub, self.sku, 200000), 67000)
         result, offers, _, _ = self.run_buyer(ask=80000, budget=200000)
         self.assertIsNone(result['receipt'])
-        self.assertEqual(offers[-1], 72000)
+        self.assertEqual(offers[-1], 67000)
         self.order['kind'] = 'food'
         self.catalog[self.sku]['list_price'] = 100000
         self.hub['demand_radar']['sku_settles'] = {self.sku: [60000] * 5}
         cap, _ = buyer.food_price_policy(self.catalog, self.hub, self.sku, 200000, self.order)
-        self.assertEqual(cap, 63600)
+        self.assertEqual(cap, 60000)
         self.hub['demand_radar']['sku_settles'] = {self.sku: [80000] * 5}
         cap, _ = buyer.food_price_policy(self.catalog, self.hub, self.sku, 200000, self.order)
-        self.assertEqual(cap, 74000)
+        self.assertEqual(cap, 66000)
 
     def test_mature_uncovered_goods_require_minimum_expected_saved(self):
         self.goods()
@@ -200,9 +200,9 @@ class GoodsSavingsGuardTests(unittest.TestCase):
         # Covered C (w=6) at 60% of LP has expected Saved = 0.65 * 0.40 = +0.26 > 0.25 -> accepted
         result, _, _, _ = self.run_buyer(receipt=self.receipt(60000, claim='C', warranty_hours=6), budget=200000)
         self.assertIsNotNone(result['receipt'])
-        # Covered A (w=6) at 72% of LP has expected Saved = 0.97 * 0.28 = +0.2716 > 0.25 -> accepted
+        # Covered A (w=6) at 67% of LP has expected Saved = 0.97 * 0.33 = +0.3201 > 0.25 -> accepted
         self.hub['pending_deals'] = {}
-        result, _, _, _ = self.run_buyer(receipt=self.receipt(72000, claim='A', warranty_hours=6), budget=200000)
+        result, _, _, _ = self.run_buyer(receipt=self.receipt(67000, claim='A', warranty_hours=6), budget=200000)
         self.assertIsNotNone(result['receipt'])
         # B with w=None at 60% of LP has expected Saved = 0.85 * 0.40 - 0.15 = +0.19 <= 0.25 -> rejected
         self.hub['pending_deals'] = {}
