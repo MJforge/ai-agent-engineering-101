@@ -51,7 +51,11 @@ header{display:flex;align-items:center;gap:8px;padding:calc(10px + env(safe-area
   font-size:13px;font-weight:500;transition:background .12s}
 .btn:active{transform:scale(.97)}
 .badge-bar{display:flex;flex-wrap:wrap;gap:6px;padding:8px 16px;border-bottom:1px solid var(--line);background:var(--card);font-size:12px;color:var(--text-soft)}
+.radar-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:7px 16px;border-bottom:1px solid var(--line);background:var(--raised);font-size:12px;color:var(--text)}
 .pill{background:var(--raised);border:1px solid var(--line);border-radius:999px;padding:2px 9px;font-family:var(--mono);font-size:11.5px}
+.pill.live-open{border-color:var(--ok);color:var(--ok);font-weight:600}
+.pill.live-rank{border-color:var(--brand);color:var(--brand);font-weight:600}
+.pill.live-event{border-color:var(--warn);color:var(--warn);font-weight:600}
 
 #scroll{overflow-y:auto;-webkit-overflow-scrolling:touch;padding:16px 16px 8px}
 .empty{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px 8px;gap:8px}
@@ -154,6 +158,9 @@ textarea::placeholder{color:var(--text-mute)}
       <button class="btn" id="polBtn" type="button" aria-haspopup="dialog" aria-controls="policy">운영 정책</button>
       <button class="btn" id="act" type="button" aria-haspopup="dialog" aria-controls="activity">활동</button>
     </header>
+    <section class="radar-bar" id="rbar" aria-label="실시간 마켓 관제">
+      <span class="pill">마켓 관제 불러오는 중...</span>
+    </section>
     <div class="badge-bar" id="pbar" aria-live="polite"></div>
   </div>
   <div id="scroll"><div id="log"></div></div>
@@ -355,6 +362,50 @@ window.addEventListener('storage', e => {
 });
 
 renderPolicyBar();
+
+let radar = null;
+function fmtCountdown(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+function renderRadar() {
+  const el = $('rbar');
+  if (!el) return;
+  if (!radar || radar.error) {
+    el.innerHTML = '<span class="pill">실시간 관제 대기 중</span>';
+    return;
+  }
+  const now = Date.now() / 1000;
+  const rk = radar.rank ? `#${radar.rank} / ${radar.total_shops || '-'}` : '순위 집계 중';
+  const r = radar.restock || {};
+  let restockHtml = '<span class="pill">입고창 확인 중</span>';
+  if (r.open && r.closes_at) {
+    const left = Math.max(0, r.closes_at - now);
+    restockHtml = `<span class="pill live-open">입고창 열림 ${fmtCountdown(left)}</span>`;
+  } else if (r.opens_at) {
+    const left = Math.max(0, r.opens_at - now);
+    restockHtml = left > 0
+      ? `<span class="pill">다음 입고 ${fmtCountdown(left)}</span>`
+      : '<span class="pill live-open">입고창 곧 열림</span>';
+  }
+  const stockHtml = `<span class="pill">재고 ${esc(radar.stock_skus ?? 0)}종 · ${esc(radar.stock_units ?? 0)}개</span>`;
+  const v = radar.village || {};
+  const vParts = [v.weekday, v.part, v.weather].filter(Boolean).join(' · ');
+  const villageHtml = vParts ? `<span class="pill">${esc(vParts)}</span>` : '';
+  const flags = [v.market_day ? '장날' : '', v.payday ? '월급날' : ''].filter(Boolean).join('·');
+  const flagHtml = flags ? `<span class="pill live-event">${esc(flags)}</span>` : '';
+  el.innerHTML = `<span class="pill live-rank">순위 ${esc(rk)}</span>${restockHtml}${stockHtml}${villageHtml}${flagHtml}`;
+}
+async function pollRadar() {
+  try {
+    const res = await fetch('/live_market.json', {cache: 'no-store'});
+    if (res.ok) { radar = await res.json(); renderRadar(); }
+  } catch (e) {}
+}
+pollRadar();
+setInterval(pollRadar, 15000);
+setInterval(renderRadar, 1000);
 
 // Page tools offered to the agent (always read fresh localStorage to avoid multi-tab stale cache)
 miniapp.offer('shop_policy',
