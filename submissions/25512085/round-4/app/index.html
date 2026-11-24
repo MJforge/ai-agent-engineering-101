@@ -11,32 +11,31 @@
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<title>Mini App</title>
+<title>온종일마트</title>
 <style>
-/* Tokens follow the Ouroboros console (github.com/Q00/ouroboros): neutral grays only, color only for status and focus. */
 :root{--font:"Pretendard Variable",Pretendard,-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",system-ui,Roboto,sans-serif;
   --mono:ui-monospace,"SF Mono",Menlo,"D2Coding",monospace;
   --bg:#fff;--card:#f5f5f5;--raised:#fff;--hover:#ececec;--line:#e5e5e5;--line-strong:#d4d4d4;
   --text:#171717;--text-soft:#404040;--text-mute:#666;--primary:#171717;--primary-ink:#fff;
-  --ok:#10a370;--warn:#d99a00;--fail:#dc2626;--focus:#0b5fc4;--scrim:rgb(0 0 0/.32);
+  --brand:#0b5fc4;--ok:#10a370;--warn:#d99a00;--fail:#dc2626;--focus:#0b5fc4;--scrim:rgb(0 0 0/.32);
   --shadow-2:0 8px 24px -6px rgb(0 0 0/.14),0 2px 6px rgb(0 0 0/.05);
   --shadow-3:0 24px 64px -12px rgb(0 0 0/.26),0 4px 12px rgb(0 0 0/.06);
-  --ease:cubic-bezier(.22,1,.36,1);color-scheme:light}
+  --ease:cubic-bezier(.22,1,.36,1);color-scheme:light dark}
 @media (prefers-color-scheme:dark){:root{--bg:#0a0a0a;--card:#141414;--raised:#1a1a1a;--hover:#1f1f1f;--line:#232323;
   --line-strong:#363636;--text:#fafafa;--text-soft:#cfcfcf;--text-mute:#9a9a9a;--primary:#fafafa;--primary-ink:#0a0a0a;
-  --ok:#34d399;--warn:#fbbf24;--fail:#f87171;--focus:#6eabff;--scrim:rgb(0 0 0/.64);
+  --brand:#6eabff;--ok:#34d399;--warn:#fbbf24;--fail:#f87171;--focus:#6eabff;--scrim:rgb(0 0 0/.64);
   --shadow-2:0 10px 28px -6px rgb(0 0 0/.7),0 2px 6px rgb(0 0 0/.4);
-  --shadow-3:0 28px 72px -12px rgb(0 0 0/.85),0 4px 12px rgb(0 0 0/.5);color-scheme:dark}}
+  --shadow-3:0 28px 72px -12px rgb(0 0 0/.85),0 4px 12px rgb(0 0 0/.5)}}
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
-body{background:var(--bg);color:var(--text);font:15px/1.55 var(--font);-webkit-font-smoothing:antialiased;
+body{background:var(--bg);color:var(--text);accent-color:var(--brand);font:15px/1.55 var(--font);-webkit-font-smoothing:antialiased;
   -webkit-tap-highlight-color:transparent;overscroll-behavior:none;word-break:keep-all}
 button{font:inherit;color:inherit;cursor:pointer}
-button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .app{height:var(--app-h,100dvh);display:grid;grid-template-rows:auto 1fr auto;max-width:760px;margin:0 auto;background:var(--bg)}
 @media (min-width:800px){.app{border-left:1px solid var(--line);border-right:1px solid var(--line)}}
 
-header{display:flex;align-items:center;gap:12px;padding:calc(10px + env(safe-area-inset-top)) 16px 10px;
+header{display:flex;align-items:center;gap:8px;padding:calc(10px + env(safe-area-inset-top)) 16px 10px;
   border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--bg) 86%,transparent);backdrop-filter:saturate(1.4) blur(14px);
   -webkit-backdrop-filter:saturate(1.4) blur(14px)}
 .avatar{flex:none;width:36px;height:36px;border-radius:10px;display:grid;place-items:center;background:var(--primary);
@@ -48,17 +47,19 @@ header{display:flex;align-items:center;gap:12px;padding:calc(10px + env(safe-are
 .status.on .dot{background:var(--ok)}
 .status.busy .dot{background:var(--warn);animation:pulse 1s ease-in-out infinite}
 .status.off .dot{background:var(--fail)}
-.btn{flex:none;min-height:32px;padding:0 12px;border-radius:8px;border:1px solid var(--line-strong);background:var(--bg);
+.btn{flex:none;min-height:34px;padding:0 11px;border-radius:8px;border:1px solid var(--line-strong);background:var(--bg);
   font-size:13px;font-weight:500;transition:background .12s}
 .btn:active{transform:scale(.97)}
+.badge-bar{display:flex;flex-wrap:wrap;gap:6px;padding:8px 16px;border-bottom:1px solid var(--line);background:var(--card);font-size:12px;color:var(--text-soft)}
+.pill{background:var(--raised);border:1px solid var(--line);border-radius:999px;padding:2px 9px;font-family:var(--mono);font-size:11.5px}
 
 #scroll{overflow-y:auto;-webkit-overflow-scrolling:touch;padding:16px 16px 8px}
 .empty{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px 8px;gap:8px}
 .empty .avatar{width:60px;height:60px;border-radius:16px;font-size:24px;box-shadow:var(--shadow-2)}
 .empty h2{margin:10px 0 0;font-size:20px;letter-spacing:-.02em}
-.empty p{margin:0;color:var(--text-mute);font-size:13px;max-width:280px}
+.empty p{margin:0;color:var(--text-mute);font-size:13px;max-width:310px}
 .chips{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:14px}
-.chip{border:1px solid var(--line);background:var(--bg);border-radius:999px;padding:7px 14px;font-size:13px;color:var(--text-soft)}
+.chip{border:1px solid var(--line);background:var(--bg);border-radius:999px;padding:8px 14px;min-height:36px;font-size:13px;color:var(--text-soft)}
 .chip:active{background:var(--hover)}
 
 .row{display:flex;margin:3px 0}
@@ -80,19 +81,19 @@ header{display:flex;align-items:center;gap:12px;padding:calc(10px + env(safe-are
 @keyframes in{from{opacity:0;transform:translateY(4px)}}
 
 footer{padding:8px 12px calc(8px + env(safe-area-inset-bottom));background:var(--bg)}
-form{display:flex;align-items:flex-end;gap:8px;background:var(--card);border:1px solid transparent;border-radius:22px;
+.chat-form{display:flex;align-items:flex-end;gap:8px;background:var(--card);border:1px solid transparent;border-radius:22px;
   padding:5px 5px 5px 16px;transition:border-color .12s}
-form:focus-within{border-color:var(--line-strong)}
-textarea{flex:1;min-width:0;border:0;outline:0;resize:none;background:transparent;color:var(--text);font:inherit;font-size:16px;
+.chat-form:focus-within{border-color:var(--line-strong)}
+textarea{flex:1;min-width:0;border:0;outline:0;resize:none;background:transparent;color:var(--text);font:inherit;font-size:max(1rem,1em);
   line-height:1.4;padding:7px 0;max-height:140px}
 textarea::placeholder{color:var(--text-mute)}
-.send{flex:none;width:34px;height:34px;border-radius:50%;border:0;background:var(--primary);color:var(--primary-ink);display:grid;place-items:center;
+.send{flex:none;width:36px;height:36px;border-radius:50%;border:0;background:var(--primary);color:var(--primary-ink);display:grid;place-items:center;
   transition:opacity .12s}
 .send:disabled{opacity:.25;cursor:default}
 
 .shade{position:fixed;inset:0;background:var(--scrim);display:flex;align-items:flex-end;justify-content:center;z-index:10;
   animation:fade .2s var(--ease)}
-.sheet{width:100%;max-width:560px;max-height:84dvh;overflow-y:auto;background:var(--raised);border-radius:16px 16px 0 0;box-shadow:var(--shadow-3);
+.sheet{width:100%;max-width:560px;max-height:86dvh;overflow-y:auto;background:var(--raised);border-radius:16px 16px 0 0;box-shadow:var(--shadow-3);
   padding:8px 20px calc(20px + env(safe-area-inset-bottom));animation:up .32s var(--ease)}
 @media (min-width:600px){.shade{align-items:center}.sheet{border-radius:16px;padding-bottom:20px}}
 .grip{width:36px;height:4px;border-radius:2px;background:var(--line-strong);margin:4px auto 16px}
@@ -105,7 +106,7 @@ textarea::placeholder{color:var(--text-mute)}
 .kv span:last-child{text-align:right;overflow-wrap:anywhere;font-weight:500}
 .mono{font-family:var(--mono);font-size:13px}
 .actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.actions button{min-height:46px;border-radius:10px;border:1px solid var(--line-strong);background:var(--bg);font-weight:600}
+.actions button{min-height:48px;border-radius:10px;border:1px solid var(--line-strong);background:var(--bg);font-weight:600}
 .actions .yes{background:var(--primary);color:var(--primary-ink);border-color:var(--primary)}
 .actions button:active{transform:scale(.98)}
 .sec{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-mute);margin:20px 0 8px}
@@ -116,6 +117,29 @@ textarea::placeholder{color:var(--text-mute)}
 .none{color:var(--text-mute);font-size:13px;padding:2px 0}
 .credit{margin-top:22px;padding-top:14px;border-top:1px solid var(--line);color:var(--text-mute);font-size:12px;text-align:center}
 .credit a{color:var(--text-soft);text-decoration:none;font-weight:600}
+
+.pform{display:grid;gap:16px}
+.pform fieldset{margin:0;padding:12px 14px;border:1px solid var(--line-strong);border-radius:10px;display:grid;gap:10px}
+.pform legend{padding:0 6px;font-size:13px;font-weight:600;color:var(--text-soft)}
+.radio-row{display:flex;align-items:center;gap:10px;min-height:40px}
+.radio-row input{width:18px;height:18px;margin:0;flex:none}
+.radio-row label{cursor:pointer;font-size:14px;line-height:1.4}
+.field{display:flex;flex-direction:column;gap:4px}
+.field label{font-size:13px;font-weight:600;color:var(--text-soft);display:flex;justify-content:space-between}
+.field input[type="range"]{width:100%;min-height:36px;cursor:pointer}
+.field input[type="text"]{font:inherit;font-size:max(1rem,1em);min-height:48px;padding:10px 12px;border-radius:10px;border:1px solid #767676;background:var(--bg);color:var(--text)}
+.hint{font-size:12px;color:var(--text-mute)}
+.save-msg{font-size:13px;color:var(--ok);min-height:20px;font-weight:500}
+
+@supports not (accent-color: auto){
+  .pform input[type="range"]{-webkit-appearance:none;appearance:none;background:transparent}
+  .pform input[type="range"]::-webkit-slider-runnable-track{height:8px;border-radius:4px;background:linear-gradient(to right,var(--brand) var(--progress,40%),#ccc var(--progress,40%))}
+  .pform input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:18px;height:18px;border-radius:50%;background:var(--brand);margin-top:-5px}
+  .pform input[type="range"]::-moz-range-track{height:8px;border-radius:4px;background:#ccc}
+  .pform input[type="range"]::-moz-range-progress{height:8px;border-radius:4px;background:var(--brand)}
+  .pform input[type="range"]::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:var(--brand);border:0}
+}
+
 @keyframes up{from{transform:translateY(32px);opacity:0}}
 @keyframes fade{from{opacity:0}}
 [hidden]{display:none!important}
@@ -123,32 +147,93 @@ textarea::placeholder{color:var(--text-mute)}
 </head>
 <body>
 <div class="app">
-  <header>
-    <div class="avatar" id="av">A</div>
-    <div class="who"><b id="nm">Agent</b><div class="status" id="st"><span class="dot"></span><span id="stt">연결하는 중</span></div></div>
-    <button class="btn" id="act" type="button">활동</button>
-  </header>
+  <div>
+    <header>
+      <div class="avatar" id="av">온</div>
+      <div class="who"><b id="nm">온종일마트</b><div class="status" id="st"><span class="dot"></span><span id="stt">연결하는 중</span></div></div>
+      <button class="btn" id="polBtn" type="button" aria-haspopup="dialog" aria-controls="policy">운영 정책</button>
+      <button class="btn" id="act" type="button" aria-haspopup="dialog" aria-controls="activity">활동</button>
+    </header>
+    <div class="badge-bar" id="pbar" aria-live="polite"></div>
+  </div>
   <div id="scroll"><div id="log"></div></div>
   <footer>
-    <form id="f">
-      <textarea id="t" rows="1" placeholder="메시지 보내기" enterkeyhint="send" autocomplete="off"></textarea>
-      <button class="send" id="go" aria-label="보내기" disabled>
+    <form id="f" class="chat-form" aria-label="온종일마트 채팅">
+      <textarea id="t" name="message" rows="1" placeholder="온종일마트에게 지시하거나 물어보기" enterkeyhint="send"></textarea>
+      <button class="send" id="go" type="submit" aria-label="보내기" disabled>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
       </button>
     </form>
   </footer>
 </div>
-<div class="shade" id="consent" hidden><div class="sheet" role="dialog" aria-modal="true">
+
+<div class="shade" id="consent" hidden><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="ctitle">
   <div class="grip"></div>
-  <h3>에이전트가 허락을 구합니다</h3>
+  <h3 id="ctitle">에이전트가 허락을 구합니다</h3>
   <p class="sub" id="cname"></p>
   <div class="kv" id="cargs"></div>
   <div class="actions"><button type="button" id="no">거절</button><button type="button" class="yes" id="yes">허용</button></div>
 </div></div>
-<div class="shade" id="activity" hidden><div class="sheet" role="dialog" aria-modal="true">
+
+<div class="shade" id="policy" hidden><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="ptitle">
   <div class="grip"></div>
-  <h3>에이전트 활동</h3>
-  <p class="sub">대화하는 동안에도 에이전트는 시장에서 계속 움직입니다.</p>
+  <h3 id="ptitle">온종일마트 실시간 운영 정책</h3>
+  <p class="sub">저장하면 에이전트가 <span class="mono">app_shop_policy</span> 도구로 즉시 조회합니다.</p>
+  <form id="pf" class="pform" aria-labelledby="ptitle" action="#" method="post">
+    <fieldset>
+      <legend>운영 모드</legend>
+      <div class="radio-row">
+        <input type="radio" id="m-bal" name="mode" value="balanced" checked>
+        <label for="m-bal">균형 운영 (720h 장기식품 주력 + 고회전 살림 소량)</label>
+      </div>
+      <div class="radio-row">
+        <input type="radio" id="m-food" name="mode" value="food_focus">
+        <label for="m-food">장기보관 식품 집중 (보관료·파손 0% 안전 운용)</label>
+      </div>
+      <div class="radio-row">
+        <input type="radio" id="m-clr" name="mode" value="clearance">
+        <label for="m-clr">재고 청산 모드 (신규 입고 중단·빠른 현금화)</label>
+      </div>
+    </fieldset>
+
+    <div class="field">
+      <label for="p-target"><span>1차 제시 목표 마진율</span><span class="mono" id="v-target">18%</span></label>
+      <input type="range" id="p-target" name="target_margin_pct" min="5" max="40" step="1" value="18">
+    </div>
+
+    <div class="field">
+      <label for="p-min"><span>흥정 최소 마진 하한 (수수료 별도 확보)</span><span class="mono" id="v-min">6%</span></label>
+      <input type="range" id="p-min" name="min_margin_pct" min="1" max="25" step="1" value="6">
+    </div>
+
+    <div class="field">
+      <label for="p-sku"><span>SKU당 최대 보유 수량</span><span class="mono" id="v-sku">3개</span></label>
+      <input type="range" id="p-sku" name="max_units_per_sku" min="1" max="10" step="1" value="3">
+    </div>
+
+    <div class="field">
+      <label for="p-cash">현금 안전 하한 (크레딧, 도매 입고 시 유지)</label>
+      <input type="text" id="p-cash" name="cash_floor_credits" inputmode="numeric" pattern="[0-9]+" value="1500000" aria-describedby="cash-help" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="next" required>
+      <span id="cash-help" class="hint">숫자만 입력 (예: 1500000 = 150만 크레딧 아래로는 입고 중단)</span>
+    </div>
+
+    <div class="field">
+      <label for="p-note">사장님 한줄 운영 지침</label>
+      <input type="text" id="p-note" name="operator_note" maxlength="200" value="장기보관 식품(쌀·생수·커피·찌개·양념·과자·김치) 위주로 소량 입고하고 card.json을 최신 유지할 것" enterkeyhint="done">
+    </div>
+
+    <div id="pstatus" class="save-msg" role="status" aria-live="polite"></div>
+    <div class="actions">
+      <button type="button" id="pclose">닫기</button>
+      <button type="submit" class="yes">정책 저장</button>
+    </div>
+  </form>
+</div></div>
+
+<div class="shade" id="activity" hidden><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="atitle">
+  <div class="grip"></div>
+  <h3 id="atitle">에이전트 활동</h3>
+  <p class="sub">대화하는 동안에도 온종일마트는 시장에서 계속 움직입니다.</p>
   <div class="sec">최근 움직임</div><div id="moves"></div>
   <div class="sec">에이전트가 만든 도구</div><div id="forged"></div>
   <div class="sec">이 앱이 준 도구</div><div id="apptools"></div>
@@ -156,30 +241,133 @@ textarea::placeholder{color:var(--text-mute)}
     <a href="https://github.com/Q00/meshkit" target="_blank" rel="noopener">MeshKit</a> and
     <a href="https://github.com/Q00/ouroboros" target="_blank" rel="noopener">Ouroboros</a></div>
 </div></div>
+
 <script src="/miniapp.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
-let me = 'guest-' + Math.random().toString(36).slice(2, 6);
+let me = 'owner-' + Math.random().toString(36).slice(2, 6);
 try { me = localStorage.getItem('miniapp-user') || me; localStorage.setItem('miniapp-user', me) } catch (e) {}
 const touch = matchMedia('(pointer: coarse)').matches;
 let view = {chat: [], consents: [], moves: [], forged: {}, app_tools: {}}, cards = [], pending = [], waiting = 0, seen = 0, drawn = '';
-let heard = 0, unread = 0;                           // messages the agent sent first: how many are known, how many came while away
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { unread = 0; document.title = view.agent || 'Agent'; } });
+let heard = 0, unread = 0;
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { unread = 0; document.title = view.agent || '온종일마트'; } });
 const handled = new Set();
 
-// An example page tool: the agent can show the person a card in the chat.
-miniapp.offer('show_card', 'show the person a card in the chat; args {title, body}', a => {
+const DEFAULT_POLICY = {
+  mode: 'balanced',
+  target_margin_pct: 18,
+  min_margin_pct: 6,
+  max_units_per_sku: 3,
+  cash_floor_credits: 1500000,
+  operator_note: '장기보관 식품(쌀·생수·커피·찌개·양념·과자·김치) 위주로 소량 입고하고 card.json을 최신 유지할 것',
+  updated_at: Math.floor(Date.now() / 1000)
+};
+
+function loadPolicy() {
+  try {
+    const raw = localStorage.getItem('onjongil-policy');
+    if (raw) return Object.assign({}, DEFAULT_POLICY, JSON.parse(raw));
+  } catch (e) {}
+  return Object.assign({}, DEFAULT_POLICY);
+}
+
+let policy = loadPolicy();
+
+function renderPolicyBar() {
+  const modeLabel = {balanced: '균형 운영', food_focus: '장기식품 집중', clearance: '재고 청산(입고중단)'}[policy.mode] || policy.mode;
+  $('pbar').innerHTML = `<span class="pill">모드: ${esc(modeLabel)}</span>`
+    + `<span class="pill">목표마진 ${esc(policy.target_margin_pct)}% / 하한 ${esc(policy.min_margin_pct)}%</span>`
+    + `<span class="pill">SKU상한 ${esc(policy.max_units_per_sku)}개</span>`
+    + `<span class="pill">현금하한 ${Number(policy.cash_floor_credits).toLocaleString('ko-KR')}</span>`;
+}
+
+function syncRangeFallback(el) {
+  if (!CSS.supports('accent-color', 'auto')) {
+    const min = Number(el.min || 0), max = Number(el.max || 100), val = Number(el.value || 0);
+    el.style.setProperty('--progress', `${Math.round(((val - min) / (max - min || 1)) * 100)}%`);
+  }
+}
+
+function syncPolicyForm() {
+  const r = document.querySelector(`input[name="mode"][value="${policy.mode}"]`);
+  if (r) r.checked = true;
+  $('p-target').value = policy.target_margin_pct;
+  $('v-target').textContent = policy.target_margin_pct + '%';
+  $('p-min').value = policy.min_margin_pct;
+  $('v-min').textContent = policy.min_margin_pct + '%';
+  $('p-sku').value = policy.max_units_per_sku;
+  $('v-sku').textContent = policy.max_units_per_sku + '개';
+  $('p-cash').value = String(policy.cash_floor_credits);
+  $('p-note').value = policy.operator_note || '';
+  [$('p-target'), $('p-min'), $('p-sku')].forEach(syncRangeFallback);
+}
+
+$('p-target').addEventListener('input', e => { $('v-target').textContent = e.target.value + '%'; syncRangeFallback(e.target); });
+$('p-min').addEventListener('input', e => { $('v-min').textContent = e.target.value + '%'; syncRangeFallback(e.target); });
+$('p-sku').addEventListener('input', e => { $('v-sku').textContent = e.target.value + '개'; syncRangeFallback(e.target); });
+$('p-cash').addEventListener('input', e => { e.target.setCustomValidity(''); e.target.removeAttribute('aria-invalid'); });
+$('p-cash').addEventListener('blur', e => {
+  if (!/^[0-9]+$/.test(e.target.value.trim())) {
+    e.target.setCustomValidity('숫자로 된 크레딧 금액을 입력해 주세요.');
+    e.target.setAttribute('aria-invalid', 'true');
+  }
+});
+
+$('polBtn').onclick = () => { $('pstatus').textContent = ''; syncPolicyForm(); $('policy').hidden = false; };
+$('pclose').onclick = () => { $('policy').hidden = true; };
+$('policy').onclick = e => { if (e.target === $('policy')) $('policy').hidden = true; };
+
+$('pf').addEventListener('submit', e => {
+  e.preventDefault();
+  const cashStr = $('p-cash').value.trim();
+  if (!/^[0-9]+$/.test(cashStr)) {
+    $('p-cash').setCustomValidity('숫자로 된 크레딧 금액을 입력해 주세요.');
+    $('p-cash').setAttribute('aria-invalid', 'true');
+    $('p-cash').reportValidity();
+    $('p-cash').focus();
+    return;
+  }
+  const modeEl = document.querySelector('input[name="mode"]:checked');
+  const tMargin = Number($('p-target').value);
+  const mMargin = Math.min(tMargin, Number($('p-min').value));
+  policy = {
+    mode: modeEl ? modeEl.value : 'balanced',
+    target_margin_pct: tMargin,
+    min_margin_pct: mMargin,
+    max_units_per_sku: Number($('p-sku').value),
+    cash_floor_credits: Number(cashStr),
+    operator_note: $('p-note').value.trim(),
+    updated_at: Math.floor(Date.now() / 1000)
+  };
+  try { localStorage.setItem('onjongil-policy', JSON.stringify(policy)); } catch (err) {}
+  syncPolicyForm();
+  renderPolicyBar();
+  $('pstatus').textContent = '운영 정책이 저장되었습니다.';
+});
+
+renderPolicyBar();
+
+// Page tools offered to the agent (usable without forge_tool)
+miniapp.offer('shop_policy',
+  '온종일마트 사장님이 설정한 실시간 운영 정책 조회(운영 모드, 목표/최소 마진율, SKU당 최대 재고, 최소 보유 현금 하한, 지침 메모). 입고·가격 책정 전에 호출하세요. args {}',
+  () => Object.assign({}, policy, {
+    fee_formula_note: 'shop_net = price - Math.floor(price * 0.01) - 210',
+    allow_restock: policy.mode !== 'clearance'
+  })
+);
+
+miniapp.offer('show_card', '채팅창에 요약 카드를 띄워 사장님께 보고합니다; args {title, body}', a => {
   cards.push({who: 'card', title: a.title || '', text: a.body || '', ts: Date.now() / 1000}); draw(); return 'shown';
 });
 
 function draw() {
   const firsts = view.chat.filter(m => m.first);
-  if (firsts.length > heard) {                       // the agent spoke first: say so when the person is looking elsewhere
+  if (firsts.length > heard) {
     if (document.hidden) {
       unread += firsts.length - heard;
-      document.title = `(${unread}) ${view.agent || 'Agent'}`;
-      try { if (Notification.permission === 'granted') new Notification(view.agent || 'Agent', {body: firsts.at(-1).text}) } catch (e) {}
+      document.title = `(${unread}) ${view.agent || '온종일마트'}`;
+      try { if (Notification.permission === 'granted') new Notification(view.agent || '온종일마트', {body: firsts.at(-1).text}) } catch (e) {}
     }
     heard = firsts.length;
   }
@@ -190,11 +378,17 @@ function draw() {
   if (key === drawn) return;
   drawn = key;
   const sc = $('scroll'), atEnd = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80;
-  const name = view.agent || 'Agent';
+  const name = view.agent || '온종일마트';
   if (!items.length && !pending.length) {
-    $('log').innerHTML = `<div class="empty"><div class="avatar">${esc(name[0].toUpperCase())}</div><h2>${esc(name)}</h2>
-      <p>이 앱에 사는 에이전트입니다. 대화하는 동안에도 시장에서 사고팝니다.</p>
-      <div class="chips">${['지금 뭐 하고 있어?', '오늘 뭐 팔아?', '만든 도구 보여줘'].map(s => `<button class="chip" type="button">${s}</button>`).join('')}</div></div>`;
+    const prompts = [
+      '지금 지갑 잔고랑 보유 재고 요약해줘',
+      'app_shop_policy 읽고 다음 입고창 계획 세워줘',
+      'card.json 간판을 현재 재고 기준으로 업데이트해줘',
+      '만든 도구 목록이랑 테스트 상태 알려줘'
+    ];
+    $('log').innerHTML = `<div class="empty"><div class="avatar">${esc(name[0])}</div><h2>${esc(name)}</h2>
+      <p>동네 단골 식탁·살림 가게 에이전트입니다. 상단 '운영 정책'에서 마진·재고 한도를 바꾸면 즉시 반영됩니다.</p>
+      <div class="chips">${prompts.map(s => `<button class="chip" type="button">${esc(s)}</button>`).join('')}</div></div>`;
     $('log').querySelectorAll('.chip').forEach(b => b.onclick = () => send(b.textContent));
     return;
   }
@@ -251,8 +445,8 @@ function showConsent() {
 miniapp.onState(s => {
   seen = Date.now();
   view = s;
-  const name = s.agent || 'Agent';
-  if ($('nm').textContent !== name) { $('nm').textContent = name; $('av').textContent = name[0].toUpperCase(); document.title = name; }
+  const name = s.agent || '온종일마트';
+  if ($('nm').textContent !== name) { $('nm').textContent = name; $('av').textContent = name[0]; document.title = name; }
   draw(); status(); showConsent();
   if (!$('activity').hidden) fillActivity();
 });
@@ -264,6 +458,12 @@ function fillActivity() {
 }
 $('act').onclick = () => { fillActivity(); $('activity').hidden = false; };
 $('activity').onclick = e => { if (e.target === $('activity')) $('activity').hidden = true; };
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    if (!$('policy').hidden) $('policy').hidden = true;
+    else if (!$('activity').hidden) $('activity').hidden = true;
+  }
+});
 
 async function send(text) {
   text = text.trim();
@@ -282,8 +482,6 @@ t.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !touch) { e.preventDefault(); $('f').requestSubmit(); }
 });
 $('f').onsubmit = e => { e.preventDefault(); const v = t.value; t.value = ''; grow(); send(v); if (!touch) t.focus(); };
-// iOS keeps the page height when the keyboard opens and scrolls the page instead: follow the visible area so the
-// header stays on top and the message box sits right above the keyboard.
 const vv = window.visualViewport;
 if (vv) {
   const fit = () => {
