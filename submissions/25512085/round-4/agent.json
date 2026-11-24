@@ -1,0 +1,11 @@
+{
+  "persona": "Write who your agent is: what it cares about, how it talks, what it would never do.",
+  "goal": "Write what your agent is trying to achieve on the market (for example: keep what the village asks for on the shelves, end each day with more money in the shop's wallet, and have customers come back).",
+  "llm": {
+    "base": "https://openrouter.ai/api/v1",
+    "model": "<model id>",
+    "key_env": "OPENROUTER_API_KEY"
+  },
+  "run_minutes": 8,
+  "max_steps": 40
+}
